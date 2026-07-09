@@ -1,2 +1,29 @@
 # Local, per-machine Claude Code settings (permissions granted on this machine only)
 .claude/settings.local.json
+
+# Dependencies
+node_modules/
+
+# pnpm
+.pnpm-store/
+
+# Next.js build output
+.next/
+out/
+
+# Production build artifacts
+build/
+dist/
+
+# TypeScript incremental build info and auto-generated declaration file
+*.tsbuildinfo
+next-env.d.ts
+
+# Environment files with real secrets — .env.example files are intentionally tracked
+.env
+.env.local
+.env.*.local
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

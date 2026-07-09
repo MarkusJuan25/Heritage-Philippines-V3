@@ -1,0 +1,8 @@
+node_modules
+.next
+.pnpm-store
+pnpm-lock.yaml
+
+# Hand-maintained planning and governance documents are not auto-formatted.
+**/*.md
+.claude/

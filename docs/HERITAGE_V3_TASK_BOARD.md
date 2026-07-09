@@ -54,8 +54,8 @@ Tasks: confirm technical stack via an ADR (blueprint Section 16.2), environment 
 
 - [x] Draft technology stack ADR (`docs/adr/ADR-001-technology-stack.md`) with status Proposed
 - [x] Review and accept the technology stack ADR
-- [ ] Initialize package manager and workspace metadata after ADR acceptance
-- [ ] Scaffold the application folders after ADR acceptance
+- [x] Initialize package manager and workspace metadata after ADR acceptance
+- [x] Scaffold the application folders after ADR acceptance
 - [ ] Document local, staging, and production environment configuration
 - [ ] Establish authentication/session foundation
 - [ ] Implement database schema and reviewed migrations from the approved Phase 0 entity plan
