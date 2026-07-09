@@ -3,12 +3,14 @@
 ## Document Status
 
 - Project: Heritage Philippines V3
-- Status: Planning (Phase 0)
+- Status: Phase 0 complete — management-approved structure and workflow baseline
 - Repository: Heritage-Philippines-V3
 - Primary branch: `main`
 - Foundation: Heritage Philippines V2
-- Last updated: July 8, 2026
-- Revision notes: Incorporates approved role, domain-model, lead lifecycle, portal onboarding, client journey, proposal/ROS, messaging, payments, documents, database, and delivery-target planning decisions.
+- Last updated: July 9, 2026
+- Revision notes: Documents the project's planning position for roles, domain model, lead lifecycle, portal onboarding, client journey, proposal/ROS, messaging, payments, documents, database, and delivery targets, as drafted through July 8, 2026. On July 9, 2026, this document received a Phase 0 stakeholder-review remediation pass (expanded open-decision register, Client/TourPackage entities, reconciled conversion/acceptance lifecycle, refund/reversal semantics, module scope classification, role clarifications). Management approved the current V3 structure and workflow on July 9, 2026, closing the Phase 0 stakeholder review and sign-off gate; remaining open decisions stay tracked in `docs/HERITAGE_V3_DECISIONS_LOG.md`.
+- Management approval: The current Heritage Philippines V3 structure and workflow are approved as the Phase 0 planning baseline.
+- Creative delegation: The team has delegated creative freedom to refine visual design, UX, and implementation quality, subject to later stakeholder feedback. This freedom does not override security, privacy, authorization, audit, accessibility, mobile-first, or financial-integrity requirements.
 
 ---
 
@@ -80,6 +82,8 @@ Initial dashboard areas should include:
 - Activity logs
 - System settings
 
+Not every area listed above ships in the initial MVP. Section 15.5 classifies each named module as MVP (with its delivering phase) or deferred/post-MVP; that classification was approved by management at Phase 0 sign-off on July 9, 2026.
+
 ### 2.3 Client Dashboard
 
 The client dashboard will resemble a polished online-store account portal while remaining appropriate for travel services.
@@ -96,6 +100,13 @@ The client portal should include left-side navigation for:
 - Support & Messages
 - Profile
 - Settings
+
+These labels are the canonical portal navigation names; other documents must use them verbatim.
+
+Two clarifications:
+
+- **Regional Tours** is a read-only view of (or link to) the existing V2 public tour catalogue (Section 15.5) — it is not a new protected business-data module.
+- The portal's **My Journey** area is the authenticated view of the client's actual journey progress (Section 8). It is distinct from the public V2 "My Journey" planner feature (Section 2.1), which remains unchanged, keeps its existing public URLs, and must not be broken or replaced by the portal area.
 
 The portal should allow clients to view the current state of their travel arrangements without needing to request every update manually.
 
@@ -137,6 +148,10 @@ Capabilities:
 - View audit logs and activity logs
 - Grant the System Administrator role to another account (this role may only be granted by an existing System Administrator)
 
+Explicit boundaries:
+
+- System Administrator access exists for platform and security administration. It does not automatically grant unrestricted access to operational client data (leads, clients, proposals, bookings, payments, documents, or conversations); operational access follows the same role/assignment rules as any other staff account, and any administrative access to sensitive data is attributable and audited.
+
 ### 4.2 Admin / Manager
 
 Admin / Manager holds full operational oversight of the business but is not a platform-security role.
@@ -145,6 +160,8 @@ Capabilities:
 
 - Full visibility across leads, clients, proposals, bookings, payment plans, documents, and visa cases
 - Manage staff accounts' operational role assignments and lead/client/booking assignments
+- Prepare, send, resend, and revoke portal invitations (Section 7.3)
+- Record externally received proposal responses under the controlled fallback in Section 9.1
 - Oversee public website content
 - View operational and financial reports
 
@@ -165,6 +182,8 @@ Capabilities:
 - Prepare itineraries and booking preparation
 - Communicate with assigned clients via Support & Messages
 - Manage documents relevant to their assigned bookings (excluding visa-category documents)
+- Prepare, send, resend, and revoke portal invitations for their assigned clients (Section 7.3)
+- Record externally received proposal responses for their assigned clients under the controlled fallback in Section 9.1
 - Propose commercial terms (deposit, installments, due dates) for a payment plan
 - View payment progress for their assigned bookings (read-only)
 
@@ -182,10 +201,12 @@ Capabilities:
 
 - Review and approve payment plans proposed by Travel Consultants
 - Manage deposits, installments, and due dates
-- Confirm, reverse, and adjust payments
+- Confirm, reverse, refund, and adjust payments
 - Issue official receipts
 - Track balances, overdue installments, and payment history
 - Export financial reports
+
+Visibility scope: Finance / Accounting accesses financial records (payment plans, payments, receipts, balances) for the bookings assigned to it, per the assignment-based model (Section 4.7). Admin / Manager may grant broader operational scope where the finance workload requires it. Finance access does not automatically extend to unrelated documents or visa information.
 
 Explicit boundaries:
 
@@ -215,7 +236,7 @@ Clients may only access records that belong to their own account.
 Capabilities:
 
 - View and manage their own profile and settings
-- View their proposals/ROS and respond (accept, decline, request changes)
+- View their proposals/ROS and respond (Accept, Decline, or Request Changes)
 - View their bookings, itineraries, and journey progress
 - View their approved payment plans, payment history, balances, and receipts
 - Upload, view, and track their own documents
@@ -238,7 +259,7 @@ To avoid ambiguity in later technical planning, V3 treats the following as **dis
 - **Client** — An individual or party who has progressed beyond the lead stage, typically through conversion, and has (or has had) an active commercial relationship with Heritage Philippines.
 - **User account** — The authentication credential used to sign into the admin dashboard or client portal. A User account is an access mechanism, not a business record; both staff and clients have User accounts.
 - **Portal invitation** — A time-limited, single-use mechanism used to grant a Client the ability to create and activate a User account tied to their Client record.
-- **Proposal / ROS (Rundown of Service)** — A versioned travel plan and quotation prepared by a Travel Consultant for a Lead or Client.
+- **Proposal / ROS (Rundown of Service)** — A versioned travel plan and quotation prepared by a Travel Consultant for a Client (created or linked from a Lead through explicit staff conversion; Section 6.7).
 - **Booking** — A confirmed commercial engagement created once a Proposal / ROS is accepted.
 - **Payment plan** — The financial arrangement (deposit, installments, due dates) associated with a Booking.
 - **Visa case** — A conditional workflow record created only when visa assistance is required for a Client's Booking or destination.
@@ -250,13 +271,18 @@ An inquiry must **not** automatically create a portal user, client account, book
 ### 5.2 Conceptual Relationship
 
 ```text
-Lead --(qualification)--> Client --(invitation + activation)--> User Account (portal access)
-Client --(consultant drafts)--> Proposal / ROS --(client acceptance)--> Booking
+Lead --(qualification + explicit staff conversion)--> Client
+Client --(consultant drafts)--> Proposal / ROS --(client Accept)--> accepted version
+Accepted version --(explicit staff action)--> Booking
 Booking --(Finance approval)--> Payment Plan
 Booking --(conditional, only if required)--> Visa Case
+
+Client --(portal invitation)--> Portal Invitation --(account activation)--> User Account (portal access)
 ```
 
-A Lead can exist, be contacted, and even receive a Proposal without a User account, Booking, Payment plan, or Visa case ever being created — those only come into existence once the journey actually reaches that point.
+A Lead can exist, be contacted, and be consulted without any of the later records existing. The Client record, Proposal, Booking, Payment plan, and Visa case each come into existence only through the explicit actions shown above — never as a side effect of an inquiry being submitted (Section 5.1). An accepted proposal does not itself create a Booking; the Booking is created from the accepted version by an explicit staff action.
+
+The portal invitation / User account branch is a separate access-provisioning path, independent of the commercial chain above: a Client can be invited and activate portal access at any point, and — per Section 9.1 — a Proposal can be accepted, and a Booking created, even before the Client has portal access at all. Sections 7 and 8 describe the typical relative timing of invitation and activation within the canonical client journey; this diagram shows conceptual dependency, not a fixed calendar order.
 
 ---
 
@@ -271,14 +297,13 @@ A Lead can exist, be contacted, and even receive a Proposal without a User accou
 | Contacted | Initial outreach has been made to the prospective traveler. |
 | Consultation Scheduled | A consultation call or meeting has been arranged. |
 | Qualified | The lead has genuine, actionable travel intent. |
-| Proposal in Preparation | A Travel Consultant is drafting a Proposal / ROS. |
-| Proposal Sent | A proposal has been delivered to the lead for review. |
-| Awaiting Decision | The lead is reviewing the proposal; no response yet. |
-| Converted to Client | The lead has accepted and become a Client (see 6.7). |
-| Not Proceeding | The lead declined or is no longer interested. |
+| Converted to Client | Staff has explicitly created or linked a Client record for this qualified lead (see 6.7). |
+| Not Proceeding | The lead declined or is no longer interested before conversion. |
 | Duplicate | Identified as a repeat submission of an existing lead or client. |
 | Spam | Identified as a non-genuine or abusive submission. |
 | Archived | Inactive lead retained per retention rules and excluded from active pipelines. |
+
+Once a lead is Converted to Client, subsequent commercial progress — proposal preparation, delivery, and the client's decision — is tracked on the Client record and its Proposal / ROS (Section 9), not through further Lead statuses. Earlier drafts of this lifecycle carried proposal-stage statuses on the Lead itself; those stages now belong to the Proposal, consistent with the canonical journey in Section 8.
 
 ### 6.2 Duplicate Detection
 
@@ -304,13 +329,19 @@ Each lead records its originating channel (for example: quote request, package p
 
 ### 6.7 Conversion to Client
 
-Converting a lead to Converted to Client status creates or links a Client record using the data already captured on the Lead, without duplicating it. The original Lead record is preserved for historical and audit reference rather than deleted, per the separation rule in Section 5.
+Conversion is an explicit staff action, normally performed once a lead is Qualified and before a Proposal / ROS is prepared (Sections 5.2 and 8). Converting a lead to Converted to Client status creates or links a Client record using the data already captured on the Lead, without duplicating it. The original Lead record is preserved for historical and audit reference rather than deleted, per the separation rule in Section 5. Conversion never creates a User account, Booking, Payment plan, or Visa case as a side effect (Section 5.1).
+
+### 6.8 Manual Lead Creation
+
+Authorized staff may also create leads manually for inquiries that arrive by phone, walk-in, referral, or other offline channels. Manually created leads record their inquiry source (Section 6.6) and pass through the same duplicate detection (Section 6.2) and lifecycle (Section 6.1) as leads submitted through the public site.
 
 ---
 
 ## 7. Client Portal Onboarding
 
 The initial release uses **invitation-based signup only**. Public self-service account creation is not part of the initial release.
+
+Invitations are issued for converted Clients (Section 6.7). In the canonical journey (Section 8), an invitation is typically sent once a Proposal / ROS is ready for review, so that proposal review and the client's response happen inside the portal.
 
 ### 7.1 Portal Invitation Statuses
 
@@ -328,8 +359,14 @@ The initial release uses **invitation-based signup only**. Public self-service a
 
 - **Time-limited** — every invitation has an expiration window, after which it moves to Invitation Expired.
 - **Single-use** — an invitation token can activate exactly one account.
-- **Correctly linked** — each invitation is tied to the specific Lead or Client record it was issued for, so activation attaches to the correct existing record rather than creating a new one.
+- **Correctly linked** — each invitation is tied to the specific Client record it was issued for, so activation attaches to the correct existing record rather than creating a new one.
 - **Resendable without duplication** — staff can resend an invitation; this invalidates the prior token and returns the status to Invitation Sent, without creating a duplicate Client or a duplicate PortalInvitation record.
+
+### 7.3 Invitation Authority
+
+- Admin / Manager, and the Travel Consultant assigned to the client, may prepare, send, resend, and revoke portal invitations.
+- Resend and revoke actions are audited with the acting staff account, timestamp, and (for revocation) a reason, consistent with Section 14.9.
+- No other role issues or revokes invitations.
 
 ---
 
@@ -337,15 +374,17 @@ The initial release uses **invitation-based signup only**. Public self-service a
 
 ```text
 Browse public website
-  -> Submit inquiry
-  -> Lead qualification
+  -> Submit inquiry (creates a Lead only; see Section 5.1)
+  -> Staff review and outreach
   -> Consultation
-  -> Proposal / ROS
-  -> Client review
-  -> Accept, decline, or request changes
-  -> Portal invitation
+  -> Lead qualification
+  -> Explicit staff conversion: Lead -> Client (Section 6.7)
+  -> Proposal / ROS prepared for the Client (Section 9)
+  -> Portal invitation sent (Section 7)
   -> Account activation
-  -> Booking
+  -> Client reviews the current proposal version in the portal
+  -> Accept, Decline, or Request Changes
+  -> Booking created from the accepted version by explicit staff action
   -> Deposit or payment plan
   -> Conditional visa workflow
   -> Documents and itinerary preparation
@@ -353,6 +392,8 @@ Browse public website
   -> In progress
   -> Completed
 ```
+
+Portal-based review and acceptance is the canonical and preferred flow. Where a client's response is received outside the portal (for example, before the client has activated an account), staff record it under the controlled fallback in Section 9.1 — the sequence of conversion, proposal versioning, explicit booking creation, and audit rules is the same.
 
 Once a booking exists, payments, documents, visa processing, messaging, and itinerary updates may all progress **in parallel** rather than strictly in sequence — for example, a client may be making installment payments, uploading requested documents, and having a visa case reviewed at the same time.
 
@@ -362,15 +403,26 @@ A visa case is only created when the client or destination actually requires vis
 
 ## 9. Proposal and ROS Management
 
-- A Travel Consultant creates the initial ROS (Rundown of Service) draft for a lead or client.
+- A Travel Consultant creates the initial ROS (Rundown of Service) draft for a Client (created or linked through explicit lead conversion, Section 6.7).
 - Every ROS carries a **version number**; each edit after the first creates a new version rather than overwriting the previous one.
 - Full **revision history** is retained: every version remains stored and traceable.
 - The client sees only the **current client-visible version**; earlier versions become **superseded** but are not deleted.
-- A client can **request changes**, prompting the consultant to prepare a new version.
-- A client can **accept** or **reject** the current version.
+- The client's response to the current version is always one of exactly three terms, used consistently across the platform: **Accept**, **Decline**, or **Request Changes**.
+- A client can **Request Changes**, prompting the consultant to prepare a new version.
+- A client can **Accept** or **Decline** the current version.
 - Acceptance is **timestamped** and recorded as part of the audit trail.
 - Once a version is accepted, it becomes **locked** — it cannot be edited further. Any subsequent change requires a **new revision** to be created and, if needed, re-accepted.
+- An accepted version does not itself create a Booking; the Booking is created from the accepted version by an explicit staff action (Sections 5.1 and 5.2).
 - The client **cannot directly edit** the ROS; all content changes are made by the Travel Consultant in response to client feedback.
+
+### 9.1 Recording a Response Received Outside the Portal
+
+Portal-based client acceptance is the preferred flow once an account is activated. So that staff can run the full workflow end to end before the client portal exists (Phase 2) — or when a client responds by phone, email, or in person — a response received outside the portal may be recorded under these controls:
+
+- Only the Travel Consultant assigned to that Client, or an Admin / Manager, may record an externally received response.
+- The record must capture: the acceptance method (e.g., phone, email, in person), the client's acceptance timestamp, the acting staff account, and a supporting evidence reference — a pointer or identifier to the originating email, call log, or meeting note (for example, a linked Message/MessageAttachment or a brief reference note), not a full copy of the correspondence, unrelated personal information, or identity documents — sufficient for dispute resolution and audit. Full audit history is retained per Section 14.9, consistent with the data-minimization principle in `.claude/rules/database-security.md`.
+- The exact **ProposalVersion** the client responded to is identified and, on acceptance, **locked** exactly as in a portal acceptance.
+- The record is attributed to the staff member who entered it and must never be represented as the client personally authenticating or acting in the portal.
 
 ---
 
@@ -417,28 +469,28 @@ The following are **post-MVP enhancements**, not launch requirements:
 ### 11.1 Balance Calculation
 
 ```text
-Confirmed amount paid = Sum of confirmed payments only
+Confirmed amount paid = Sum of payments currently in Confirmed status
 Remaining balance    = Booking total - Confirmed amount paid
 ```
 
-Pending, rejected, cancelled, failed, refunded, or reversed payments must **not** reduce the remaining balance. Only payments in the Confirmed status count toward the confirmed amount paid.
+Only the net amount of currently confirmed, non-reversed, non-refunded payments reduces the remaining balance. Pending, Rejected, Cancelled, and Failed payments never count toward the confirmed amount paid. A payment that was Confirmed but is later **Reversed** or **Refunded** stops counting from the moment its status changes — which normally increases the remaining balance by that payment's amount. If a refund should not create a new amount owed (for example, a cancelled service), Finance / Accounting must separately record an approved booking-total or payment-plan adjustment (Section 11.5); the balance formula itself is never bent to achieve that outcome.
 
 ### 11.2 Payment Statuses
 
-| Status | Effect on balance |
+| Status | Meaning and effect on balance |
 | --- | --- |
-| Pending | No effect — awaiting confirmation. |
-| Confirmed | Reduces remaining balance. |
-| Rejected | No effect. |
-| Cancelled | No effect. |
-| Failed | No effect. |
-| Refunded | No effect (does not restore balance owed). |
-| Reversed | No effect (previously confirmed payment reversed; balance returns to unpaid). |
+| Pending | Awaiting confirmation. Never counts toward confirmed amount paid. |
+| Confirmed | Counts toward confirmed amount paid; reduces the remaining balance. |
+| Rejected | Not accepted. Never counts. |
+| Cancelled | Withdrawn before confirmation. Never counts. |
+| Failed | Did not complete. Never counts. |
+| Refunded | Money was returned to the client after a valid confirmed payment. No longer counts toward confirmed amount paid; the remaining balance normally increases by the refunded amount. Any exception is handled through a separate approved adjustment (Sections 11.1 and 11.5), never by leaving the refunded payment counted. |
+| Reversed | An erroneous or invalid confirmation was corrected or voided. No longer counts toward confirmed amount paid; the remaining balance returns to what it was before the erroneous confirmation. |
 
 ### 11.3 Roles and Responsibilities
 
 - **Travel Consultant** proposes commercial terms (deposit amount, installment structure, due dates) as part of booking preparation.
-- **Finance / Accounting** reviews and approves the payment plan before it becomes active and client-visible, and subsequently confirms, reverses, and adjusts payments.
+- **Finance / Accounting** reviews and approves the payment plan before it becomes active and client-visible, and subsequently confirms, reverses, refunds, and adjusts payments.
 - **Client** views only approved payment plans, confirmed payment history, current balance, and receipts.
 
 ### 11.4 Payment Plan Structure
@@ -451,9 +503,11 @@ Pending, rejected, cancelled, failed, refunded, or reversed payments must **not*
 ### 11.5 Payment Lifecycle Actions
 
 - **Payment confirmation** — performed by Finance / Accounting only.
-- **Payment reversal** — performed by Finance / Accounting only, with a recorded reason.
-- **Payment adjustment** — performed by Finance / Accounting only (for example, correcting an amount or applying an approved discount).
+- **Payment reversal** — performed by Finance / Accounting only, with a recorded reason. A reversal corrects or voids an erroneous payment confirmation; it does not represent money returned to the client.
+- **Payment refund** — performed by Finance / Accounting only. A refund represents money returned to the client after a valid confirmed payment. Every refund records the reason, timestamp, acting user, amount, and before/after values (Section 11.7). Whether a refund produces a refund reference, credit note, or equivalent document is an open implementation detail pending management's choice (Section 16.2).
+- **Payment adjustment** — performed by Finance / Accounting only (for example, correcting an amount, applying an approved discount, or recording the approved booking-total/payment-plan change that accompanies a refund which should not create a new amount owed).
 - **Official receipts** — generated only for confirmed payments, issued by Finance / Accounting.
+- **History preservation** — original receipts and payment records are never deleted. When a payment is refunded or reversed, the payment and its receipt are marked accordingly and the complete history and audit trail are preserved.
 
 ### 11.6 Reminders and Overdue Handling
 
@@ -462,7 +516,7 @@ Pending, rejected, cancelled, failed, refunded, or reversed payments must **not*
 
 ### 11.7 Audit History
 
-Every payment confirmation, reversal, and adjustment is recorded with the acting user, timestamp, reason, and before/after values, consistent with the ActivityLog and AuditLog entities in Section 14.
+Every payment confirmation, reversal, refund, and adjustment is recorded with the acting user, timestamp, reason, and before/after values, consistent with the ActivityLog and AuditLog entities in Section 14.
 
 ---
 
@@ -491,7 +545,7 @@ Documents are organized by category (for example: identity documents, visa docum
 - Malware scanning on uploaded files.
 - Access and download audit logs for every document.
 
-For sensitive files (identity documents, visas, financial documents), a secure expiring download link is recommended over sending the file as an ordinary email attachment, since email attachments cannot be revoked once sent.
+Sensitive files (identity documents, visas, financial documents) must be shared only through secure signed or expiring download links; they must never be sent as ordinary email attachments, since an attachment cannot be revoked once sent.
 
 ---
 
@@ -611,14 +665,15 @@ The following entities are proposed at a conceptual level. No schema (Prisma or 
 - **Role** — one of the six defined roles (Section 4), a named collection of permissions.
 - **Permission** — a discrete capability (e.g., "confirm payment") that can be associated with a Role.
 - **StaffProfile** — staff-specific profile information (name, title, contact details) linked to a User.
-- **ClientProfile** — client-specific profile information linked to a User and to the Client business record.
+- **ClientProfile** — the portal/profile extension for a client, created at account activation and linked to both the Client business record (Section 14.2) and the activated User account. It does not replace the Client record and does not exist before activation.
 - **StaffAssignment** — records which staff member is assigned to which lead, client, booking, or visa case, implementing the assignment-based access model.
 - **PortalInvitation** — the time-limited, single-use invitation record described in Section 7.
 
-### 14.2 Leads
+### 14.2 Leads and Clients
 
 - **Lead** — an inquiry record, prior to conversion, as described in Section 5 and Section 6.
 - **LeadStatusHistory** — a timestamped record of every status change a Lead has gone through.
+- **Client** — the business record for a party with an active or past commercial relationship, created or linked through explicit lead conversion (Section 6.7). A Client exists independently of any User account or ClientProfile and may exist before — or entirely without — portal activation. Proposals, bookings, documents, visa cases, and conversations attach to the Client.
 
 ### 14.3 Communication
 
@@ -629,14 +684,15 @@ The following entities are proposed at a conceptual level. No schema (Prisma or 
 
 ### 14.4 Sales
 
-- **Proposal** — the ROS record for a lead or client, described in Section 9.
+- **Proposal** — the ROS record for a Client, described in Section 9.
 - **ProposalVersion** — an individual versioned draft of a Proposal, preserving revision history.
-- **ProposalAcceptance** — the timestamped record of a client's acceptance of a specific ProposalVersion.
+- **ProposalAcceptance** — the record of a client's response (Accept, Decline, or Request Changes — Section 9) to a specific ProposalVersion, always including a response timestamp. A portal-based response additionally links the authenticated client session; a response recorded under the Section 9.1 external fallback additionally captures the response method or channel (e.g., phone, email, in person), the acting staff account, and a supporting evidence reference (a pointer or identifier — e.g., a linked Message/MessageAttachment or a brief reference note — rather than a full copy of correspondence), consistent with the data-minimization principle in `.claude/rules/database-security.md`.
 
 ### 14.5 Bookings
 
-- **Booking** — the confirmed commercial engagement created from an accepted Proposal, described in Section 5 and Section 13.4.
+- **Booking** — the confirmed commercial engagement created from an accepted Proposal by an explicit staff action, described in Section 5 and Section 13.4.
 - **ItineraryVersion** — a versioned itinerary associated with a Booking.
+- **TourPackage** — a conceptual catalogue record for the bookable tour or package a Booking references (Section 13.4). It represents the bookable catalogue item only; it does not by itself imply a full tours/website content-management module in the MVP (Sections 15.5 and 16.2).
 
 ### 14.6 Payments
 
@@ -662,7 +718,7 @@ The following entities are proposed at a conceptual level. No schema (Prisma or 
 
 - **Notification** — a system-generated alert to a User (staff or client) about a relevant event.
 - **ActivityLog** — a general record of user actions across the platform, used for operational visibility.
-- **AuditLog** — an append-only record of sensitive or security-relevant actions (payment confirmations/reversals, permission changes, role assignments), which no role, including Admin / Manager, can modify (Section 4.2).
+- **AuditLog** — an append-only record of sensitive or security-relevant actions (payment confirmations/reversals/refunds/adjustments, permission changes, role assignments), which no role, including Admin / Manager, can modify (Section 4.2).
 
 ---
 
@@ -705,6 +761,26 @@ MVP means Minimum Viable Product: the smallest complete and secure version of th
 - AI automation
 - Advanced business intelligence
 - Nonessential animations and cosmetic enhancements
+- Full Tours and Packages content management (unless separately approved)
+- General website content management (unless separately approved)
+- Full System Settings user interface
+- Nonessential dashboard customization
+
+### 15.5 Module Scope Classification
+
+Sections 2.2 and 2.3 name modules that are not all part of the initial MVP. The classification below is **approved as part of the Phase 0 structure and workflow baseline** (see `docs/HERITAGE_V3_DECISIONS_LOG.md` D-005 and D-010):
+
+| Module | Classification |
+| --- | --- |
+| Staff accounts, roles, permissions, and assignments | Required MVP foundation (Phase 1), limited to the management capability necessary to operate the six roles in Section 4. |
+| Dashboard overview | MVP — Phase 2. |
+| Regional Tours (client portal) | MVP — Phase 3, as a read-only reuse of, or link to, the existing V2 public tour catalogue. Not a new protected business-data module. |
+| Basic finance exports (Section 4.4) | MVP — Phase 4, delivered with the payment work. |
+| Full Tours and Packages content management | Deferred unless separately approved. |
+| General Website Content management | Deferred unless separately approved. |
+| Advanced Reports / business intelligence | Post-MVP (Section 15.4). |
+| Full System Settings user interface | Post-MVP. Configuration the MVP needs is handled through controlled environment or deployment configuration, not an in-app settings UI. |
+| Nonessential dashboard customization and cosmetic enhancements | Post-MVP (Section 15.4). |
 
 ---
 
@@ -727,5 +803,10 @@ The following items are recognized as unresolved and should be settled before or
 - Final installment/overdue status list (Section 11.6).
 - Final visa case status list (Section 13.8).
 - Lead assignment rule (manual assignment vs. an automated rule such as round robin), currently assumed manual by default (Section 6.4).
+- **Technology stack** — no framework, language, database engine, or ORM has been selected. The stack must be decided through an Architecture Decision Record (ADR) before any application scaffolding begins (Phase 1 start; see `.claude/rules/architecture.md`).
+- **Currency strategy** — proposed: the Philippine peso (PHP) is the single billing currency for the MVP, with the Booking currency field (Section 13.4) fixed to it and multi-currency support deferred. This proposal is **pending explicit stakeholder approval**; it affects Phase 1 schema design and blocks Phase 4 payment work.
+- **Retention periods** for documents, activity logs, audit logs, and other personal data — unresolved pending the privacy/compliance review below. No final retention or deletion durations have been set.
+- **Philippine privacy/compliance posture** — applicability of the Data Privacy Act of 2012 and related obligations, consent requirements, breach-response planning, and the retention policy above. Requires stakeholder/legal review before Phase 6 (Security and Production Hardening).
+- **Refund documentation type** — whether a refund produces a refund reference, credit note, or equivalent record (Section 11.5); an open implementation detail until management selects the document type.
 
 ---

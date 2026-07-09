@@ -17,12 +17,12 @@
 
 ## Destructive and Irreversible Actions
 
-- Actions such as revoking access, reversing a payment, rejecting a document, or archiving a lead require an explicit confirmation step.
+- Actions such as revoking access, reversing or refunding a payment, rejecting a document, or archiving a lead require an explicit confirmation step.
 - Irreversible actions must be logged with actor, timestamp, and reason.
 
 ## Audit Trails
 
-- Sensitive changes (role/permission changes, payment confirmation/reversal/adjustment, document approval/rejection, visa status changes, booking status changes) are recorded per `backend.md`'s auditability rule and are visible to System Administrator and Admin / Manager.
+- Sensitive changes (role/permission changes, payment confirmation/reversal/refund/adjustment, document approval/rejection, visa status changes, booking status changes) are recorded per `backend.md`'s auditability rule and are visible to System Administrator and Admin / Manager.
 
 ## Permission Granularity
 

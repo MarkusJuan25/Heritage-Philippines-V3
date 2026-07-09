@@ -26,7 +26,7 @@
 
 ## Audit Records
 
-- Sensitive operations (payment confirm/reverse/adjust, role/permission change, document approve/reject, visa status change) write an `AuditLog` entry with actor, timestamp, action, and before/after state, per blueprint Section 14.9.
+- Sensitive operations (payment confirm/reverse/refund/adjust, role/permission change, document approve/reject, visa status change) write an `AuditLog` entry with actor, timestamp, action, and before/after state, per blueprint Section 14.9.
 
 ## Monetary Values
 

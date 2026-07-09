@@ -40,12 +40,12 @@ Do not skip layers or let a route handler call the database directly.
 
 ## Idempotency for Sensitive Operations
 
-- Payment confirmation, payment reversal, payment adjustment, and document-replacement operations must be safe to retry without double-applying an effect (e.g., a duplicate confirmation request must not double-count a payment).
+- Payment confirmation, payment reversal, payment refund, payment adjustment, and document-replacement operations must be safe to retry without double-applying an effect (e.g., a duplicate confirmation or refund request must not double-count a payment).
 - Design these endpoints to accept an idempotency key or equivalent safeguard once implementation begins.
 
 ## Auditability
 
-- Record who did what and when for: account/role changes, booking status changes, payment confirmations/reversals/adjustments, document approvals/rejections, and visa-status changes — consistent with the `ActivityLog`/`AuditLog` entities in blueprint Section 14.9.
+- Record who did what and when for: account/role changes, booking status changes, payment confirmations/reversals/refunds/adjustments, document approvals/rejections, and visa-status changes — consistent with the `ActivityLog`/`AuditLog` entities in blueprint Section 14.9.
 - Audit records are append-only; no role can modify or delete them (blueprint Section 4.2).
 
 ## Background Jobs

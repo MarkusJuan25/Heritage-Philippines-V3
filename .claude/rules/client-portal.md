@@ -7,11 +7,11 @@ The client portal exposes exactly these areas (blueprint Section 2.3):
 - Home / Overview
 - My Journey
 - Bookings
-- Payments and Receipts
+- Payments & Receipts
 - Documents
 - Visa Center
 - Regional Tours
-- Support
+- Support & Messages
 - Profile
 - Settings
 
