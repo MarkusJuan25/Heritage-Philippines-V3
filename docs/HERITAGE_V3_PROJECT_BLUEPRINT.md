@@ -189,8 +189,7 @@ Capabilities:
 
 Explicit boundaries:
 
-- Cannot confirm payments
-- Cannot reverse payments
+- Cannot confirm, reverse, refund, or adjust payments
 - Cannot issue official receipts
 
 ### 4.4 Finance / Accounting
@@ -226,7 +225,7 @@ Capabilities:
 
 Explicit boundaries:
 
-- Cannot confirm payments
+- Cannot confirm, reverse, refund, or adjust payments
 - Cannot edit bookings unrelated to their assigned visa cases
 
 ### 4.6 Client
@@ -803,7 +802,7 @@ The following items are recognized as unresolved and should be settled before or
 - Final installment/overdue status list (Section 11.6).
 - Final visa case status list (Section 13.8).
 - Lead assignment rule (manual assignment vs. an automated rule such as round robin), currently assumed manual by default (Section 6.4).
-- **Technology stack** — no framework, language, database engine, or ORM has been selected. The stack must be decided through an Architecture Decision Record (ADR) before any application scaffolding begins (Phase 1 start; see `.claude/rules/architecture.md`).
+- **Technology stack** — Accepted July 9, 2026 via `docs/adr/ADR-001-technology-stack.md` (TypeScript, Node.js, Next.js, PostgreSQL, Prisma, Zod, pnpm, modular monolith); see `docs/HERITAGE_V3_DECISIONS_LOG.md` D-001. No longer an open decision; retained here for historical traceability of this decision register.
 - **Currency strategy** — proposed: the Philippine peso (PHP) is the single billing currency for the MVP, with the Booking currency field (Section 13.4) fixed to it and multi-currency support deferred. This proposal is **pending explicit stakeholder approval**; it affects Phase 1 schema design and blocks Phase 4 payment work.
 - **Retention periods** for documents, activity logs, audit logs, and other personal data — unresolved pending the privacy/compliance review below. No final retention or deletion durations have been set.
 - **Philippine privacy/compliance posture** — applicability of the Data Privacy Act of 2012 and related obligations, consent requirements, breach-response planning, and the retention policy above. Requires stakeholder/legal review before Phase 6 (Security and Production Hardening).

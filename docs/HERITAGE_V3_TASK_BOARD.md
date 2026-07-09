@@ -3,7 +3,7 @@
 ## Document Status
 
 - Project: Heritage Philippines V3
-- Current phase: Phase 0 — Blueprint and Architecture (complete; Phase 1 not started)
+- Current phase: Phase 1 — Project Foundation (active; ADR proposed, implementation not started)
 - Last updated: July 9, 2026
 - Companion document: `docs/HERITAGE_V3_PROJECT_BLUEPRINT.md`
 - Management approval: Management approved the current V3 structure and workflow on July 9, 2026.
@@ -49,6 +49,20 @@ Phase 0 is complete when the project blueprint covers roles, domain concepts, le
 ## Phase 1: Project Foundation — July 15–26, 2026
 
 Tasks: confirm technical stack via an ADR (blueprint Section 16.2), environment configuration, authentication foundation, database schema implementation from the Phase 0 entity plan, base role/permission enforcement, staff account/role/assignment management needed to operate the six roles (blueprint Section 15.5), CI basics, deployment pipeline skeleton.
+
+### Checklist
+
+- [x] Draft technology stack ADR (`docs/adr/ADR-001-technology-stack.md`) with status Proposed
+- [x] Review and accept the technology stack ADR
+- [ ] Initialize package manager and workspace metadata after ADR acceptance
+- [ ] Scaffold the application folders after ADR acceptance
+- [ ] Document local, staging, and production environment configuration
+- [ ] Establish authentication/session foundation
+- [ ] Implement database schema and reviewed migrations from the approved Phase 0 entity plan
+- [ ] Implement base role, permission, assignment, and client-ownership enforcement
+- [ ] Implement staff account, role, and assignment management needed to operate the six approved roles
+- [ ] Establish CI basics using real repository commands once tooling exists
+- [ ] Create deployment pipeline skeleton for staging and production
 
 **Completion gate:** A staff member can log in with a role-restricted account against a real database, and the implemented schema matches the approved Phase 0 entity plan.
 

@@ -4,7 +4,7 @@
 
 Heritage Philippines V3 extends the stable Heritage Philippines V2 public tourism website into a full operations platform: a secure admin dashboard for staff and a client dashboard/portal for travelers, connecting leads, bookings, payments, documents, visa assistance, and support into one system.
 
-This repository is currently in **Phase 0 — planning**. No application code, database, or dashboard has been scaffolded yet.
+This repository is currently in **Phase 1 — Project Foundation**. No application code, database, or dashboard has been scaffolded yet; the technology-stack ADR (`docs/adr/ADR-001-technology-stack.md`) was accepted on July 9, 2026, and implementation proceeds under Phase 1's own task board checklist and completion gate.
 
 ## 2. Source of Truth
 

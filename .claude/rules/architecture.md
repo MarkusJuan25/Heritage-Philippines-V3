@@ -2,7 +2,7 @@
 
 ## Status of Technology Decisions
 
-No technology stack has been formally selected in `docs/HERITAGE_V3_PROJECT_BLUEPRINT.md`. Framework, language, database engine, and ORM choices (including any prior mention of Prisma in planning notes) are **candidates, not confirmed decisions**. Treat any specific technology choice as requiring an Architecture Decision Record (ADR) before Phase 1 implementation begins. Do not scaffold a stack based on assumption.
+The technology stack is accepted. `docs/adr/ADR-001-technology-stack.md` (Status: Accepted, July 9, 2026) records the stack: TypeScript, Node.js, Next.js, PostgreSQL, Prisma, Zod, pnpm, modular monolith. `docs/HERITAGE_V3_DECISIONS_LOG.md` D-001 reflects this as Accepted, and the corresponding `docs/HERITAGE_V3_TASK_BOARD.md` Phase 1 checklist item is checked. Scaffolding, package installation, and schema creation each still proceed only under their own Phase 1 checklist item and completion gate — ADR acceptance authorizes the stack decision, not any specific implementation step ahead of its own checklist entry.
 
 The Heritage Philippines V2 codebase is the reference for the public site's existing stack, but it is not present in this repository — confirm its actual technology by inspecting the V2 repository directly when reuse/migration work begins, rather than assuming.
 

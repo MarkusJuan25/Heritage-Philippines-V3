@@ -12,10 +12,11 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 
 ## D-001 — Technology stack
 
-- **Status:** Open
-- **Decision needed:** Framework, language, database engine, and ORM for V3. No stack has been selected; any prior mention of specific technologies is a candidate only.
-- **Constraint:** Must be decided through an Architecture Decision Record (ADR) before any application scaffolding begins (`.claude/rules/architecture.md`; blueprint Section 16.2).
-- **Blocks:** Phase 1 start.
+- **Status:** Accepted
+- **Date approved:** July 9, 2026
+- **Decision:** `docs/adr/ADR-001-technology-stack.md` is the authoritative technology-stack decision for Heritage Philippines V3: a TypeScript / Node.js active-LTS / Next.js modular monolith with pnpm, resource-oriented JSON API routes, shared Zod validation contracts, PostgreSQL, Prisma, reviewed migrations, private object storage, outbound email notifications, GitHub Actions CI, and separate staging/production environments, deployed to a VPS-class (or equivalent) environment supporting persistent Node.js processes, background work, secure environment-variable configuration, health checks, and controlled deployments.
+- **Constraint:** This preserves Hostinger's VPS tier (or an equivalent VPS/managed-Node host) as a realistic deployment target without selecting a final hosting vendor; final hosting-provider, database-provider, storage-provider, and email-provider selection remain deferred (ADR-001 "Items Intentionally Deferred"). Acceptance of the stack does not itself authorize any implementation step ahead of its own Phase 1 gate in `docs/HERITAGE_V3_TASK_BOARD.md`.
+- **Effect:** Closes the ADR-001 review/acceptance gate. Phase 1 implementation tasks that were waiting on ADR acceptance (package manager initialization, application-folder scaffolding, and subsequent Phase 1 work) may now proceed under their own Task Board checklist and completion gate; this entry does not itself mark any Phase 1 task complete or advance the project beyond Phase 1.
 
 ## D-002 — Currency strategy
 
