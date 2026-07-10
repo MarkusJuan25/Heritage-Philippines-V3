@@ -1,12 +1,20 @@
 # Heritage Philippines V3 — Phase 1 CI quality gate.
 #
-# Runs the repository's existing formatting, lint, type-check, and build
-# commands on every pull request and every push to main. This is the Phase 1
-# "CI basics" checklist item (docs/HERITAGE_V3_TASK_BOARD.md). It
-# intentionally does not deploy anywhere, touch secrets, or reach any
-# external service — see docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md
+# Runs the repository's existing formatting, lint, type-check, test, and
+# build commands on every pull request and every push to main. This is the
+# Phase 1 "CI basics" checklist item (docs/HERITAGE_V3_TASK_BOARD.md). It
+# intentionally does not deploy anywhere, touch a real database, or reach
+# any external service — see docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md
 # Section 12 for the CI/CD secret-handling standard a future deployment job
 # must follow.
+#
+# The Build step sets fixed, non-secret placeholder values for DATABASE_URL/
+# BETTER_AUTH_SECRET/BETTER_AUTH_URL. `next build` imports every route
+# module (including api/auth and api/me) to collect page data, which
+# constructs the Prisma client and Better Auth config and so requires these
+# variables to be *present* — it never actually connects to a database or
+# serves a request during the build. These are not real credentials and
+# grant no access to anything.
 
 name: CI
 
@@ -57,5 +65,12 @@ jobs:
       - name: Type check
         run: pnpm typecheck
 
+      - name: Test
+        run: pnpm test
+
       - name: Build
         run: pnpm build
+        env:
+          DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci_build_placeholder'
+          BETTER_AUTH_SECRET: 'ci-build-placeholder-secret-not-a-real-credential-000000'
+          BETTER_AUTH_URL: 'http://localhost:3000'

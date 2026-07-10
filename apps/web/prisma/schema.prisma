@@ -1,0 +1,107 @@
+// Heritage Philippines V3 — Prisma schema.
+//
+// Phase 1 scope only: the shared identity model (User) and the six
+// blueprint-approved roles (blueprint Section 4), plus the Session/Account/
+// Verification models Better Auth's Prisma adapter requires for
+// database-backed authentication (docs/HERITAGE_V3_DECISIONS_LOG.md D-011).
+//
+// Deliberately out of scope here (deferred to the "staff account, role, and
+// assignment management" and later Phase 1/2 checklist items in
+// docs/HERITAGE_V3_TASK_BOARD.md): StaffProfile, ClientProfile,
+// StaffAssignment, Lead, Client, and every later-phase business entity in
+// blueprint Section 14.
+//
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// The six roles approved in blueprint Section 4. A User has exactly one Role.
+enum Role {
+  SYSTEM_ADMINISTRATOR
+  ADMIN_MANAGER
+  TRAVEL_CONSULTANT
+  FINANCE_ACCOUNTING
+  VISA_DOCUMENTATION
+  CLIENT
+}
+
+// The shared identity model for staff and clients (blueprint Section 14.1).
+// Better Auth owns id/name/email/emailVerified/image/createdAt/updatedAt;
+// `role` is our own additional field (see src/lib/auth/auth.ts), and is
+// never settable through the public sign-up API (input: false there) —
+// only a direct, trusted, server-side write (e.g. the seed script, or a
+// future authorized staff-management feature) may change it.
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  role          Role     @default(CLIENT)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions Session[]
+  accounts Account[]
+
+  @@map("user")
+}
+
+// Database-backed session (blueprint Section 4; ADR-001's "secure, HttpOnly,
+// SameSite cookies and database-backed session state").
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("session")
+}
+
+// One row per sign-in method linked to a User. For our credential (email +
+// password) login, providerId = "credential" and `password` holds the
+// Better Auth-hashed (scrypt) password — never a plaintext value.
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("account")
+}
+
+// Short-lived tokens (email verification, password reset, etc.).
+model Verification {
+  id         String    @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime? @default(now())
+  updatedAt  DateTime? @updatedAt
+
+  @@map("verification")
+}

@@ -19,6 +19,10 @@ dist/
 *.tsbuildinfo
 next-env.d.ts
 
+# Generated Prisma Client (regenerated via `prisma generate`, a postinstall
+# script — see apps/web/prisma/schema.prisma's generator `output`)
+apps/web/src/generated/
+
 # Environment files with real secrets — .env.example files are intentionally tracked
 .env
 .env.local

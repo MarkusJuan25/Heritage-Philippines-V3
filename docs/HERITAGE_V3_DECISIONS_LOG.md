@@ -70,6 +70,15 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 - **Constraint:** Creative freedom does not override security, privacy, authorization, audit, accessibility, mobile-first, or financial-integrity requirements. Open technical, retention, privacy/compliance, currency, lead-assignment, status-list, and refund-documentation decisions remain governed by their own entries until explicitly resolved.
 - **Effect:** Closes the Phase 0 stakeholder review and sign-off gate in `docs/HERITAGE_V3_TASK_BOARD.md`; does not mark Phase 1 or later implementation tasks complete.
 
+## D-011 — Authentication library selection
+
+- **Status:** Accepted
+- **Date accepted:** July 10, 2026
+- **Decision:** Better Auth, with its official Prisma/PostgreSQL adapter (`better-auth/adapters/prisma`), is the authentication and session library for Heritage Philippines V3. This fulfills ADR-001's deferred "Select a vetted authentication/security library after checking its official documentation" follow-up action (ADR-001, "Immediate, pre-Phase-1-scaffolding").
+- **Rationale:** Evaluated against Lucia and Auth.js (NextAuth). Lucia was deprecated by its maintainer in March 2025 and is no longer distributed as an installable library (repositioned as an educational resource) — disqualified as "maintained." Auth.js's Credentials provider is architecturally hardcoded to JWT-only sessions and cannot use real database-backed sessions without unsupported workarounds, conflicting with ADR-001's stated preference for "database-backed session state" and this project's rule against inventing custom session mechanics. Better Auth supports credentials-based login and database-backed sessions natively through its official Prisma adapter, hashes passwords internally (scrypt) rather than requiring custom cryptography, and supports disabling public self-service sign-up (`emailAndPassword.disableSignUp`) while keeping sign-in enabled — required to satisfy blueprint Section 7's invitation-only-signup rule. As of September 2025 the Auth.js/NextAuth maintainers themselves joined the Better Auth project and now recommend it for new projects. It requires no serverless-specific hosting platform, remaining compatible with Hostinger-managed VPS-class Node.js hosting (ADR-001).
+- **Constraint:** This selects a library within ADR-001's already-approved architecture (Next.js, Prisma, PostgreSQL, cookie-based sessions) and does not alter the accepted technology stack. It does not implement custom cryptography, password hashing, or session-token primitives, consistent with ADR-001's security requirements.
+- **Effect:** Implements the technology choice underlying the Phase 1 "Establish authentication/session foundation" checklist item in `docs/HERITAGE_V3_TASK_BOARD.md`. Final MFA/SSO and any additional auth providers remain open per blueprint Section 16.2.
+
 ---
 
 Update this log when a decision's status changes; do not delete entries — supersede them.

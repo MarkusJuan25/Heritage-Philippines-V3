@@ -3,7 +3,7 @@
 ## Document Status
 
 - Project: Heritage Philippines V3
-- Current phase: Phase 1 — Project Foundation (active; ADR accepted, workspace/tooling scaffold, environment-configuration documentation, and CI quality-gate workflow complete; remaining checklist items not started)
+- Current phase: Phase 1 — Project Foundation (active; ADR accepted, workspace/tooling scaffold, environment-configuration documentation, and CI quality-gate workflow complete. The authentication/session foundation (Better Auth + Prisma-backed sessions, role guards, login/logout) is implemented and unit/smoke-tested, but real sign-in against a live PostgreSQL database has not yet been verified in this environment. The Prisma/PostgreSQL schema and migrations currently cover only the shared identity model (User/Session/Account/Verification + the six approved roles) — not yet the full Phase 0 entity plan — and enforcement currently covers role checks only, not permissions, staff assignments, or client ownership. Staff account/role/assignment management and the deployment pipeline skeleton remain not started. See `docs/HERITAGE_V3_DECISIONS_LOG.md` D-011.)
 - Last updated: July 10, 2026
 - Companion document: `docs/HERITAGE_V3_PROJECT_BLUEPRINT.md`
 - Management approval: Management approved the current V3 structure and workflow on July 9, 2026.
@@ -57,7 +57,7 @@ Tasks: confirm technical stack via an ADR (blueprint Section 16.2), environment 
 - [x] Initialize package manager and workspace metadata after ADR acceptance
 - [x] Scaffold the application folders after ADR acceptance
 - [x] Document local, staging, and production environment configuration
-- [ ] Establish authentication/session foundation
+- [x] Establish authentication/session foundation — implemented (Better Auth + Prisma-backed sessions, role guards, login/logout); real PostgreSQL sign-in not yet verified, see note below
 - [ ] Implement database schema and reviewed migrations from the approved Phase 0 entity plan
 - [ ] Implement base role, permission, assignment, and client-ownership enforcement
 - [ ] Implement staff account, role, and assignment management needed to operate the six approved roles
