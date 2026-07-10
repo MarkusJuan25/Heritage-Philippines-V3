@@ -3,8 +3,8 @@
 ## Document Status
 
 - Project: Heritage Philippines V3
-- Current phase: Phase 1 — Project Foundation (active; ADR proposed, implementation not started)
-- Last updated: July 9, 2026
+- Current phase: Phase 1 — Project Foundation (active; ADR accepted, workspace/tooling scaffold and environment-configuration documentation complete, remaining checklist items not started)
+- Last updated: July 10, 2026
 - Companion document: `docs/HERITAGE_V3_PROJECT_BLUEPRINT.md`
 - Management approval: Management approved the current V3 structure and workflow on July 9, 2026.
 - Creative delegation: The team may refine visual design, UX, and implementation quality, subject to later stakeholder feedback, without overriding security, privacy, authorization, audit, accessibility, mobile-first, or financial-integrity requirements.
@@ -56,7 +56,7 @@ Tasks: confirm technical stack via an ADR (blueprint Section 16.2), environment 
 - [x] Review and accept the technology stack ADR
 - [x] Initialize package manager and workspace metadata after ADR acceptance
 - [x] Scaffold the application folders after ADR acceptance
-- [ ] Document local, staging, and production environment configuration
+- [x] Document local, staging, and production environment configuration
 - [ ] Establish authentication/session foundation
 - [ ] Implement database schema and reviewed migrations from the approved Phase 0 entity plan
 - [ ] Implement base role, permission, assignment, and client-ownership enforcement

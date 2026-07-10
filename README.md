@@ -24,3 +24,9 @@ pnpm format:check # Prettier, check only
 ```
 
 The web application lives in `apps/web` (Next.js, TypeScript). A liveness check is available at `/api/health` once the app is running.
+
+## Environment Configuration
+
+No environment variables are required yet — `apps/web/.env.example` is a template only and is intentionally empty of variables at this stage. When you do need local values, copy it to `apps/web/.env.local` (gitignored) and fill them in there; never commit real secrets, connection strings, tokens, or domains.
+
+The full local/staging/production isolation strategy, environment-variable naming convention, server-only vs. browser-exposed (`NEXT_PUBLIC_`) rules, secret generation/rotation/revocation/exposure handling, and the database/auth/email/storage configuration boundaries are documented in `docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md`. Read it before introducing any new environment variable or secret.
