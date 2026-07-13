@@ -12,8 +12,14 @@
     "start": "pnpm --filter web start",
     "lint": "pnpm --filter web lint",
     "typecheck": "pnpm --filter web typecheck",
+    "test": "pnpm --filter web test",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "db:generate": "pnpm --filter web db:generate",
+    "db:migrate:dev": "pnpm --filter web db:migrate:dev",
+    "db:migrate:deploy": "pnpm --filter web db:migrate:deploy",
+    "db:seed": "pnpm --filter web db:seed",
+    "db:studio": "pnpm --filter web db:studio"
   },
   "devDependencies": {
     "prettier": "3.9.4"
