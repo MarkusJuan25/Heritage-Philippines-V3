@@ -1,15 +1,23 @@
 // Heritage Philippines V3 — Prisma schema.
 //
-// Phase 1 scope only: the shared identity model (User) and the six
-// blueprint-approved roles (blueprint Section 4), plus the Session/Account/
+// Phase 1 scope: the shared identity model (User) and the six
+// blueprint-approved roles (blueprint Section 4); the Session/Account/
 // Verification models Better Auth's Prisma adapter requires for
-// database-backed authentication (docs/HERITAGE_V3_DECISIONS_LOG.md D-011).
+// database-backed authentication (docs/HERITAGE_V3_DECISIONS_LOG.md D-011);
+// and, as Checkpoint 1 (schema only) of the "staff account, role, and
+// assignment management" checklist item, StaffProfile and AuditLog
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-012).
 //
-// Deliberately out of scope here (deferred to the "staff account, role, and
-// assignment management" and later Phase 1/2 checklist items in
-// docs/HERITAGE_V3_TASK_BOARD.md): StaffProfile, ClientProfile,
-// StaffAssignment, Lead, Client, and every later-phase business entity in
-// blueprint Section 14.
+// Deliberately out of scope here:
+// - StaffAssignment — deferred until its first real target entity (Lead,
+//   Client, Booking, or VisaCase) exists; see D-012.
+// - A Permission database table — permissions stay expressed in code
+//   (src/lib/auth/roles.ts) for Phase 1, not modeled as data; see D-012.
+// - Better Auth admin-plugin fields (banned/banReason/banExpires/
+//   impersonatedBy) — the plugin was evaluated and rejected; see D-012.
+// - ClientProfile, Lead, Client, and every later-phase business entity in
+//   blueprint Section 14 — later Phase 1/2+ checklist items in
+//   docs/HERITAGE_V3_TASK_BOARD.md.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -32,6 +40,22 @@ enum Role {
   CLIENT
 }
 
+// --- Invariants for the staff-management service (later checkpoints) ---
+// Not implemented by this schema-only checkpoint; recorded here so they are
+// not lost before the service checkpoint builds on this schema. See D-012.
+// 1. Demoting or deactivating the last active SYSTEM_ADMINISTRATOR must be
+//    prevented; checking "is this the last one" and applying the change
+//    must run inside a serializable transaction with retry handling, so a
+//    concurrent request cannot race past the check.
+// 2. A role change or deactivation must revoke the affected user's
+//    sessions atomically with the mutation — the same transaction, never a
+//    follow-up step that could fail independently.
+// 3. Staff-management endpoints accept STAFF_ROLES only (roles.ts) — CLIENT
+//    is never a valid value for a staff account's role.
+// 4. Credential creation must never log or write a plaintext password to
+//    AuditLog or anywhere else — only the hashed credential (already how
+//    Better Auth's own `hashPassword` works) is ever persisted.
+
 // The shared identity model for staff and clients (blueprint Section 14.1).
 // Better Auth owns id/name/email/emailVerified/image/createdAt/updatedAt;
 // `role` is our own additional field (see src/lib/auth/auth.ts), and is
@@ -45,11 +69,19 @@ model User {
   emailVerified Boolean  @default(false)
   image         String?
   role          Role     @default(CLIENT)
+  // Staff deactivation switch (blueprint Section 4.1's "deactivate platform
+  // user accounts"). See the invariants block above this model — changing
+  // this field is SYSTEM_ADMINISTRATOR-only, must reject self-action, and
+  // must never be set by anything other than the future staff-management
+  // service.
+  isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  sessions Session[]
-  accounts Account[]
+  sessions     Session[]
+  accounts     Account[]
+  staffProfile StaffProfile?
+  auditLogs    AuditLog[]
 
   @@map("user")
 }
@@ -104,4 +136,46 @@ model Verification {
   updatedAt  DateTime? @updatedAt
 
   @@map("verification")
+}
+
+// Staff-specific profile information linked to a User (blueprint Section
+// 14.1). Deliberately minimal for this checkpoint (title/phone only) —
+// User already owns name and email; this model must not duplicate either.
+model StaffProfile {
+  id        String   @id
+  userId    String   @unique
+  title     String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("staff_profile")
+}
+
+// Append-only record of sensitive/security-relevant staff actions
+// (blueprint Section 14.9; .claude/rules/backend.md Auditability;
+// .claude/rules/database-security.md Audit Records). No role, including
+// SYSTEM_ADMINISTRATOR, may modify or delete a row once written — the
+// repository layer built in a later checkpoint must only ever INSERT here,
+// never UPDATE or DELETE. `onDelete: Restrict` on the actor relation so an
+// actor's User row can never be removed out from under an existing audit
+// trail (accounts are deactivated, never deleted, under this model).
+model AuditLog {
+  id          String   @id
+  actorId     String
+  action      String
+  entityType  String
+  entityId    String
+  beforeState Json?
+  afterState  Json?
+  createdAt   DateTime @default(now())
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_log")
 }

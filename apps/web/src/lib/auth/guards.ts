@@ -65,9 +65,28 @@ export async function requireUser(allowedRoles?: readonly AppRole[]): Promise<Au
   return user as AuthenticatedUser;
 }
 
-type RoleGuardedHandler = (
+// The shape of dynamic-segment values Next.js's App Router resolves —
+// a plain string for a `[id]`-style segment, a string array for a
+// `[...slug]`-style catch-all.
+type RouteParams = Record<string, string | string[]>;
+
+// Mirrors exactly what Next.js's App Router passes as a route handler's
+// second argument: `{ params: Promise<Params> }`. Critically, Next passes
+// this for *every* route, including one with no dynamic segments at all —
+// there `Params` is `{}` (an empty, key-less object), not an object whose
+// properties are individually forbidden. Modeling the generic around the
+// params *value* (`Params`) rather than around the whole context object
+// keeps that distinction intact: an empty object literal `{}` is
+// structurally assignable to `Record<string, never>` (it has no
+// properties to violate the index signature), so the default case still
+// type-checks against Next's actual `{ params: Promise<{}> }`.
+type RouteContext<Params extends RouteParams = Record<string, never>> = {
+  params: Promise<Params>;
+};
+
+type RoleGuardedHandler<Params extends RouteParams = Record<string, never>> = (
   request: Request,
-  context: { user: AuthenticatedUser },
+  context: { user: AuthenticatedUser } & RouteContext<Params>,
 ) => Promise<Response> | Response;
 
 /**
@@ -75,15 +94,26 @@ type RoleGuardedHandler = (
  * `{ error: { code, message } }` envelope .claude/rules/backend.md requires
  * — never a stack trace or internal error detail — for both the 401/403
  * cases and any unexpected failure inside the handler itself.
+ *
+ * The `Params` generic forwards whatever dynamic-segment values Next.js
+ * resolves (e.g. `withRole<{ id: string }>(...)` for a `/[id]` route, so
+ * `handler` receives `{ user, params: Promise<{ id: string }> }`) through
+ * to `handler` alongside `user`, so dynamic routes don't need to duplicate
+ * `requireUser` calls outside this shared guard. Non-dynamic callers don't
+ * need to specify `Params` at all — it defaults to an empty params object,
+ * matching what Next.js itself passes for a route with no dynamic
+ * segments. Either way, the returned function's second parameter mirrors
+ * Next's own route-handler signature exactly, so it type-checks as a valid
+ * Next.js route handler for both static and dynamic routes.
  */
-export function withRole(
+export function withRole<Params extends RouteParams = Record<string, never>>(
   allowedRoles: readonly AppRole[] | undefined,
-  handler: RoleGuardedHandler,
+  handler: RoleGuardedHandler<Params>,
 ) {
-  return async (request: Request): Promise<Response> => {
+  return async (request: Request, context: RouteContext<Params>): Promise<Response> => {
     try {
       const user = await requireUser(allowedRoles);
-      return await handler(request, { user });
+      return await handler(request, { user, ...context });
     } catch (error) {
       if (error instanceof AuthorizationError) {
         return NextResponse.json(
