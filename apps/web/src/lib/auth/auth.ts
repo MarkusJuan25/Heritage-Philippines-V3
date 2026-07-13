@@ -4,6 +4,7 @@ import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { prisma } from '@/lib/db';
 import { getServerEnv } from '@/lib/env';
 
+import { assertAccountIsActive } from './account-status';
 import { ROLES } from './roles';
 
 const env = getServerEnv();
@@ -50,6 +51,29 @@ export const auth = betterAuth({
         // server-side write (e.g. the seed script, or a future authorized
         // staff-management feature) may set a user's role.
         input: false,
+      },
+    },
+  },
+
+  // Blocks a deactivated account (blueprint Section 4.1's "deactivate
+  // platform user accounts"; see the staff-management service and the
+  // schema invariants in apps/web/prisma/schema.prisma) from creating a
+  // new session, i.e. from signing back in — without this, deactivation
+  // would only revoke a user's *existing* sessions and be trivially
+  // bypassed by signing in again. Runs on every session creation
+  // (sign-in), not just staff-management's own writes, since `isActive`
+  // is a shared User field. See src/lib/auth/account-status.ts for why
+  // the check itself lives in a separate, unit-testable module.
+  databaseHooks: {
+    session: {
+      create: {
+        async before(session) {
+          const user = await prisma.user.findUnique({
+            where: { id: session.userId },
+            select: { isActive: true },
+          });
+          assertAccountIsActive(user);
+        },
       },
     },
   },

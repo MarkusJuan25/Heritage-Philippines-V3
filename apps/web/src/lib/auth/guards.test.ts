@@ -35,6 +35,14 @@ function request(): Request {
   return new Request('http://localhost/api/test');
 }
 
+// What Next.js's App Router actually passes as a route handler's second
+// argument for a route with no dynamic segments — an empty params object,
+// not the absence of a second argument at all (see guards.ts's
+// `RouteContext` doc comment).
+function staticContext(): { params: Promise<Record<string, never>> } {
+  return { params: Promise.resolve({}) };
+}
+
 describe('withRole', () => {
   beforeEach(() => {
     getSessionMock.mockReset();
@@ -44,7 +52,7 @@ describe('withRole', () => {
     getSessionMock.mockResolvedValue(null);
     const handler = vi.fn();
 
-    const response = await withRole(undefined, handler)(request());
+    const response = await withRole(undefined, handler)(request(), staticContext());
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
@@ -57,7 +65,7 @@ describe('withRole', () => {
     getSessionMock.mockResolvedValue({ user: CLIENT_USER });
     const handler = vi.fn();
 
-    const response = await withRole(['ADMIN_MANAGER'], handler)(request());
+    const response = await withRole(['ADMIN_MANAGER'], handler)(request(), staticContext());
 
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({
@@ -66,17 +74,26 @@ describe('withRole', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it('invokes the handler with the authenticated user when authorized', async () => {
+  it('invokes the handler with the authenticated user when authorized, given a static route context shaped as { params: Promise<{}> }', async () => {
     getSessionMock.mockResolvedValue({ user: ADMIN_USER });
+    // This handler ignores route context entirely (only destructures
+    // `user`) — the same shape as the project's real non-dynamic route
+    // handlers (e.g. api/me/route.ts, api/staff/route.ts). It must keep
+    // working unchanged even though `withRole` now always receives a real
+    // `{ params }` context from Next.js.
     const handler = vi.fn(async (_request: Request, { user }: { user: AuthenticatedUser }) =>
       Response.json({ receivedRole: user.role }),
     );
 
-    const response = await withRole(['ADMIN_MANAGER'], handler)(request());
+    const response = await withRole(['ADMIN_MANAGER'], handler)(request(), staticContext());
 
     expect(handler).toHaveBeenCalledTimes(1);
-    const [, context] = handler.mock.calls[0] as [Request, { user: AuthenticatedUser }];
+    const [, context] = handler.mock.calls[0] as [
+      Request,
+      { user: AuthenticatedUser; params: Promise<Record<string, never>> },
+    ];
     expect(context.user).toEqual(ADMIN_USER);
+    await expect(context.params).resolves.toEqual({});
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ receivedRole: 'ADMIN_MANAGER' });
   });
@@ -87,7 +104,7 @@ describe('withRole', () => {
       throw new Error('boom: internal detail that must never reach the client');
     });
 
-    const response = await withRole(undefined, handler)(request());
+    const response = await withRole(undefined, handler)(request(), staticContext());
 
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({
@@ -95,15 +112,34 @@ describe('withRole', () => {
     });
   });
 
+  it('forwards a dynamic route context (e.g. { params: Promise<{ id: string }> }) to the handler alongside user', async () => {
+    getSessionMock.mockResolvedValue({ user: ADMIN_USER });
+    const handler = vi.fn(
+      async (
+        _request: Request,
+        { user, params }: { user: AuthenticatedUser; params: Promise<{ id: string }> },
+      ) => Response.json({ receivedRole: user.role, id: (await params).id }),
+    );
+
+    const guarded = withRole<{ id: string }>(['ADMIN_MANAGER'], handler);
+    const response = await guarded(request(), { params: Promise.resolve({ id: 'staff-123' }) });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    await expect(response.json()).resolves.toEqual({
+      receivedRole: 'ADMIN_MANAGER',
+      id: 'staff-123',
+    });
+  });
+
   it('uses the same { error: { code, message } } envelope shape across every failure case', async () => {
     getSessionMock.mockResolvedValue(null);
-    const unauthenticated = await withRole(undefined, vi.fn())(request());
+    const unauthenticated = await withRole(undefined, vi.fn())(request(), staticContext());
     const unauthenticatedBody = (await unauthenticated.json()) as {
       error: { code: string; message: string };
     };
 
     getSessionMock.mockResolvedValue({ user: CLIENT_USER });
-    const forbidden = await withRole(['ADMIN_MANAGER'], vi.fn())(request());
+    const forbidden = await withRole(['ADMIN_MANAGER'], vi.fn())(request(), staticContext());
     const forbiddenBody = (await forbidden.json()) as { error: { code: string; message: string } };
 
     for (const body of [unauthenticatedBody, forbiddenBody]) {
