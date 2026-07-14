@@ -11,12 +11,17 @@
 // "database schema implementation" checklist item (blueprint Sections 4, 5,
 // 6, 13.2, 13.3, 14.1, 14.2).
 //
-// This remains a schema-only checkpoint: no migration has been generated or
-// applied for Lead/LeadStatusHistory/Client/StaffAssignment yet. Two
-// PostgreSQL constraints Prisma cannot express in this schema language must
-// be added by hand to that generated migration's SQL before it is applied —
-// see the StaffAssignment model doc comment below, which states both
-// requirements (and the raw SQL for each) directly.
+// The Lead/LeadStatusHistory/Client/StaffAssignment models are covered by
+// migration `20260714024613_lead_client_assignment_foundation`, which
+// includes the two hand-added PostgreSQL constraints Prisma's schema
+// language cannot express on its own (the StaffAssignment
+// leadId/clientId XOR CHECK constraint and its two partial unique
+// indexes — see the StaffAssignment model doc comment below, which states
+// both requirements and their raw SQL directly). This migration's presence
+// in this repository does not by itself confirm it has been applied to
+// every environment (local, staging, production) — see
+// docs/HERITAGE_V3_TASK_BOARD.md for the current, up-to-date status of
+// which environments have actually run it.
 //
 // Deliberately out of scope here:
 // - Booking and VisaCase as StaffAssignment targets — deferred until those

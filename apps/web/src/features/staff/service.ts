@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 import { generateRandomString, hashPassword } from 'better-auth/crypto';
 
-import { Prisma } from '@/generated/prisma/client';
+import type { Prisma } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
+import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 import type { AppRole } from '@/lib/auth/roles';
 
@@ -13,44 +14,13 @@ import * as repository from './repository';
 import type { StaffAccountRecord } from './repository';
 import type { CreateStaffAccountInput, ListStaffAccountsQuery } from './schemas';
 
-const MAX_SERIALIZABLE_RETRIES = 3;
-
-function isSerializationConflict(error: unknown): boolean {
-  // Prisma's P2034: "Transaction failed due to a write conflict or a
-  // deadlock. Please retry your transaction" — the expected, retryable
-  // outcome of two concurrent SERIALIZABLE transactions racing on the
-  // same "is this the last admin" check (apps/web/prisma/schema.prisma
-  // invariant #1).
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034';
-}
-
-/**
- * Runs `fn` inside a SERIALIZABLE transaction, retrying only on a Postgres
- * serialization conflict (never on a business-rule rejection, which
- * `StaffManagementError` represents and which propagates immediately).
- * Required by apps/web/prisma/schema.prisma invariant #1: the
- * "is this the last active SYSTEM_ADMINISTRATOR" check and the change it
- * gates must run in one serializable transaction with retry handling, so
- * two concurrent requests can't both read "2 admins remain" and both
- * proceed to demote/deactivate one each, leaving zero.
- */
-async function runSerializableWithRetry<T>(
-  fn: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await prisma.$transaction(fn, {
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      });
-    } catch (error) {
-      if (!isSerializationConflict(error) || attempt >= MAX_SERIALIZABLE_RETRIES) {
-        throw error;
-      }
-      // Brief jittered backoff before retrying a lost serialization race.
-      await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
-    }
-  }
-}
+// SERIALIZABLE-transaction-with-retry is a shared utility
+// (@/lib/serializable-transaction) — see its doc comment for why. Required
+// here by apps/web/prisma/schema.prisma invariant #1: the "is this the
+// last active SYSTEM_ADMINISTRATOR" check and the change it gates must run
+// in one serializable transaction with retry handling, so two concurrent
+// requests can't both read "2 admins remain" and both proceed to
+// demote/deactivate one each, leaving zero.
 
 function assertNotSelfAction(actor: AuthenticatedUser, targetId: string): void {
   if (actor.id === targetId) {
