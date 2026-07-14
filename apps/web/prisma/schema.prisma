@@ -1,22 +1,37 @@
 // Heritage Philippines V3 — Prisma schema.
 //
-// Phase 1 scope: the shared identity model (User) and the six
+// Phase 1 scope so far: the shared identity model (User) and the six
 // blueprint-approved roles (blueprint Section 4); the Session/Account/
 // Verification models Better Auth's Prisma adapter requires for
 // database-backed authentication (docs/HERITAGE_V3_DECISIONS_LOG.md D-011);
-// and, as Checkpoint 1 (schema only) of the "staff account, role, and
-// assignment management" checklist item, StaffProfile and AuditLog
-// (docs/HERITAGE_V3_DECISIONS_LOG.md D-012).
+// StaffProfile and AuditLog, as Checkpoint 1 (schema only) of the "staff
+// account, role, and assignment management" checklist item
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-012); and Lead, LeadStatusHistory,
+// Client, and StaffAssignment, as Checkpoint 1 (schema only) of the
+// "database schema implementation" checklist item (blueprint Sections 4, 5,
+// 6, 13.2, 13.3, 14.1, 14.2).
+//
+// This remains a schema-only checkpoint: no migration has been generated or
+// applied for Lead/LeadStatusHistory/Client/StaffAssignment yet. Two
+// PostgreSQL constraints Prisma cannot express in this schema language must
+// be added by hand to that generated migration's SQL before it is applied —
+// see the StaffAssignment model doc comment below, which states both
+// requirements (and the raw SQL for each) directly.
 //
 // Deliberately out of scope here:
-// - StaffAssignment — deferred until its first real target entity (Lead,
-//   Client, Booking, or VisaCase) exists; see D-012.
+// - Booking and VisaCase as StaffAssignment targets — deferred until those
+//   entities exist (blueprint Section 14.1).
+// - A Client status field/enum — the blueprint does not define an approved
+//   status list for it anywhere; see the Client model doc comment.
 // - A Permission database table — permissions stay expressed in code
 //   (src/lib/auth/roles.ts) for Phase 1, not modeled as data; see D-012.
 // - Better Auth admin-plugin fields (banned/banReason/banExpires/
 //   impersonatedBy) — the plugin was evaluated and rejected; see D-012.
-// - ClientProfile, Lead, Client, and every later-phase business entity in
-//   blueprint Section 14 — later Phase 1/2+ checklist items in
+// - ClientProfile and PortalInvitation — the portal-activation work they
+//   belong to has not started (blueprint Section 14.1).
+// - Every other later-phase business entity in blueprint Section 14
+//   (Proposal, Booking, PaymentPlan, Document, VisaCase, Conversation,
+//   etc.) — later Phase 2+ checklist items in
 //   docs/HERITAGE_V3_TASK_BOARD.md.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
@@ -82,6 +97,15 @@ model User {
   accounts     Account[]
   staffProfile StaffProfile?
   auditLogs    AuditLog[]
+
+  // Checkpoint 1 of the Lead/Client/StaffAssignment foundation (blueprint
+  // Sections 6, 14.1, 14.2). Each relation is explicitly named because
+  // StaffAssignment alone has two independent relations to User
+  // (assignee vs. assigner); see the LeadStatusHistory and StaffAssignment
+  // model doc comments below for the onDelete: Restrict rationale.
+  leadStatusChanges       LeadStatusHistory[] @relation("LeadStatusHistoryActor")
+  staffAssignmentsHeld    StaffAssignment[]   @relation("StaffAssignmentAssignee")
+  staffAssignmentsGranted StaffAssignment[]   @relation("StaffAssignmentAssigner")
 
   @@map("user")
 }
@@ -178,4 +202,249 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_log")
+}
+
+// --- Checkpoint 1: Lead / Client / LeadStatusHistory / StaffAssignment ---
+// Schema only. No service layer, API, UI, or seed data. See the file header
+// for what remains deliberately out of scope.
+
+// The ten approved Lead lifecycle statuses (blueprint Section 6.1). Once a
+// lead reaches CONVERTED_TO_CLIENT, further commercial progress is tracked
+// on the Client's Proposal / ROS (Section 9), never as additional Lead
+// statuses (Section 6.1's closing note).
+enum LeadStatus {
+  NEW
+  UNDER_REVIEW
+  CONTACTED
+  CONSULTATION_SCHEDULED
+  QUALIFIED
+  CONVERTED_TO_CLIENT
+  NOT_PROCEEDING
+  DUPLICATE
+  SPAM
+  ARCHIVED
+}
+
+// An inquiry record prior to conversion (blueprint Section 5, Section 6;
+// entity planning Section 14.2). A Lead is never auto-created into a
+// Client, Booking, Payment plan, or Visa case (Section 5.1's non-automatic
+// creation rule).
+//
+// `email`/`phone` hold contact details as submitted or recorded;
+// `normalizedEmail`/`normalizedPhone` hold a lookup-normalized form of the
+// same values for duplicate detection (Section 6.2). Matches must be
+// surfaced for staff review, never silently rejected or merged, so these
+// are indexed but deliberately not `@unique`
+// (.claude/rules/database-security.md Constraints and Indexes).
+//
+// Field-level requiredness for contact fields (`email`/`phone`) beyond
+// `fullName` is intentionally not enforced here: the blueprint does not
+// define which contact channel(s) each intake source guarantees (public
+// quote request vs. phone/walk-in/referral per Section 6.8), so exact
+// required-field validation belongs at the service-layer Zod boundary
+// (.claude/rules/architecture.md) once that intake contract is confirmed,
+// not in the database schema now. `source` below is schema-required (NOT
+// NULL) because every intake path — public or manual — always captures an
+// originating channel (Section 6.6, Section 6.8).
+model Lead {
+  id     String     @id
+  status LeadStatus @default(NEW)
+
+  fullName String
+  email    String?
+  phone    String?
+
+  // Lookup-normalized forms of email/phone, maintained by the service
+  // layer (e.g. lowercased/trimmed email, digits-only phone) — see the
+  // model doc comment above.
+  normalizedEmail String?
+  normalizedPhone String?
+
+  // Free-text originating channel (blueprint Section 6.6) — deliberately
+  // not an enum; the blueprint gives examples (quote request, package
+  // planner, contact page, phone/walk-in/referral per Section 6.8) but does
+  // not define a closed source list.
+  source String
+
+  notes String?
+
+  // Set only by an explicit staff conversion action (Section 6.7); never
+  // auto-populated. `onDelete: Restrict` so a Client can't be removed out
+  // from under a Lead that documents its own conversion history.
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statusHistory LeadStatusHistory[]
+  assignments   StaffAssignment[]
+
+  @@index([status])
+  @@index([normalizedEmail])
+  @@index([normalizedPhone])
+  @@index([clientId])
+  @@map("lead")
+}
+
+// Timestamped record of every Lead status change (blueprint Section 14.2).
+// Append-only in practice: the repository layer built in a later checkpoint
+// must only ever INSERT here, following AuditLog's convention above.
+//
+// `previousStatus` is nullable because a lead's first history row (its
+// initial NEW status, whether created by public submission or manual staff
+// entry per Section 6.8) has no prior status to record. `changedByUserId`
+// is nullable for the same reason — a public-submission-created initial
+// status has no staff actor.
+model LeadStatusHistory {
+  id String @id
+
+  leadId String
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Restrict)
+
+  previousStatus LeadStatus?
+  newStatus      LeadStatus
+
+  // `onDelete: Restrict`: never silently drop the acting user's identity
+  // off an existing history row (accounts are deactivated, never deleted,
+  // per the AuditLog model's convention above).
+  changedByUserId String?
+  changedBy       User?   @relation("LeadStatusHistoryActor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@index([leadId])
+  @@index([changedByUserId])
+  @@index([createdAt])
+  @@map("lead_status_history")
+}
+
+// The business record for a party with an active or past commercial
+// relationship (blueprint Section 5, Section 14.2). Distinct from both
+// `User` (the login credential) and `ClientProfile` (the portal/profile
+// extension created at account activation — Section 14.1; not part of this
+// checkpoint, see the file header). A Client can exist without portal
+// access, and is created or linked only through explicit lead conversion
+// (Section 6.7) — never automatically.
+//
+// Deliberately excluded from this checkpoint: a client-status field/enum —
+// blueprint Section 13.3 lists "Client status" as a record field, but the
+// blueprint does not define an approved status list for it anywhere (unlike
+// LeadStatus in Section 6.1; Section 16.2's open-decisions list does not
+// yet carry this item either), so adding one now would be guessing.
+// "Assigned staff member" (Section 13.3) is represented via
+// `StaffAssignment` below, not a direct field, to avoid a
+// second, competing source of truth for assignment. Proposals, bookings,
+// payment records, documents, and support history (Section 13.3) are
+// later-phase entities and are not modeled yet.
+model Client {
+  id String @id
+
+  fullName String
+  email    String?
+  phone    String?
+
+  // Lookup-normalized forms of email/phone — see the Lead model's doc
+  // comment above; the same duplicate-detection rationale (Section 6.2)
+  // applies when checking new leads against existing clients.
+  normalizedEmail String?
+  normalizedPhone String?
+
+  // Optional profile fields, each directly justified by blueprint Section
+  // 13.3's client-record field list, collected only when operationally
+  // necessary (Section 13.3; .claude/rules/database-security.md Data
+  // Minimization). `emergencyContact` is kept as one free-text field rather
+  // than a structured name/phone split the blueprint doesn't itself define.
+  address          String?
+  nationality      String?
+  dateOfBirth      DateTime? @db.Date
+  emergencyContact String?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Historical leads converted to, or later linked to, this Client — a
+  // Client may be linked from multiple Lead rows over time.
+  leads       Lead[]
+  assignments StaffAssignment[]
+
+  @@index([normalizedEmail])
+  @@index([normalizedPhone])
+  @@map("client")
+}
+
+// Records which staff member is assigned to which Lead or Client — the
+// first slice of the assignment-based access model (blueprint Section 4,
+// Section 14.1). Booking and VisaCase targets are deferred to the
+// checkpoint that introduces those entities.
+//
+// Exactly one of `leadId` / `clientId` must be non-null. Prisma's schema
+// language cannot express a column-level XOR/CHECK constraint, so the
+// create-only migration generated from this model must add a raw SQL CHECK
+// constraint by hand, e.g.:
+//   ALTER TABLE "staff_assignment" ADD CONSTRAINT
+//     "staff_assignment_lead_xor_client"
+//     CHECK (num_nonnulls("leadId", "clientId") = 1);
+// Do not rely on application code alone to hold this invariant.
+//
+// `endedAt` is null while the assignment is active and is set once revoked,
+// so assignment history is preserved rather than deleted
+// (.claude/rules/admin-dashboard.md Destructive and Irreversible Actions).
+// This schema also cannot express a partial unique index limiting a
+// Lead/Client to at most one active assignment; the same hand-written
+// migration must add, e.g.:
+//   CREATE UNIQUE INDEX "staff_assignment_active_lead_key"
+//     ON "staff_assignment" ("leadId")
+//     WHERE "endedAt" IS NULL AND "leadId" IS NOT NULL;
+//   CREATE UNIQUE INDEX "staff_assignment_active_client_key"
+//     ON "staff_assignment" ("clientId")
+//     WHERE "endedAt" IS NULL AND "clientId" IS NOT NULL;
+// Whether "at most one active assignment" should instead vary by an
+// assignment type/role (e.g. a Travel Consultant and a Finance user each
+// holding a concurrent active assignment on the same Client) is not defined
+// by the blueprint yet — flag it as an open decision before relying on
+// these indexes long-term; do not assume single-assignment permanently.
+//
+// Neither `assignedStaffId` nor `assignedByUserId` is schema-restricted to
+// staff roles below — a foreign key can't constrain another table's column
+// value. The future assignment-management service must reject any value
+// that resolves to a CLIENT-role User (blueprint Section 4.7 scopes
+// assignment-based access to Travel Consultant, Visa Documentation Staff,
+// and Finance users only), the same way the invariants block above the
+// User model documents equivalent deferred service-layer checks.
+model StaffAssignment {
+  id String @id
+
+  // The staff member this assignment grants access to the target.
+  assignedStaffId String
+  assignedStaff   User   @relation("StaffAssignmentAssignee", fields: [assignedStaffId], references: [id], onDelete: Restrict)
+
+  // The staff member who created this assignment. Blueprint Section 4.2
+  // gives Admin / Manager the capability to manage lead/client/booking
+  // assignments; whether Travel Consultants may also create assignments
+  // (e.g. self-assigning a manually created lead, D-009(d)) is not stated
+  // in the blueprint and is left an open decision, not assumed here.
+  assignedByUserId String
+  assignedBy       User   @relation("StaffAssignmentAssigner", fields: [assignedByUserId], references: [id], onDelete: Restrict)
+
+  leadId String?
+  lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: Restrict)
+
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  endedAt   DateTime?
+
+  // Authorization/active-assignment lookups: "what is this staff member
+  // currently assigned to" and "who is currently assigned to this
+  // Lead/Client" both filter on endedAt IS NULL.
+  @@index([assignedStaffId, endedAt])
+  @@index([leadId, endedAt])
+  @@index([clientId, endedAt])
+  @@index([assignedByUserId])
+  @@map("staff_assignment")
 }
