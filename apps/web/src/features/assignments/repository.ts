@@ -102,6 +102,27 @@ export async function findActiveAssignmentForClient(
   });
 }
 
+/**
+ * Whether the given User is linked, via ClientProfile, to the given Client
+ * — the client-portal ownership check backing `canAccessClient`'s CLIENT
+ * branch (blueprint Sections 4.6, 14.1). Scoped by both `userId` and
+ * `clientId` in the query itself — never "fetch ClientProfile by one field
+ * and compare the other in code" — per .claude/rules/admin-dashboard.md's
+ * "Visibility Scoping" rule (the same discipline
+ * findActiveAssignmentForClient above applies to StaffAssignment). Selects
+ * only `id`: the caller needs nothing else to decide ownership.
+ */
+export async function findClientProfileOwnership(
+  db: Prisma.TransactionClient,
+  userId: string,
+  clientId: string,
+): Promise<{ id: string } | null> {
+  return db.clientProfile.findFirst({
+    where: { userId, clientId },
+    select: { id: true },
+  });
+}
+
 export async function createAssignment(
   db: Prisma.TransactionClient,
   input: {

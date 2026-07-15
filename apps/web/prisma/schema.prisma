@@ -25,12 +25,20 @@
 // docs/HERITAGE_V3_TASK_BOARD.md for the current, up-to-date status of
 // which environments have actually run it.
 //
-// ClientProfile and PortalInvitation are schema-only as of this checkpoint:
-// no migration has been generated for either yet, and no invitation/
-// activation service, raw token generation/hashing implementation, email
-// delivery, account-creation code, API route, or client portal UI exists
-// anywhere in this repository — see the ClientProfile and PortalInvitation
-// model doc comments below for exactly what each defers.
+// ClientProfile and PortalInvitation are covered by migration
+// `20260715014939_client_portal_ownership_foundation`. This migration's
+// presence in this repository does not by itself confirm it has been
+// applied to every environment (local, staging, production) — see
+// docs/HERITAGE_V3_TASK_BOARD.md for the current, up-to-date status. No
+// invitation/activation service, raw token generation/hashing
+// implementation, email delivery, account-creation code, API route, or
+// client portal UI exists anywhere in this repository yet — see the
+// ClientProfile and PortalInvitation model doc comments below for exactly
+// what each still defers. The `canAccessClient` client-portal-ownership
+// authorization check that reads ClientProfile (blueprint Sections 4.6,
+// 14.1) is implemented in apps/web/src/features/assignments/authorization.ts
+// as of the Client Portal Ownership Enforcement checkpoint, but is not yet
+// wired into any client-facing route, since no such route exists yet.
 //
 // Deliberately out of scope here:
 // - Booking and VisaCase as StaffAssignment targets — deferred until those
@@ -43,13 +51,10 @@
 //   impersonatedBy) — the plugin was evaluated and rejected; see D-012.
 // - Portal invitation preparation, sending, resending, opening, revoking,
 //   expiration processing, and account activation as *services*; raw
-//   invitation-token generation/hashing; email delivery — deferred to the
-//   future invitation/activation service checkpoint(s). Any
-//   `canAccessClient` client-portal-ownership authorization change is a
-//   separate concern, deferred to its own later service-layer
-//   checkpoint(s) — not necessarily the same checkpoint as the
-//   invitation/activation service. Public self-service signup remains
-//   explicitly out of scope (blueprint Section 7).
+//   invitation-token generation/hashing; email delivery; client-facing API
+//   routes; and client portal UI — all deferred to future checkpoints.
+//   Public self-service signup remains explicitly out of scope (blueprint
+//   Section 7).
 // - An invitation-expiration duration — blueprint Section 16.2 leaves this
 //   an open decision; only `PortalInvitation.expiresAt` (a plain timestamp
 //   field, no default duration) is modeled here.
