@@ -6,10 +6,12 @@
 // database-backed authentication (docs/HERITAGE_V3_DECISIONS_LOG.md D-011);
 // StaffProfile and AuditLog, as Checkpoint 1 (schema only) of the "staff
 // account, role, and assignment management" checklist item
-// (docs/HERITAGE_V3_DECISIONS_LOG.md D-012); and Lead, LeadStatusHistory,
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-012); Lead, LeadStatusHistory,
 // Client, and StaffAssignment, as Checkpoint 1 (schema only) of the
 // "database schema implementation" checklist item (blueprint Sections 4, 5,
-// 6, 13.2, 13.3, 14.1, 14.2).
+// 6, 13.2, 13.3, 14.1, 14.2); and ClientProfile and PortalInvitation, as
+// Checkpoint 1 (schema only) of the Client Portal Ownership Foundation
+// (blueprint Sections 4.6, 5, 7, 14.1, 14.2).
 //
 // The Lead/LeadStatusHistory/Client/StaffAssignment models are covered by
 // migration `20260714024613_lead_client_assignment_foundation`, which
@@ -23,6 +25,13 @@
 // docs/HERITAGE_V3_TASK_BOARD.md for the current, up-to-date status of
 // which environments have actually run it.
 //
+// ClientProfile and PortalInvitation are schema-only as of this checkpoint:
+// no migration has been generated for either yet, and no invitation/
+// activation service, raw token generation/hashing implementation, email
+// delivery, account-creation code, API route, or client portal UI exists
+// anywhere in this repository — see the ClientProfile and PortalInvitation
+// model doc comments below for exactly what each defers.
+//
 // Deliberately out of scope here:
 // - Booking and VisaCase as StaffAssignment targets — deferred until those
 //   entities exist (blueprint Section 14.1).
@@ -32,12 +41,25 @@
 //   (src/lib/auth/roles.ts) for Phase 1, not modeled as data; see D-012.
 // - Better Auth admin-plugin fields (banned/banReason/banExpires/
 //   impersonatedBy) — the plugin was evaluated and rejected; see D-012.
-// - ClientProfile and PortalInvitation — the portal-activation work they
-//   belong to has not started (blueprint Section 14.1).
+// - Portal invitation preparation, sending, resending, opening, revoking,
+//   expiration processing, and account activation as *services*; raw
+//   invitation-token generation/hashing; email delivery — deferred to the
+//   future invitation/activation service checkpoint(s). Any
+//   `canAccessClient` client-portal-ownership authorization change is a
+//   separate concern, deferred to its own later service-layer
+//   checkpoint(s) — not necessarily the same checkpoint as the
+//   invitation/activation service. Public self-service signup remains
+//   explicitly out of scope (blueprint Section 7).
+// - An invitation-expiration duration — blueprint Section 16.2 leaves this
+//   an open decision; only `PortalInvitation.expiresAt` (a plain timestamp
+//   field, no default duration) is modeled here.
 // - Every other later-phase business entity in blueprint Section 14
 //   (Proposal, Booking, PaymentPlan, Document, VisaCase, Conversation,
-//   etc.) — later Phase 2+ checklist items in
-//   docs/HERITAGE_V3_TASK_BOARD.md.
+//   etc.) — remaining for later Phase 1 database-schema checkpoints under
+//   the "Implement database schema and reviewed migrations from the
+//   approved Phase 0 entity plan" checklist item
+//   (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
+//   implementation once modeled.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -111,6 +133,12 @@ model User {
   leadStatusChanges       LeadStatusHistory[] @relation("LeadStatusHistoryActor")
   staffAssignmentsHeld    StaffAssignment[]   @relation("StaffAssignmentAssignee")
   staffAssignmentsGranted StaffAssignment[]   @relation("StaffAssignmentAssigner")
+
+  // Checkpoint 1 of the Client Portal Ownership Foundation (blueprint
+  // Sections 4.6, 5, 7, 14.1). Present only for a CLIENT-role User whose
+  // portal account has been activated — see the ClientProfile model doc
+  // comment for why this schema cannot itself enforce that role invariant.
+  clientProfile ClientProfile?
 
   @@map("user")
 }
@@ -327,8 +355,8 @@ model LeadStatusHistory {
 // The business record for a party with an active or past commercial
 // relationship (blueprint Section 5, Section 14.2). Distinct from both
 // `User` (the login credential) and `ClientProfile` (the portal/profile
-// extension created at account activation — Section 14.1; not part of this
-// checkpoint, see the file header). A Client can exist without portal
+// extension created at account activation — Section 14.1; see that
+// model's own doc comment below). A Client can exist without portal
 // access, and is created or linked only through explicit lead conversion
 // (Section 6.7) — never automatically.
 //
@@ -374,6 +402,14 @@ model Client {
   // Client may be linked from multiple Lead rows over time.
   leads       Lead[]
   assignments StaffAssignment[]
+
+  // Checkpoint 1 of the Client Portal Ownership Foundation (blueprint
+  // Sections 4.6, 5, 7, 14.1, 14.2). Both optional/zero-or-one: a Client
+  // may exist — and typically does, for a time — with neither a
+  // PortalInvitation (Section 7.1's "Not Invited") nor a ClientProfile
+  // (not yet activated). See each model's own doc comment below.
+  clientProfile    ClientProfile?
+  portalInvitation PortalInvitation?
 
   @@index([normalizedEmail])
   @@index([normalizedPhone])
@@ -452,4 +488,123 @@ model StaffAssignment {
   @@index([clientId, endedAt])
   @@index([assignedByUserId])
   @@map("staff_assignment")
+}
+
+// --- Checkpoint 1: Client Portal Ownership Foundation (ClientProfile / PortalInvitation) ---
+// Schema only. No invitation/activation service, token generation/hashing,
+// email delivery, account-creation code, API route, UI, or seed data. See
+// the file header for the full list of what remains deliberately deferred.
+
+// The six statuses a PortalInvitation row can actually persist (blueprint
+// Section 7.1). "Not Invited" — Section 7.1's seventh table row — is
+// deliberately not a value here: it is represented by the absence of any
+// PortalInvitation row for a Client (see that model's doc comment), never
+// by a status value, so a NOT_INVITED member is never added to this enum.
+enum PortalInvitationStatus {
+  INVITATION_PREPARED
+  INVITATION_SENT
+  INVITATION_OPENED
+  ACCOUNT_ACTIVATED
+  INVITATION_EXPIRED
+  INVITATION_REVOKED
+}
+
+// The portal/profile extension for a Client (blueprint Section 14.1),
+// created only once — at the moment a PortalInvitation is successfully
+// redeemed and the linked User account is activated ("created at account
+// activation... does not exist before activation"). Distinct from both
+// `User` (the login credential) and `Client` (the business record) per
+// Section 5's Core Domain Concepts separation rule, and deliberately does
+// not copy any Client identity/contact field (fullName, email, phone,
+// etc.) — it exists only to hold the one-to-one User↔Client activation
+// link, plus whatever portal-only profile state a later checkpoint adds.
+//
+// The linked `user` must hold `Role.CLIENT`. Prisma's schema language
+// cannot express a cross-table "this foreign key's target row must have
+// column X = Y" constraint, so that invariant is not, and cannot be,
+// enforced here. The future activation service must verify it
+// transactionally — inside the same transaction that creates this row —
+// before ever writing a ClientProfile; do not rely on application code
+// outside that transaction to hold this invariant.
+//
+// `onDelete: Restrict` on both `user` and `client`: neither the User
+// account nor the Client business record this profile links can be
+// removed out from under it, so activation/ownership history is never
+// silently destroyed (.claude/rules/database-security.md's referential-
+// integrity rule).
+model ClientProfile {
+  id String @id
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  clientId String @unique
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("client_profile")
+}
+
+// The time-limited, single-use invitation record described in blueprint
+// Section 7. `clientId` is `@unique`, which prevents two simultaneously
+// persisted PortalInvitation rows for the same Client — it does not, and
+// cannot, prevent a delete-then-reinsert sequence from producing a second
+// row over time; a unique constraint only guarantees at most one row at a
+// time, not that the row is never replaced. A resend (Section 7.2:
+// "Resendable without duplication... invalidates the prior token and
+// returns the status to Invitation Sent, without creating a duplicate...
+// PortalInvitation record") must therefore UPDATE this same row in place
+// (new `tokenHash`, new `expiresAt`, status reset to INVITATION_SENT). The
+// future repository/service layer must preserve this row as the Client's
+// invitation history and must never delete-and-recreate it during a
+// resend — that discipline, like every other lifecycle rule below, is
+// enforced by that future service, not by this schema alone. A Client
+// with no PortalInvitation row at all is "Not Invited" (Section 7.1) —
+// see PortalInvitationStatus for why there is no corresponding status
+// value.
+//
+// `tokenHash` stores only a hash of the invitation token, never the raw,
+// replayable token itself (.claude/rules/database-security.md's
+// "Protecting Sensitive Data": invitation tokens must be "stored in a way
+// that a database read alone can't be replayed as a valid token"), and is
+// itself `@unique` so a hash collision can never silently let one token
+// activate two invitations. Raw token generation and its hashing are
+// implemented by the future invitation service, not modeled or performed
+// here.
+//
+// `expiresAt` stores only the expiration timestamp; this schema does not
+// invent or default an invitation validity duration — blueprint Section
+// 16.2 explicitly leaves the exact expiration duration an open decision.
+//
+// This is schema only: single-use redemption, expiration processing,
+// resend, activation, and every status transition are enforced
+// transactionally by the future invitation/activation service, not by
+// this schema. Resend and revocation AuditLog entries (blueprint Section
+// 7.3: actor, timestamp, and — for revocation — a reason) are likewise
+// written by that future service, not here.
+model PortalInvitation {
+  id String @id
+
+  clientId String @unique
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  status PortalInvitationStatus @default(INVITATION_PREPARED)
+
+  tokenHash String @unique
+
+  expiresAt DateTime
+
+  sentAt      DateTime?
+  openedAt    DateTime?
+  activatedAt DateTime?
+  revokedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([expiresAt])
+  @@map("portal_invitation")
 }
