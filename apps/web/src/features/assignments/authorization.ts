@@ -25,16 +25,13 @@ export type ResourceAccessResult = { allowed: true } | { allowed: false; status:
  * - FINANCE_ACCOUNTING, VISA_DOCUMENTATION: no Lead/Client access through
  *   this assignment slice (their own future access model, if any, is a
  *   separate concern outside this checkpoint).
- * - CLIENT: never allowed here — this function governs *staff* operational
- *   access to a Lead/Client business record, never a client portal user's
- *   access to their own linked Client record. Client-portal ownership
- *   enforcement is explicitly deferred: it depends on the
- *   ClientProfile/User ownership link, which is not implemented yet (see
- *   apps/web/prisma/schema.prisma's file header and blueprint Section
- *   14.1). Do not use this function, or treat this checkpoint, as
- *   satisfying the client-portal-ownership half of the Phase 1
- *   "role/permission/assignment/client-ownership enforcement" checklist
- *   item — only the staff-side assignment half is covered here.
+ * - CLIENT: never allowed here — `canAccessLead` governs *staff*
+ *   operational access to a Lead, which a client portal user never has
+ *   (a Lead is a pre-conversion, staff-only concept; blueprint Section
+ *   4.6 does not grant Client any Lead visibility). A client's access to
+ *   their own linked Client record is governed by `canAccessClient`
+ *   below, which extends this same foundation with a ClientProfile
+ *   ownership check — see its own doc comment.
  *
  * Callers: run this *before* fetching the full Lead/Client record. This
  * function alone cannot distinguish "not authorized" from "does not
@@ -63,7 +60,27 @@ export async function canAccessLead(
   return { allowed: false, status: 403 };
 }
 
-/** Client counterpart of canAccessLead — see its doc comment. */
+/**
+ * Client counterpart of `canAccessLead` — see its doc comment for the
+ * shared ADMIN_MANAGER/TRAVEL_CONSULTANT/SYSTEM_ADMINISTRATOR/
+ * FINANCE_ACCOUNTING/VISA_DOCUMENTATION behavior, which this function
+ * preserves unchanged. This function additionally covers the client
+ * portal's own-record access case (blueprint Sections 4.6, 14.1):
+ *
+ * - CLIENT: allowed only when the authenticated actor's User id is linked,
+ *   via ClientProfile, to the exact requested Client id — resolved
+ *   directly from the database with `userId` and `clientId` scoped in a
+ *   single query (`findClientProfileOwnership`), never by fetching a
+ *   ClientProfile on one field and comparing the other in application
+ *   code. Ownership is never determined from email, Client contact
+ *   fields, a caller-supplied user id, or any UI state — only this
+ *   query's result. No ClientProfile row, or a ClientProfile linking to a
+ *   *different* Client, both produce the identical `{ allowed: false,
+ *   status: 403 }` — this function never reveals whether an unauthorized
+ *   Client id exists (see the shared doc comment above). A CLIENT actor
+ *   never triggers the StaffAssignment lookup TRAVEL_CONSULTANT uses, and
+ *   no non-CLIENT role triggers this ClientProfile lookup.
+ */
 export async function canAccessClient(
   actor: AuthenticatedUser,
   clientId: string,
@@ -71,13 +88,22 @@ export async function canAccessClient(
   if (actor.role === 'ADMIN_MANAGER') {
     return { allowed: true };
   }
-  if (actor.role !== 'TRAVEL_CONSULTANT') {
+
+  if (actor.role === 'TRAVEL_CONSULTANT') {
+    const active = await repository.findActiveAssignmentForClient(prisma, clientId);
+    if (active && active.assignedStaffId === actor.id) {
+      return { allowed: true };
+    }
     return { allowed: false, status: 403 };
   }
 
-  const active = await repository.findActiveAssignmentForClient(prisma, clientId);
-  if (active && active.assignedStaffId === actor.id) {
-    return { allowed: true };
+  if (actor.role === 'CLIENT') {
+    const ownership = await repository.findClientProfileOwnership(prisma, actor.id, clientId);
+    if (ownership) {
+      return { allowed: true };
+    }
+    return { allowed: false, status: 403 };
   }
+
   return { allowed: false, status: 403 };
 }

@@ -7,6 +7,7 @@ vi.mock('@/lib/db', () => ({ prisma: {} }));
 const repositoryMocks = vi.hoisted(() => ({
   findActiveAssignmentForLead: vi.fn(),
   findActiveAssignmentForClient: vi.fn(),
+  findClientProfileOwnership: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
 
@@ -101,9 +102,11 @@ describe('canAccessLead', () => {
 });
 
 describe('canAccessClient', () => {
-  it('always allows ADMIN_MANAGER', async () => {
+  it('always allows ADMIN_MANAGER, without querying assignment or ownership', async () => {
     const result = await canAccessClient(actor('ADMIN_MANAGER'), CLIENT_ID);
     expect(result).toEqual({ allowed: true });
+    expect(repositoryMocks.findActiveAssignmentForClient).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientProfileOwnership).not.toHaveBeenCalled();
   });
 
   it('allows a TRAVEL_CONSULTANT who holds the active assignment for this client', async () => {
@@ -117,6 +120,7 @@ describe('canAccessClient', () => {
     const result = await canAccessClient(tc, CLIENT_ID);
 
     expect(result).toEqual({ allowed: true });
+    expect(repositoryMocks.findClientProfileOwnership).not.toHaveBeenCalled();
   });
 
   it('rejects an unassigned TRAVEL_CONSULTANT', async () => {
@@ -127,8 +131,63 @@ describe('canAccessClient', () => {
     expect(result).toEqual({ allowed: false, status: 403 });
   });
 
-  it('rejects SYSTEM_ADMINISTRATOR, matching the "no automatic operational access" boundary', async () => {
-    const result = await canAccessClient(actor('SYSTEM_ADMINISTRATOR'), CLIENT_ID);
+  it('rejects a TRAVEL_CONSULTANT who is not the currently assigned consultant', async () => {
+    const otherTc = actor('TRAVEL_CONSULTANT', 'tc-2');
+    repositoryMocks.findActiveAssignmentForClient.mockResolvedValue({
+      ...activeAssignment('tc-1'),
+      leadId: null,
+      clientId: CLIENT_ID,
+    });
+
+    const result = await canAccessClient(otherTc, CLIENT_ID);
+
     expect(result).toEqual({ allowed: false, status: 403 });
+  });
+
+  it.each(['SYSTEM_ADMINISTRATOR', 'FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION'])(
+    'rejects role %s without querying assignment or ownership',
+    async (role) => {
+      const result = await canAccessClient(actor(role as AppRole), CLIENT_ID);
+      expect(result).toEqual({ allowed: false, status: 403 });
+      expect(repositoryMocks.findActiveAssignmentForClient).not.toHaveBeenCalled();
+      expect(repositoryMocks.findClientProfileOwnership).not.toHaveBeenCalled();
+    },
+  );
+
+  it('allows a CLIENT whose ClientProfile links their own User id to the requested Client id', async () => {
+    const client = actor('CLIENT', 'user-1');
+    repositoryMocks.findClientProfileOwnership.mockResolvedValue({ id: 'profile-1' });
+
+    const result = await canAccessClient(client, CLIENT_ID);
+
+    expect(result).toEqual({ allowed: true });
+    expect(repositoryMocks.findClientProfileOwnership).toHaveBeenCalledWith(
+      expect.anything(),
+      'user-1',
+      CLIENT_ID,
+    );
+    expect(repositoryMocks.findActiveAssignmentForClient).not.toHaveBeenCalled();
+  });
+
+  it('rejects a CLIENT with no ClientProfile at all', async () => {
+    repositoryMocks.findClientProfileOwnership.mockResolvedValue(null);
+
+    const result = await canAccessClient(actor('CLIENT', 'user-1'), CLIENT_ID);
+
+    expect(result).toEqual({ allowed: false, status: 403 });
+  });
+
+  it("rejects a CLIENT requesting a different client's record than their own ClientProfile links to", async () => {
+    // The repository's ownership query scopes by both userId and clientId
+    // in the query itself, so a ClientProfile that links this actor to a
+    // *different* Client never comes back from findClientProfileOwnership
+    // for this clientId — simulated here by resolving null, exactly as the
+    // real scoped query would.
+    repositoryMocks.findClientProfileOwnership.mockResolvedValue(null);
+
+    const result = await canAccessClient(actor('CLIENT', 'user-1'), CLIENT_ID);
+
+    expect(result).toEqual({ allowed: false, status: 403 });
+    expect(repositoryMocks.findActiveAssignmentForClient).not.toHaveBeenCalled();
   });
 });
