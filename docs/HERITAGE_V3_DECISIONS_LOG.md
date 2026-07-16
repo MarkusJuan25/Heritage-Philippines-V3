@@ -97,6 +97,31 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 - **Constraint:** Sequential or human-readable (e.g., year-prefixed, incrementing) booking references are deferred unless management later requires them — this decision does not preclude revisiting the format, but any change must go through this same decision process, not be introduced ad hoc in a later checkpoint.
 - **Effect:** Resolves the previously open "booking reference generation" item identified during the Booking Schema Foundation checkpoint. Implemented as part of the booking workflow enforcement checkpoint (explicit Booking creation, staff-only list/read, initial `BookingStatusHistory`, and the `BOOKING_CREATED` audit entry) — status-transition enforcement and Booking-specific staff-assignment endpoints remain separate, not-yet-implemented checkpoints.
 
+## D-014 — Booking status-transition matrix, authorization, and concurrency
+
+- **Status:** Accepted
+- **Date accepted:** July 16, 2026
+- **Decision:** `PUT /api/bookings/[id]/status` enforces the following fixed, service-layer transition matrix over `BookingStatus` (blueprint Section 13.4's ten values), independent of any database constraint:
+  - `DRAFT` → `PENDING_CONFIRMATION`, `CANCELLED`
+  - `PENDING_CONFIRMATION` → `CONFIRMED`, `CANCELLED`
+  - `CONFIRMED` → `IN_PREPARATION`, `CANCELLED`
+  - `IN_PREPARATION` → `DOCUMENTS_REQUIRED`, `VISA_PROCESSING`, `READY_FOR_TRAVEL`, `CANCELLED`
+  - `DOCUMENTS_REQUIRED` → `VISA_PROCESSING`, `READY_FOR_TRAVEL`, `CANCELLED`
+  - `VISA_PROCESSING` → `DOCUMENTS_REQUIRED`, `READY_FOR_TRAVEL`, `CANCELLED`
+  - `READY_FOR_TRAVEL` → `IN_PROGRESS`, `CANCELLED`
+  - `IN_PROGRESS` → `COMPLETED`, `CANCELLED`
+  - `COMPLETED` → no outgoing transitions (terminal)
+  - `CANCELLED` → no outgoing transitions (terminal)
+
+  Authorization mirrors Booking creation/read exactly: `ADMIN_MANAGER` (unconditional) and `TRAVEL_CONSULTANT` (only through the existing active-Client-assignment check, `features/bookings/repository.ts`'s `clientAssignmentFilter` — not a new Booking-specific assignment mechanism, which remains unimplemented). `SYSTEM_ADMINISTRATOR`, `FINANCE_ACCOUNTING`, `VISA_DOCUMENTATION`, and `CLIENT` are not authorized to change Booking status in this checkpoint.
+
+  Concurrency: the caller supplies `expectedStatus` alongside `newStatus`; the service reads the Booking's actual current status inside a `runSerializableWithRetry` transaction and rejects with `BOOKING_CONFLICT` (409, refresh-and-retry message) if the current status no longer matches `expectedStatus` — an optimistic-concurrency check layered on top of (not a replacement for) the transaction's own serializable-conflict retry. A request whose `newStatus` already equals the current status is a no-op (no history row, no audit entry, no write) — required by `booking_status_history_status_changed`'s existing CHECK constraint, which forbids a history row where `previousStatus` equals `newStatus`.
+
+  `DOCUMENTS_REQUIRED` and `VISA_PROCESSING` are treated as coarse overall booking-stage indicators only, not as a model of the detailed, genuinely parallel document/visa workflows blueprint Section 8 describes ("payments, documents, visa processing... may all progress in parallel rather than strictly in sequence"). `Booking.status` remains a single scalar reflecting the booking's overall stage; the future `Document` and `VisaCase` entities (blueprint Sections 14.7, 14.8) own their own detailed, independently-progressing status fields once implemented. No schema change accompanies this decision.
+- **Rationale:** Blueprint Section 13.4 lists the ten status values but defines no transition graph or role authority over them, and Section 8 explicitly warns that the underlying workflows are parallel, not sequential — modeling that fully would require the not-yet-implemented `Document`/`VisaCase` entities, which is out of scope for this checkpoint. The matrix above is a deliberately conservative starting point (forward progression plus universal cancellation from any non-terminal state, since no blueprint text restricts when cancellation is allowed) rather than an attempt to fully resolve the parallel-workflow tension now. Reusing active-Client-assignment (rather than introducing Booking-specific `StaffAssignment` targets, which the schema supports but no service/route yet populates) keeps this checkpoint additive and avoids authorizing against an assignment type nothing can currently create.
+- **Constraint:** This matrix, and the two-role authorization set, may be revised by a later decision once `Document`/`VisaCase` are implemented and the parallel-workflow question is revisited; until then, no additional role or transition should be added ad hoc outside this decision. A `reason` field for status changes is explicitly deferred, not adopted, in this checkpoint.
+- **Effect:** Implements the "Booking status-transition enforcement" checkpoint referenced in `docs/HERITAGE_V3_TASK_BOARD.md`. Booking-specific staff-assignment management and any Document/VisaCase-driven status model remain separate, not-yet-implemented checkpoints.
+
 ---
 
 Update this log when a decision's status changes; do not delete entries — supersede them.

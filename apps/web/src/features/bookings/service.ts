@@ -5,11 +5,17 @@ import { prisma } from '@/lib/db';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
-import { BOOKING_AUDIT_ACTIONS, BOOKING_AUDIT_ENTITY_TYPE, sanitizeBookingSnapshot } from './audit';
+import {
+  BOOKING_AUDIT_ACTIONS,
+  BOOKING_AUDIT_ENTITY_TYPE,
+  sanitizeBookingSnapshot,
+  sanitizeBookingStatusSnapshot,
+} from './audit';
 import { BookingError } from './errors';
 import * as repository from './repository';
 import type { BookingActor, BookingRecord } from './repository';
-import type { CreateBookingInput, ListBookingsQuery } from './schemas';
+import type { CreateBookingInput, ListBookingsQuery, UpdateBookingStatusInput } from './schemas';
+import { isTransitionAllowed } from './transitions';
 
 const BOOKING_REFERENCE_PREFIX = 'HPB-';
 const MAX_BOOKING_REFERENCE_ATTEMPTS = 3;
@@ -281,4 +287,103 @@ export async function listBookings(
     take: query.pageSize,
   });
   return { items, page: query.page, pageSize: query.pageSize, total };
+}
+
+const STALE_STATUS_MESSAGE =
+  'This booking has changed since it was last loaded. Refresh and try again.';
+
+/**
+ * Transitions a Booking's status (docs/HERITAGE_V3_DECISIONS_LOG.md D-014).
+ * Runs the entire lookup-validate-write-audit sequence inside one
+ * `runSerializableWithRetry` transaction, in the exact order D-014 fixes:
+ *
+ * 1. Actor-scoped lookup (`findBookingByIdForActor`) — never an
+ *    unrestricted fetch checked afterward.
+ * 2. `null` → `BOOKING_NOT_FOUND` (404) for ADMIN_MANAGER,
+ *    `BOOKING_FORBIDDEN` (403) for TRAVEL_CONSULTANT — preserving the same
+ *    resource-existence-leak protection `createBooking`/`getBookingById`
+ *    already established.
+ * 3. `newStatus === current status` → idempotent no-op, returned unchanged
+ *    with no history row and no audit entry — checked *before* the
+ *    `expectedStatus` comparison below, so a caller whose `expectedStatus`
+ *    is stale still succeeds if the booking already reflects the outcome
+ *    they wanted. This is also the only way to satisfy
+ *    `booking_status_history_status_changed`'s CHECK constraint
+ *    (`previousStatus != newStatus`), which would otherwise reject the
+ *    write outright.
+ * 4. Otherwise, `current status !== expectedStatus` → `BOOKING_CONFLICT`
+ *    (409): the caller's optimistic-concurrency check failed because
+ *    someone else changed this Booking first.
+ * 5. `current status -> newStatus` validated against transitions.ts's
+ *    `isTransitionAllowed` — transition *policy* lives there, not here or
+ *    in repository.ts.
+ * 6. A disallowed transition → `INVALID_STATUS_TRANSITION` (409).
+ * 7–8. `repository.updateBookingStatusWithHistory` (Booking + history in
+ *    one write) and the `BOOKING_STATUS_CHANGED` AuditLog insert both run
+ *    inside this same transaction — atomic with each other and with the
+ *    lookup above.
+ * 9. Audit before/afterState is status-only
+ *    (`sanitizeBookingStatusSnapshot`), per D-014 — never a fuller Booking
+ *    snapshot.
+ *
+ * A residual conflict that survives `runSerializableWithRetry`'s own retry
+ * bound (or any other unmatched database conflict) maps to the same
+ * controlled `BOOKING_CONFLICT` envelope `createBooking` uses — never a raw
+ * Prisma/PostgreSQL error reaching the route layer.
+ */
+export async function updateBookingStatus(
+  actor: AuthenticatedUser,
+  id: string,
+  input: UpdateBookingStatusInput,
+): Promise<BookingRecord> {
+  const bookingActor = assertBookingActor(actor);
+
+  try {
+    return await runSerializableWithRetry(async (tx) => {
+      const found = await repository.findBookingByIdForActor(tx, bookingActor, id);
+      if (!found) {
+        throw bookingActor.role === 'ADMIN_MANAGER'
+          ? new BookingError('BOOKING_NOT_FOUND', 'Booking not found.')
+          : new BookingError('BOOKING_FORBIDDEN', 'Booking not found or not accessible.');
+      }
+
+      if (found.status === input.newStatus) {
+        return found;
+      }
+
+      if (found.status !== input.expectedStatus) {
+        throw new BookingError('BOOKING_CONFLICT', STALE_STATUS_MESSAGE);
+      }
+
+      if (!isTransitionAllowed(found.status, input.newStatus)) {
+        throw new BookingError(
+          'INVALID_STATUS_TRANSITION',
+          `Cannot transition a booking from ${found.status} to ${input.newStatus}.`,
+        );
+      }
+
+      const updated = await repository.updateBookingStatusWithHistory(tx, {
+        id,
+        previousStatus: found.status,
+        newStatus: input.newStatus,
+        changedByUserId: bookingActor.id,
+      });
+
+      await repository.insertAuditLog(tx, {
+        actorId: bookingActor.id,
+        action: BOOKING_AUDIT_ACTIONS.BOOKING_STATUS_CHANGED,
+        entityType: BOOKING_AUDIT_ENTITY_TYPE,
+        entityId: id,
+        beforeState: sanitizeBookingStatusSnapshot(found.status),
+        afterState: sanitizeBookingStatusSnapshot(updated.status),
+      });
+
+      return updated;
+    });
+  } catch (error) {
+    if (isOtherKnownConflict(error)) {
+      throw new BookingError('BOOKING_CONFLICT', CONFLICT_MESSAGE);
+    }
+    throw error;
+  }
 }

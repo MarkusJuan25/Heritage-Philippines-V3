@@ -277,6 +277,48 @@ export async function createBookingWithInitialHistory(
   });
 }
 
+export type UpdateBookingStatusInput = {
+  id: string;
+  previousStatus: BookingStatus;
+  newStatus: BookingStatus;
+  changedByUserId: string;
+};
+
+/**
+ * Updates `Booking.status` and creates the corresponding
+ * `BookingStatusHistory` row as a single nested Prisma write — the `update`
+ * counterpart of `createBookingWithInitialHistory` above, so both rows
+ * commit or roll back together within whatever transaction `db` belongs to
+ * (blueprint Section 14.9; .claude/rules/backend.md's Auditability). This
+ * function does not decide *whether* `previousStatus -> newStatus` is
+ * allowed — that policy lives in transitions.ts's `isTransitionAllowed`
+ * and is the caller's (service.ts's) responsibility to check before ever
+ * calling this; this function only persists a transition already approved,
+ * matching this codebase's repository/service-layer split
+ * (.claude/rules/backend.md's "Repository/data-access layer" / "Service-
+ * Level Business Rules").
+ */
+export async function updateBookingStatusWithHistory(
+  db: Prisma.TransactionClient,
+  input: UpdateBookingStatusInput,
+): Promise<BookingRecord> {
+  return db.booking.update({
+    where: { id: input.id },
+    data: {
+      status: input.newStatus,
+      statusHistory: {
+        create: {
+          id: randomUUID(),
+          previousStatus: input.previousStatus,
+          newStatus: input.newStatus,
+          changedByUserId: input.changedByUserId,
+        },
+      },
+    },
+    select: BOOKING_SELECT,
+  });
+}
+
 export async function insertAuditLog(
   db: Prisma.TransactionClient,
   entry: {

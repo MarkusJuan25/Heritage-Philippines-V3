@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { bookingIdParamSchema, createBookingSchema, listBookingsQuerySchema } from './schemas';
+import {
+  bookingIdParamSchema,
+  createBookingSchema,
+  listBookingsQuerySchema,
+  updateBookingStatusSchema,
+} from './schemas';
 
 describe('createBookingSchema', () => {
   it('accepts a valid proposalVersionId UUID', () => {
@@ -91,5 +96,58 @@ describe('listBookingsQuerySchema', () => {
 
   it('rejects a page below 1', () => {
     expect(listBookingsQuerySchema.safeParse({ page: '0' }).success).toBe(false);
+  });
+});
+
+describe('updateBookingStatusSchema', () => {
+  it('accepts a valid expectedStatus/newStatus pair', () => {
+    const result = updateBookingStatusSchema.safeParse({
+      expectedStatus: 'DRAFT',
+      newStatus: 'PENDING_CONFIRMATION',
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual({ expectedStatus: 'DRAFT', newStatus: 'PENDING_CONFIRMATION' });
+    }
+  });
+
+  it('rejects an invalid status string for either field', () => {
+    expect(
+      updateBookingStatusSchema.safeParse({ expectedStatus: 'NOT_A_STATUS', newStatus: 'DRAFT' })
+        .success,
+    ).toBe(false);
+    expect(
+      updateBookingStatusSchema.safeParse({ expectedStatus: 'DRAFT', newStatus: 'NOT_A_STATUS' })
+        .success,
+    ).toBe(false);
+  });
+
+  it('rejects a missing expectedStatus', () => {
+    expect(updateBookingStatusSchema.safeParse({ newStatus: 'DRAFT' }).success).toBe(false);
+  });
+
+  it('rejects a missing newStatus', () => {
+    expect(updateBookingStatusSchema.safeParse({ expectedStatus: 'DRAFT' }).success).toBe(false);
+  });
+
+  it('rejects a body containing a reason field — not implemented in this checkpoint', () => {
+    const result = updateBookingStatusSchema.safeParse({
+      expectedStatus: 'DRAFT',
+      newStatus: 'CANCELLED',
+      reason: 'Client requested cancellation',
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects any other unrecognized property', () => {
+    const result = updateBookingStatusSchema.safeParse({
+      expectedStatus: 'DRAFT',
+      newStatus: 'PENDING_CONFIRMATION',
+      bookingReference: 'HPB-DEADBEEFDEADBEEFDEAD',
+    });
+
+    expect(result.success).toBe(false);
   });
 });

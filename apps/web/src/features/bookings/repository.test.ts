@@ -9,6 +9,7 @@ import {
   findEligibleProposalVersionForActor,
   insertAuditLog,
   listBookingsForActor,
+  updateBookingStatusWithHistory,
 } from './repository';
 
 const ADMIN_MANAGER = { id: 'admin-1', role: 'ADMIN_MANAGER' as const };
@@ -243,6 +244,36 @@ describe('createBookingWithInitialHistory', () => {
             id: expect.any(String),
             previousStatus: null,
             newStatus: 'DRAFT',
+            changedByUserId: 'admin-1',
+          },
+        },
+      },
+      select: expect.any(Object),
+    });
+  });
+});
+
+describe('updateBookingStatusWithHistory', () => {
+  it('updates Booking.status and creates a nested BookingStatusHistory row in one write', async () => {
+    const update = vi.fn().mockResolvedValue({ id: BOOKING_ID, status: 'PENDING_CONFIRMATION' });
+    const db = { booking: { update } } as unknown as Prisma.TransactionClient;
+
+    await updateBookingStatusWithHistory(db, {
+      id: BOOKING_ID,
+      previousStatus: 'DRAFT',
+      newStatus: 'PENDING_CONFIRMATION',
+      changedByUserId: 'admin-1',
+    });
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: BOOKING_ID },
+      data: {
+        status: 'PENDING_CONFIRMATION',
+        statusHistory: {
+          create: {
+            id: expect.any(String),
+            previousStatus: 'DRAFT',
+            newStatus: 'PENDING_CONFIRMATION',
             changedByUserId: 'admin-1',
           },
         },

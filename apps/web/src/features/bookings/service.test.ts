@@ -19,6 +19,7 @@ const repositoryMocks = vi.hoisted(() => ({
   listBookingsForActor: vi.fn(),
   findEligibleProposalVersionForActor: vi.fn(),
   createBookingWithInitialHistory: vi.fn(),
+  updateBookingStatusWithHistory: vi.fn(),
   insertAuditLog: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
@@ -28,7 +29,7 @@ import { prisma } from '@/lib/db';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import type { BookingActor, BookingRecord } from './repository';
-import { createBooking, getBookingById, listBookings } from './service';
+import { createBooking, getBookingById, listBookings, updateBookingStatus } from './service';
 
 const TX_CLIENT = { marker: 'tx-client' };
 
@@ -360,6 +361,193 @@ describe('listBookings', () => {
   });
 });
 
+describe('updateBookingStatus', () => {
+  it('transitions status for ADMIN_MANAGER, writing the update, history, and one audit entry atomically', async () => {
+    const found = bookingRecord({ status: 'DRAFT' });
+    const updated = bookingRecord({ status: 'PENDING_CONFIRMATION' });
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(found);
+    repositoryMocks.updateBookingStatusWithHistory.mockResolvedValue(updated);
+
+    const result = await updateBookingStatus(ADMIN_MANAGER, found.id, {
+      expectedStatus: 'DRAFT',
+      newStatus: 'PENDING_CONFIRMATION',
+    });
+
+    expect(result).toEqual(updated);
+    expect(repositoryMocks.findBookingByIdForActor).toHaveBeenCalledWith(
+      TX_CLIENT,
+      ADMIN_MANAGER_ACTOR,
+      found.id,
+    );
+    expect(repositoryMocks.updateBookingStatusWithHistory).toHaveBeenCalledWith(TX_CLIENT, {
+      id: found.id,
+      previousStatus: 'DRAFT',
+      newStatus: 'PENDING_CONFIRMATION',
+      changedByUserId: ADMIN_MANAGER.id,
+    });
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, {
+      actorId: ADMIN_MANAGER.id,
+      action: 'BOOKING_STATUS_CHANGED',
+      entityType: 'Booking',
+      entityId: found.id,
+      beforeState: { status: 'DRAFT' },
+      afterState: { status: 'PENDING_CONFIRMATION' },
+    });
+    // The lookup, the write, and the audit entry all happened inside the
+    // single $transaction callback — never as separate top-level
+    // transactions.
+    expect(transactionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('transitions status for an assigned TRAVEL_CONSULTANT', async () => {
+    const found = bookingRecord({ status: 'CONFIRMED' });
+    const updated = bookingRecord({ status: 'IN_PREPARATION' });
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(found);
+    repositoryMocks.updateBookingStatusWithHistory.mockResolvedValue(updated);
+
+    const result = await updateBookingStatus(TRAVEL_CONSULTANT, found.id, {
+      expectedStatus: 'CONFIRMED',
+      newStatus: 'IN_PREPARATION',
+    });
+
+    expect(result).toEqual(updated);
+    expect(repositoryMocks.findBookingByIdForActor).toHaveBeenCalledWith(
+      TX_CLIENT,
+      TRAVEL_CONSULTANT_ACTOR,
+      found.id,
+    );
+    expect(repositoryMocks.updateBookingStatusWithHistory).toHaveBeenCalledWith(
+      TX_CLIENT,
+      expect.objectContaining({ changedByUserId: TRAVEL_CONSULTANT.id }),
+    );
+  });
+
+  it('throws BOOKING_NOT_FOUND (404) for ADMIN_MANAGER when the booking genuinely does not exist, without writing', async () => {
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(null);
+
+    await expect(
+      updateBookingStatus(ADMIN_MANAGER, 'missing-id', {
+        expectedStatus: 'DRAFT',
+        newStatus: 'PENDING_CONFIRMATION',
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_NOT_FOUND', status: 404 });
+    expect(repositoryMocks.updateBookingStatusWithHistory).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('throws BOOKING_FORBIDDEN (403), not 404, for TRAVEL_CONSULTANT when the booking is missing or inaccessible — no resource-existence leak', async () => {
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(null);
+
+    await expect(
+      updateBookingStatus(TRAVEL_CONSULTANT, 'some-id', {
+        expectedStatus: 'DRAFT',
+        newStatus: 'PENDING_CONFIRMATION',
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_FORBIDDEN', status: 403 });
+    expect(repositoryMocks.updateBookingStatusWithHistory).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent: requesting the current status again returns the Booking unchanged, with no history row and no audit entry', async () => {
+    const found = bookingRecord({ status: 'CONFIRMED' });
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(found);
+
+    const result = await updateBookingStatus(ADMIN_MANAGER, found.id, {
+      expectedStatus: 'CONFIRMED',
+      newStatus: 'CONFIRMED',
+    });
+
+    expect(result).toEqual(found);
+    expect(repositoryMocks.updateBookingStatusWithHistory).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('treats a same-status request as an idempotent no-op even when expectedStatus is stale (checked before the conflict check)', async () => {
+    const found = bookingRecord({ status: 'CONFIRMED' });
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(found);
+
+    const result = await updateBookingStatus(ADMIN_MANAGER, found.id, {
+      expectedStatus: 'DRAFT', // stale — actual current status is CONFIRMED
+      newStatus: 'CONFIRMED', // but this already matches the actual current status
+    });
+
+    expect(result).toEqual(found);
+    expect(repositoryMocks.updateBookingStatusWithHistory).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('throws BOOKING_CONFLICT (409) with no writes when expectedStatus no longer matches the actual current status', async () => {
+    const found = bookingRecord({ status: 'CONFIRMED' });
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(found);
+
+    await expect(
+      updateBookingStatus(ADMIN_MANAGER, found.id, {
+        expectedStatus: 'DRAFT',
+        newStatus: 'IN_PREPARATION',
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_CONFLICT', status: 409 });
+    expect(repositoryMocks.updateBookingStatusWithHistory).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('throws INVALID_STATUS_TRANSITION (409) with no writes for a transition the matrix disallows', async () => {
+    const found = bookingRecord({ status: 'DRAFT' });
+    repositoryMocks.findBookingByIdForActor.mockResolvedValue(found);
+
+    await expect(
+      updateBookingStatus(ADMIN_MANAGER, found.id, {
+        expectedStatus: 'DRAFT',
+        newStatus: 'COMPLETED',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATUS_TRANSITION', status: 409 });
+    expect(repositoryMocks.updateBookingStatusWithHistory).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it.each(['COMPLETED', 'CANCELLED'] as const)(
+    'rejects every outgoing transition from the terminal status %s',
+    async (terminalStatus) => {
+      const found = bookingRecord({ status: terminalStatus });
+      repositoryMocks.findBookingByIdForActor.mockResolvedValue(found);
+
+      await expect(
+        updateBookingStatus(ADMIN_MANAGER, found.id, {
+          expectedStatus: terminalStatus,
+          newStatus: 'DRAFT',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_STATUS_TRANSITION', status: 409 });
+      expect(repositoryMocks.updateBookingStatusWithHistory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('maps a serialization conflict that survives every retry to BOOKING_CONFLICT, never a raw Prisma error', async () => {
+    transactionMock.mockImplementation(async () => {
+      throw conflictError('P2034');
+    });
+
+    await expect(
+      updateBookingStatus(ADMIN_MANAGER, 'booking-1', {
+        expectedStatus: 'DRAFT',
+        newStatus: 'PENDING_CONFIRMATION',
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_CONFLICT', status: 409 });
+  });
+
+  it('rethrows an unrelated, unexpected error unchanged rather than mapping it to BOOKING_CONFLICT', async () => {
+    const unexpected = new Error('unexpected internal failure');
+    transactionMock.mockImplementation(async () => {
+      throw unexpected;
+    });
+
+    await expect(
+      updateBookingStatus(ADMIN_MANAGER, 'booking-1', {
+        expectedStatus: 'DRAFT',
+        newStatus: 'PENDING_CONFIRMATION',
+      }),
+    ).rejects.toBe(unexpected);
+  });
+});
+
 // Defense-in-depth: `withRole(['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'], ...)`
 // already rejects every other role at the route layer (see
 // app/api/bookings/route.test.ts and .../[id]/route.test.ts) — these tests
@@ -407,6 +595,19 @@ describe('service-boundary role rejection (defense-in-depth beyond withRole)', (
         listBookings(actorWithRole(role), { page: 1, pageSize: 20 }),
       ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED', status: 403 });
       expect(repositoryMocks.listBookingsForActor).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(REJECTED_ROLES)(
+    'updateBookingStatus rejects %s with a controlled 403, never opening a transaction',
+    async (role) => {
+      await expect(
+        updateBookingStatus(actorWithRole(role), 'some-id', {
+          expectedStatus: 'DRAFT',
+          newStatus: 'PENDING_CONFIRMATION',
+        }),
+      ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED', status: 403 });
+      expect(transactionMock).not.toHaveBeenCalled();
     },
   );
 });

@@ -5,7 +5,8 @@ export type BookingErrorCode =
   | 'PROPOSAL_VERSION_NOT_ACCEPTED'
   | 'BOOKING_NOT_FOUND'
   | 'BOOKING_FORBIDDEN'
-  | 'BOOKING_CONFLICT';
+  | 'BOOKING_CONFLICT'
+  | 'INVALID_STATUS_TRANSITION';
 
 const STATUS_BY_CODE: Record<BookingErrorCode, 403 | 404 | 409> = {
   ROLE_NOT_PERMITTED: 403,
@@ -15,6 +16,7 @@ const STATUS_BY_CODE: Record<BookingErrorCode, 403 | 404 | 409> = {
   BOOKING_NOT_FOUND: 404,
   BOOKING_FORBIDDEN: 403,
   BOOKING_CONFLICT: 409,
+  INVALID_STATUS_TRANSITION: 409,
 };
 
 /**
@@ -48,6 +50,15 @@ const STATUS_BY_CODE: Record<BookingErrorCode, 403 | 404 | 409> = {
  * defense-in-depth check (service.ts's `assertBookingActor`), independent
  * of and in addition to `withRole`'s route-level role gate — see that
  * function's doc comment for why both checks exist.
+ *
+ * `BOOKING_CONFLICT` also covers the status-transition endpoint's stale
+ * `expectedStatus` case (docs/HERITAGE_V3_DECISIONS_LOG.md D-14) — a
+ * caller's optimistic-concurrency check failing, not a database-level
+ * conflict — alongside its original meaning (a residual Prisma/PostgreSQL
+ * conflict). `INVALID_STATUS_TRANSITION` is a separate, non-concurrency
+ * outcome: the request's `newStatus` is simply not reachable from the
+ * Booking's current status per D-014's transition matrix
+ * (features/bookings/transitions.ts).
  */
 export class BookingError extends Error {
   readonly status: 403 | 404 | 409;
