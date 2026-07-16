@@ -9,9 +9,11 @@
 // (docs/HERITAGE_V3_DECISIONS_LOG.md D-012); Lead, LeadStatusHistory,
 // Client, and StaffAssignment, as Checkpoint 1 (schema only) of the
 // "database schema implementation" checklist item (blueprint Sections 4, 5,
-// 6, 13.2, 13.3, 14.1, 14.2); and ClientProfile and PortalInvitation, as
+// 6, 13.2, 13.3, 14.1, 14.2); ClientProfile and PortalInvitation, as
 // Checkpoint 1 (schema only) of the Client Portal Ownership Foundation
-// (blueprint Sections 4.6, 5, 7, 14.1, 14.2).
+// (blueprint Sections 4.6, 5, 7, 14.1, 14.2); and Proposal, ProposalVersion,
+// and ProposalAcceptance, as Checkpoint 1 (schema only) of the Proposal /
+// ROS Schema Foundation (blueprint Sections 5, 8, 9, 9.1, 14.4).
 //
 // The Lead/LeadStatusHistory/Client/StaffAssignment models are covered by
 // migration `20260714024613_lead_client_assignment_foundation`, which
@@ -40,6 +42,24 @@
 // as of the Client Portal Ownership Enforcement checkpoint, but is not yet
 // wired into any client-facing route, since no such route exists yet.
 //
+// Proposal, ProposalVersion, and ProposalAcceptance are covered by
+// create-only migration `20260715055859_proposal_ros_foundation`, which
+// contains the two hand-written PostgreSQL statements Prisma's schema
+// language cannot express on its own — a partial unique index enforcing
+// at most one current client-visible ProposalVersion per Proposal, and a
+// CHECK constraint enforcing a complete, mutually exclusive
+// portal/external response-attribution path on ProposalAcceptance; see
+// the ProposalVersion and ProposalAcceptance model doc comments below for
+// both statements verbatim. This file does not claim that migration has
+// been applied to any environment (local, staging, or production) —
+// docs/HERITAGE_V3_TASK_BOARD.md remains the source for verified
+// environment/migration-application status. No proposal content
+// (itinerary, quotation, pricing, currency), Booking-creation behavior,
+// repository layer, service layer, API routes, client portal or admin
+// dashboard UI, tests, or seed data exist anywhere in this repository yet
+// for this checkpoint — see each model's own doc comment for exactly what
+// is, and is not, covered.
+//
 // Deliberately out of scope here:
 // - Booking and VisaCase as StaffAssignment targets — deferred until those
 //   entities exist (blueprint Section 14.1).
@@ -58,13 +78,22 @@
 // - An invitation-expiration duration — blueprint Section 16.2 leaves this
 //   an open decision; only `PortalInvitation.expiresAt` (a plain timestamp
 //   field, no default duration) is modeled here.
+// - Proposal content: itinerary, quotation/line-item, pricing, and
+//   currency fields — their exact shape is not yet approved (the currency
+//   strategy, blueprint Section 16.2/D-002, remains unresolved), so none
+//   of it is modeled on ProposalVersion in this checkpoint; a later
+//   checkpoint adds these fields once their shape is approved, without
+//   bypassing D-002.
+// - Booking-creation behavior; the Proposal/ProposalVersion/
+//   ProposalAcceptance repository and service layers; proposal-related API
+//   routes; client portal and admin dashboard UI for proposals; tests; and
+//   seed data — all deferred to future checkpoints.
 // - Every other later-phase business entity in blueprint Section 14
-//   (Proposal, Booking, PaymentPlan, Document, VisaCase, Conversation,
-//   etc.) — remaining for later Phase 1 database-schema checkpoints under
-//   the "Implement database schema and reviewed migrations from the
-//   approved Phase 0 entity plan" checklist item
-//   (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
-//   implementation once modeled.
+//   (Booking, PaymentPlan, Document, VisaCase, Conversation, etc.) —
+//   remaining for later Phase 1 database-schema checkpoints under the
+//   "Implement database schema and reviewed migrations from the approved
+//   Phase 0 entity plan" checklist item (docs/HERITAGE_V3_TASK_BOARD.md),
+//   to support Phase 2+ feature implementation once modeled.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -144,6 +173,15 @@ model User {
   // portal account has been activated — see the ClientProfile model doc
   // comment for why this schema cannot itself enforce that role invariant.
   clientProfile ClientProfile?
+
+  // Checkpoint 1 of the Proposal / ROS Schema Foundation (blueprint
+  // Sections 5, 9, 9.1, 14.4). `proposalVersionsAuthored`: every
+  // ProposalVersion this staff member drafted. `recordedProposalResponses`:
+  // every externally recorded client response (Section 9.1) this staff
+  // member entered — never populated for portal responses, which are
+  // attributed to a ClientProfile instead (see ProposalAcceptance below).
+  proposalVersionsAuthored  ProposalVersion[]
+  recordedProposalResponses ProposalAcceptance[]
 
   @@map("user")
 }
@@ -416,6 +454,11 @@ model Client {
   clientProfile    ClientProfile?
   portalInvitation PortalInvitation?
 
+  // Checkpoint 1 of the Proposal / ROS Schema Foundation (blueprint
+  // Sections 5, 9, 14.4). A Client may have zero or more Proposals over
+  // time (Section 5.2's conceptual relationship diagram).
+  proposals Proposal[]
+
   @@index([normalizedEmail])
   @@index([normalizedPhone])
   @@map("client")
@@ -549,6 +592,13 @@ model ClientProfile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Checkpoint 1 of the Proposal / ROS Schema Foundation (blueprint
+  // Sections 9, 14.4). Every portal-based ProposalAcceptance response this
+  // activated client account has made — never populated for externally
+  // recorded responses (Section 9.1), which are attributed to a staff User
+  // instead (see ProposalAcceptance below).
+  proposalAcceptances ProposalAcceptance[]
+
   @@map("client_profile")
 }
 
@@ -612,4 +662,275 @@ model PortalInvitation {
   @@index([status])
   @@index([expiresAt])
   @@map("portal_invitation")
+}
+
+// --- Checkpoint 1: Proposal / ROS Schema Foundation (Proposal / ProposalVersion / ProposalAcceptance) ---
+// The repository contains create-only migration
+// `20260715055859_proposal_ros_foundation`, which creates these tables and
+// contains both hand-written PostgreSQL statements documented below. This
+// file does not claim whether that migration has been applied to any
+// environment (local, staging, or production) —
+// docs/HERITAGE_V3_TASK_BOARD.md remains the source for verified
+// environment/migration-application status. No repository layer, service
+// layer, API route, client portal or admin dashboard UI, tests, or seed
+// data exists either. See the file header for the full list of what
+// remains deliberately deferred.
+
+// The three response terms approved in blueprint Section 9, "used
+// consistently across the platform" — not a broader proposal-status
+// lifecycle. This is deliberately not a closed value for *how* a response
+// was delivered — see ProposalAcceptance.responseMethod below, which is a
+// separate, open-ended field.
+enum ProposalResponseType {
+  ACCEPT
+  DECLINE
+  REQUEST_CHANGES
+}
+
+// The ROS (Rundown of Service) record for a Client (blueprint Sections 5,
+// 9, 14.4), created only through explicit staff action for an
+// already-converted Client (Section 6.7) — never automatically (Section
+// 5.1's non-automatic creation rule). Deliberately carries no status field
+// of its own: its entire lifecycle is expressed by its ProposalVersion
+// rows (draft / current-visible / superseded — see that model's doc
+// comment) and by ProposalAcceptance responses, so a second, competing
+// status here would be redundant. No proposal content (itinerary,
+// quotation, pricing, currency) lives on this model or on ProposalVersion
+// in this checkpoint — see the file header for why, and D-002 for the
+// still-unresolved currency decision this defers around.
+model Proposal {
+  id String @id
+
+  // `onDelete: Restrict`: a Client can never be removed out from under a
+  // Proposal that documents its commercial history, matching this
+  // schema's established convention (Lead.clientId, ClientProfile.clientId,
+  // PortalInvitation.clientId).
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions ProposalVersion[]
+
+  @@index([clientId])
+  @@map("proposal")
+}
+
+// An individual versioned draft/revision of a Proposal (blueprint Sections
+// 9, 14.4). Every edit after the first creates a new ProposalVersion
+// rather than overwriting the previous one (Section 9); existing rows are
+// never updated to change their content and never deleted by any future
+// repository method — full revision history is retained permanently. This
+// checkpoint models only version identity and lifecycle state, not
+// proposal content: no itinerary, quotation, line-item, pricing, or
+// currency field exists here (see the file header) — a later checkpoint
+// adds them once their shape is approved.
+//
+// Lifecycle is expressed by two independent, monotonic timestamps rather
+// than a status enum:
+//
+// - `clientVisibleAt` — null while this version is an unpublished
+//   consultant draft (Section 9: the client "sees only the current
+//   client-visible version"); set once this version has been shown to the
+//   client at least once ("published"). Multiple unpublished drafts
+//   (`clientVisibleAt IS NULL`) may coexist for the same Proposal — this
+//   checkpoint deliberately does not add an "at most one active draft"
+//   constraint; nothing in the blueprint requires it.
+// - `supersededAt` — null means only "not superseded"; it does not by
+//   itself mean "the latest," "active," or "current" version, since
+//   multiple unpublished drafts (`clientVisibleAt IS NULL`, see above) may
+//   simultaneously have `supersededAt IS NULL`. Once set, it means this
+//   specific version has been superseded (a newer version replaced it) or
+//   abandoned (a never-published draft was dropped in favor of a
+//   different one). Never cleared once set.
+//
+// Combining both fields distinguishes every state the blueprint requires:
+// unpublished draft (`clientVisibleAt` null, `supersededAt` null); current
+// client-visible version (`clientVisibleAt` set, `supersededAt` null —
+// Section 9's "current client-visible version"); superseded version
+// (`supersededAt` set, regardless of `clientVisibleAt`).
+//
+// "Accepted/locked" (Section 9: "once a version is accepted, it becomes
+// locked — it cannot be edited further") is deliberately NOT a third
+// stored field here. It is derived from this version's ProposalAcceptance
+// (see that model's `proposalVersionId @unique` below — at most one final
+// response per version): a version is accepted/locked exactly when its
+// related ProposalAcceptance exists and has `responseType = ACCEPT`. A
+// separate stored `acceptedAt`/`lockedAt` timestamp was deliberately
+// rejected to avoid two fields ever representing the same acceptance
+// moment and drifting apart — `ProposalAcceptance.respondedAt` is the one
+// source of truth for when that happened. Enforcing "cannot be edited
+// further" is a future service-layer concern once content fields and an
+// update path exist; this checkpoint has no editable content field for
+// that rule to protect yet.
+//
+// Prisma's schema language cannot express "at most one current
+// client-visible version per Proposal" as a column-level constraint —
+// migration `20260715055859_proposal_ros_foundation` adds this raw SQL by
+// hand:
+//   CREATE UNIQUE INDEX "proposal_version_current_client_visible_key"
+//     ON "proposal_version" ("proposalId")
+//     WHERE "clientVisibleAt" IS NOT NULL AND "supersededAt" IS NULL;
+// This index also serves as the race-safety backstop for the future
+// "publish" service operation (supersede the current version, then mark
+// the draft as client-visible, in one transaction): if that operation is
+// ever raced by a concurrent publish, the later commit fails on this
+// unique violation instead of silently producing two simultaneously
+// current versions. This file does not claim whether that migration has
+// been applied to any environment — see the file header.
+model ProposalVersion {
+  id String @id
+
+  proposalId String
+  proposal   Proposal @relation(fields: [proposalId], references: [id], onDelete: Restrict)
+
+  versionNumber Int
+
+  // The staff member who authored this specific version (Section 9: "A
+  // Travel Consultant creates the initial ROS draft... each edit... creates
+  // a new version"). `onDelete: Restrict`: never drop this attribution —
+  // accounts are deactivated, never deleted, per this schema's established
+  // convention (LeadStatusHistory.changedByUserId, StaffAssignment).
+  //
+  // This FK only records who authored the version — it cannot enforce
+  // proposal-author eligibility or that `createdByUser` is actually
+  // assigned to this Proposal's Client. The future Proposal service must
+  // enforce the approved role and assignment rules from blueprint Sections
+  // 4.2, 4.3, and 9 before writing this field, the same way
+  // `ProposalAcceptance.recordedByStaffUserId` below documents for
+  // externally recorded responses. This schema comment does not itself
+  // grant Admin / Manager permission to author or revise ProposalVersions:
+  // Section 9 (and Section 4.3's capability list) currently assigns
+  // Proposal/ROS preparation and revision to Travel Consultants; any
+  // additional authoring permission (e.g. for Admin / Manager) must come
+  // from an explicit approved rule, not be assumed from this FK's type.
+  createdByUserId String
+  createdByUser   User   @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  clientVisibleAt DateTime?
+  supersededAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  acceptance ProposalAcceptance?
+
+  @@unique([proposalId, versionNumber])
+  @@index([createdByUserId])
+  @@map("proposal_version")
+}
+
+// The record of a client's response to a specific ProposalVersion — Accept,
+// Decline, or Request Changes (blueprint Sections 9, 14.4) — always
+// including a response timestamp. `proposalVersionId` is `@unique`: at
+// most one final response per ProposalVersion. Only the current
+// client-visible version may receive a response
+// (`clientVisibleAt IS NOT NULL AND supersededAt IS NULL` — see
+// ProposalVersion above) — the database cannot verify that a given version
+// is "current" at the moment of insert (that fact depends on the state of
+// other rows), so the future service layer must check it transactionally
+// before writing this row.
+//
+// Exactly one of two complete, mutually exclusive attribution paths
+// applies to every row — a portal response or an externally recorded one
+// (Section 9.1) — never a mix of both and never neither:
+//
+// - Portal path — `respondingClientProfileId` (the durable client-portal
+//   identity, blueprint Section 14.1) plus `respondingSessionIdAtResponse`
+//   (below). `responseMethod`, `evidenceReference`, and
+//   `recordedByStaffUserId` are all null.
+// - External path (Section 9.1) — `recordedByStaffUserId` (the staff
+//   member who entered the response), `responseMethod` (the channel, e.g.
+//   phone/email/in person), and `evidenceReference` (a pointer or
+//   identifier — never a full copy of correspondence, consistent with
+//   `.claude/rules/database-security.md`'s data-minimization principle).
+//   `respondingClientProfileId` and `respondingSessionIdAtResponse` are
+//   both null. Section 9.1 restricts *who* may record an external
+//   response (only the Travel Consultant assigned to the Client, or an
+//   Admin / Manager) — not schema-expressible; the future service layer
+//   must enforce it, reusing/extending the existing `canAccessClient`
+//   authorization foundation
+//   (apps/web/src/features/assignments/authorization.ts).
+//
+// `responseMethod` is deliberately `String`, not a closed enum — the
+// blueprint gives only examples ("e.g., phone, email, in person"), not an
+// approved closed list, matching this schema's established precedent
+// (Lead.source).
+//
+// Prisma's schema language cannot express "exactly one complete
+// attribution path" as a column-level constraint — migration
+// `20260715055859_proposal_ros_foundation` adds this raw SQL by hand:
+//   ALTER TABLE "proposal_acceptance"
+//   ADD CONSTRAINT "proposal_acceptance_response_path"
+//   CHECK (
+//     (
+//       "respondingClientProfileId" IS NOT NULL
+//       AND "respondingSessionIdAtResponse" IS NOT NULL
+//       AND "recordedByStaffUserId" IS NULL
+//       AND "responseMethod" IS NULL
+//       AND "evidenceReference" IS NULL
+//     )
+//     OR
+//     (
+//       "recordedByStaffUserId" IS NOT NULL
+//       AND "responseMethod" IS NOT NULL
+//       AND "evidenceReference" IS NOT NULL
+//       AND "respondingClientProfileId" IS NULL
+//       AND "respondingSessionIdAtResponse" IS NULL
+//     )
+//   );
+// This file does not claim whether that migration has been applied to any
+// environment — see the file header.
+model ProposalAcceptance {
+  id String @id
+
+  proposalVersionId String          @unique
+  proposalVersion   ProposalVersion @relation(fields: [proposalVersionId], references: [id], onDelete: Restrict)
+
+  responseType ProposalResponseType
+  respondedAt  DateTime
+
+  // Portal path. `onDelete: Restrict` on `respondingClientProfile`: never
+  // drop a client's identity out from under their own recorded response,
+  // matching this schema's established convention.
+  respondingClientProfileId String?
+  respondingClientProfile   ClientProfile? @relation(fields: [respondingClientProfileId], references: [id], onDelete: Restrict)
+
+  // An immutable snapshot of Better Auth's `Session.id` at the moment of
+  // response — never `Session.token` (the actual replayable session
+  // credential; that value must never be persisted here or anywhere
+  // outside Better Auth's own `session` table). Deliberately NOT a
+  // `@relation` to Session: Session is Better Auth's own ephemeral
+  // session-management table (see this file's earlier note on the
+  // Session/Account/Verification models), not a Heritage domain entity,
+  // and it is routinely cleaned up on logout/expiry. A live FK here would
+  // either block that cleanup (`Restrict`) or silently destroy this
+  // permanent response record when a session row is swept (`Cascade`) —
+  // both unacceptable. Storing only the id as a plain, unvalidated scalar
+  // lets normal session deletion proceed untouched while this row keeps a
+  // permanent historical breadcrumb, the same way `AuditLog.beforeState`/
+  // `afterState` are unvalidated historical snapshots rather than live
+  // relations. The future service layer verifies session/client ownership
+  // (that the live, already-authenticated session's `userId` matches
+  // `respondingClientProfile.userId`, and that `respondingClientProfile`
+  // owns this response's Proposal's Client) at write time, from the live
+  // request context — never by re-querying this column afterward.
+  respondingSessionIdAtResponse String?
+
+  // External fallback path (Section 9.1). `onDelete: Restrict` on
+  // `recordedByStaffUser`: never drop the acting staff member's identity
+  // off an existing response record, matching this schema's established
+  // convention (LeadStatusHistory.changedByUserId, AuditLog.actorId).
+  recordedByStaffUserId String?
+  recordedByStaffUser   User?   @relation(fields: [recordedByStaffUserId], references: [id], onDelete: Restrict)
+  responseMethod        String?
+  evidenceReference     String?
+
+  createdAt DateTime @default(now())
+
+  @@index([respondingClientProfileId])
+  @@index([recordedByStaffUserId])
+  @@index([respondedAt])
+  @@map("proposal_acceptance")
 }
