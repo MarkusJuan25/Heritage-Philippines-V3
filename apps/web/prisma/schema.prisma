@@ -54,15 +54,41 @@
 // been applied to any environment (local, staging, or production) —
 // docs/HERITAGE_V3_TASK_BOARD.md remains the source for verified
 // environment/migration-application status. No proposal content
-// (itinerary, quotation, pricing, currency), Booking-creation behavior,
-// repository layer, service layer, API routes, client portal or admin
-// dashboard UI, tests, or seed data exist anywhere in this repository yet
-// for this checkpoint — see each model's own doc comment for exactly what
-// is, and is not, covered.
+// (itinerary, quotation, pricing, currency), repository layer, service
+// layer, API routes, client portal or admin dashboard UI, tests, or seed
+// data exist anywhere in this repository yet for this checkpoint — see
+// each model's own doc comment for exactly what is, and is not, covered.
+//
+// Booking, BookingStatusHistory, and the StaffAssignment extension making
+// Booking a supported assignment target are covered by this checkpoint —
+// the Booking Schema Foundation schema-and-migration checkpoint (blueprint
+// Sections 5, 5.1, 5.2, 8, 9, 13.4, 14.1, 14.5; .claude/rules/backend.md
+// Auditability; .claude/rules/database-security.md Identifiers and
+// Timestamps). Migration `20260716020734_booking_schema_foundation`
+// contains this checkpoint's schema operations and PostgreSQL constraints,
+// including replacing the prior two-target StaffAssignment lead/client XOR
+// constraint with a three-target lead/client/booking XOR constraint,
+// adding the booking active-assignment partial unique index, and adding
+// the Booking and BookingStatusHistory CHECK constraints (see the Booking,
+// BookingStatusHistory, and StaffAssignment model doc comments below for
+// each). This migration's presence in this repository does not by itself
+// confirm it has been applied to any environment (local, staging, or
+// production) — docs/HERITAGE_V3_TASK_BOARD.md remains the source for
+// verified environment/migration-application status. This checkpoint
+// deliberately does not model TourPackage as a catalogue entity or
+// relation (only an optional `tourPackageName` point-in-time snapshot
+// string), ItineraryVersion or any structured itinerary content, Booking
+// total price or currency (blocked on the unresolved currency strategy,
+// docs/HERITAGE_V3_DECISIONS_LOG.md D-002), or structured per-traveller
+// records (only an optional `travelerCount` scalar) — see the Booking
+// model doc comment for each. Services, APIs, UI, tests, and seed data for
+// Booking all remain deferred to future checkpoints.
 //
 // Deliberately out of scope here:
-// - Booking and VisaCase as StaffAssignment targets — deferred until those
-//   entities exist (blueprint Section 14.1).
+// - VisaCase as a StaffAssignment target — still deferred until that
+//   entity exists (blueprint Section 14.1). Booking is now a supported
+//   StaffAssignment target as of the Booking Schema Foundation checkpoint
+//   above.
 // - A Client status field/enum — the blueprint does not define an approved
 //   status list for it anywhere; see the Client model doc comment.
 // - A Permission database table — permissions stay expressed in code
@@ -84,16 +110,25 @@
 //   of it is modeled on ProposalVersion in this checkpoint; a later
 //   checkpoint adds these fields once their shape is approved, without
 //   bypassing D-002.
-// - Booking-creation behavior; the Proposal/ProposalVersion/
-//   ProposalAcceptance repository and service layers; proposal-related API
-//   routes; client portal and admin dashboard UI for proposals; tests; and
-//   seed data — all deferred to future checkpoints.
+// - The Proposal/ProposalVersion/ProposalAcceptance repository and service
+//   layers; proposal-related API routes; client portal and admin dashboard
+//   UI for proposals; tests; and seed data — all deferred to future
+//   checkpoints.
+// - TourPackage as a catalogue entity/relation, ItineraryVersion and
+//   structured itinerary content, Booking total price and currency
+//   (blocked on D-002), and structured per-traveller records — all
+//   deferred; see the Booking model doc comment below for each.
+// - Booking-creation behavior (the service action that turns an accepted
+//   ProposalVersion into a Booking); the Booking/BookingStatusHistory
+//   repository and service layers; booking-related API routes; client
+//   portal and admin dashboard UI for bookings; tests; and seed data — all
+//   deferred to future checkpoints.
 // - Every other later-phase business entity in blueprint Section 14
-//   (Booking, PaymentPlan, Document, VisaCase, Conversation, etc.) —
-//   remaining for later Phase 1 database-schema checkpoints under the
-//   "Implement database schema and reviewed migrations from the approved
-//   Phase 0 entity plan" checklist item (docs/HERITAGE_V3_TASK_BOARD.md),
-//   to support Phase 2+ feature implementation once modeled.
+//   (PaymentPlan, Document, VisaCase, Conversation, etc.) — remaining for
+//   later Phase 1 database-schema checkpoints under the "Implement
+//   database schema and reviewed migrations from the approved Phase 0
+//   entity plan" checklist item (docs/HERITAGE_V3_TASK_BOARD.md), to
+//   support Phase 2+ feature implementation once modeled.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -182,6 +217,15 @@ model User {
   // attributed to a ClientProfile instead (see ProposalAcceptance below).
   proposalVersionsAuthored  ProposalVersion[]
   recordedProposalResponses ProposalAcceptance[]
+
+  // The Booking Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 5, 13.4, 14.5). Booking creation is an explicit
+  // staff action (blueprint Section 5.1). Booking status changes require
+  // actor/timestamp auditability (.claude/rules/backend.md Auditability).
+  // Making this User relation required (not nullable) is the approved
+  // schema policy for this checkpoint; see the BookingStatusHistory model
+  // doc comment below.
+  bookingStatusChanges BookingStatusHistory[] @relation("BookingStatusHistoryActor")
 
   @@map("user")
 }
@@ -459,37 +503,57 @@ model Client {
   // time (Section 5.2's conceptual relationship diagram).
   proposals Proposal[]
 
+  // The Booking Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 5, 13.4, 14.5). A Client may have zero or more
+  // Bookings over time, each created from one of this Client's accepted
+  // ProposalVersions (see the Booking model doc comment below).
+  bookings Booking[]
+
   @@index([normalizedEmail])
   @@index([normalizedPhone])
   @@map("client")
 }
 
-// Records which staff member is assigned to which Lead or Client — the
-// first slice of the assignment-based access model (blueprint Section 4,
-// Section 14.1). Booking and VisaCase targets are deferred to the
-// checkpoint that introduces those entities.
+// Records which staff member is assigned to which Lead, Client, or
+// Booking — the assignment-based access model (blueprint Section 4,
+// Section 14.1). Extended to support Booking as of the Booking Schema
+// Foundation schema-and-migration checkpoint (below); VisaCase remains
+// deferred to the checkpoint that introduces that entity.
 //
-// Exactly one of `leadId` / `clientId` must be non-null. Prisma's schema
-// language cannot express a column-level XOR/CHECK constraint, so the
-// create-only migration generated from this model must add a raw SQL CHECK
-// constraint by hand, e.g.:
+// Exactly one of `leadId` / `clientId` / `bookingId` must be non-null.
+// Prisma's schema language cannot express a column-level XOR/CHECK
+// constraint, so migration `20260716020734_booking_schema_foundation`
+// ALTERs this table's existing CHECK constraint (added by create-only
+// migration `20260714024613_lead_client_assignment_foundation`) rather
+// than adding a second, conflicting one — dropping the old two-column
+// constraint and adding a three-column replacement:
+//   ALTER TABLE "staff_assignment"
+//     DROP CONSTRAINT "staff_assignment_lead_xor_client";
 //   ALTER TABLE "staff_assignment" ADD CONSTRAINT
-//     "staff_assignment_lead_xor_client"
-//     CHECK (num_nonnulls("leadId", "clientId") = 1);
+//     "staff_assignment_lead_xor_client_xor_booking"
+//     CHECK (num_nonnulls("leadId", "clientId", "bookingId") = 1);
 // Do not rely on application code alone to hold this invariant.
+// Migration-application status (which environments have actually run this
+// migration) is tracked in docs/HERITAGE_V3_TASK_BOARD.md, not this file.
 //
 // `endedAt` is null while the assignment is active and is set once revoked,
 // so assignment history is preserved rather than deleted
 // (.claude/rules/admin-dashboard.md Destructive and Irreversible Actions).
 // This schema also cannot express a partial unique index limiting a
-// Lead/Client to at most one active assignment; the same hand-written
-// migration must add, e.g.:
+// Lead/Client/Booking to at most one active assignment; migration
+// `20260714024613_lead_client_assignment_foundation` already added this
+// for Lead/Client:
 //   CREATE UNIQUE INDEX "staff_assignment_active_lead_key"
 //     ON "staff_assignment" ("leadId")
 //     WHERE "endedAt" IS NULL AND "leadId" IS NOT NULL;
 //   CREATE UNIQUE INDEX "staff_assignment_active_client_key"
 //     ON "staff_assignment" ("clientId")
 //     WHERE "endedAt" IS NULL AND "clientId" IS NOT NULL;
+// Migration `20260716020734_booking_schema_foundation` adds the
+// equivalent index for `bookingId`:
+//   CREATE UNIQUE INDEX "staff_assignment_active_booking_key"
+//     ON "staff_assignment" ("bookingId")
+//     WHERE "endedAt" IS NULL AND "bookingId" IS NOT NULL;
 // Whether "at most one active assignment" should instead vary by an
 // assignment type/role (e.g. a Travel Consultant and a Finance user each
 // holding a concurrent active assignment on the same Client) is not defined
@@ -524,16 +588,24 @@ model StaffAssignment {
   clientId String?
   client   Client? @relation(fields: [clientId], references: [id], onDelete: Restrict)
 
+  // Added by the Booking Schema Foundation schema-and-migration checkpoint
+  // — see the model doc comment above for the CHECK-constraint and
+  // partial-unique-index changes migration
+  // `20260716020734_booking_schema_foundation` makes for this column.
+  bookingId String?
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   endedAt   DateTime?
 
   // Authorization/active-assignment lookups: "what is this staff member
   // currently assigned to" and "who is currently assigned to this
-  // Lead/Client" both filter on endedAt IS NULL.
+  // Lead/Client/Booking" both filter on endedAt IS NULL.
   @@index([assignedStaffId, endedAt])
   @@index([leadId, endedAt])
   @@index([clientId, endedAt])
+  @@index([bookingId, endedAt])
   @@index([assignedByUserId])
   @@map("staff_assignment")
 }
@@ -816,6 +888,12 @@ model ProposalVersion {
 
   acceptance ProposalAcceptance?
 
+  // The Booking Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 5, 5.2, 9, 13.4, 14.5). At most one Booking may be
+  // created from this specific ProposalVersion — see the Booking model's
+  // `proposalVersionId @unique` field and doc comment below.
+  booking Booking?
+
   @@unique([proposalId, versionNumber])
   @@index([createdByUserId])
   @@map("proposal_version")
@@ -933,4 +1011,179 @@ model ProposalAcceptance {
   @@index([recordedByStaffUserId])
   @@index([respondedAt])
   @@map("proposal_acceptance")
+}
+
+// --- Booking Schema Foundation: schema-and-migration checkpoint ---
+// Adds Booking and BookingStatusHistory, and extends StaffAssignment (see
+// that model's updated doc comment above) so Booking is a supported
+// assignment target. Migration `20260716020734_booking_schema_foundation`
+// contains this checkpoint's schema operations and PostgreSQL constraints;
+// migration-application status (which environments have actually run it)
+// is tracked in docs/HERITAGE_V3_TASK_BOARD.md. No repository layer,
+// service layer, API route, client portal or admin dashboard UI, tests, or
+// seed data exists either — these remain deferred to future checkpoints.
+// See the file header for the full list of what remains deliberately
+// deferred (TourPackage as a catalogue entity, ItineraryVersion and
+// structured itinerary content, Booking total price/currency, and
+// structured per-traveller records).
+
+// The ten "suggested" booking statuses (blueprint Section 13.4) adopted as
+// the working enum, the same way LeadStatus (Section 6.1) was adopted
+// directly from its blueprint table.
+enum BookingStatus {
+  DRAFT
+  PENDING_CONFIRMATION
+  CONFIRMED
+  IN_PREPARATION
+  DOCUMENTS_REQUIRED
+  VISA_PROCESSING
+  READY_FOR_TRAVEL
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// The confirmed commercial engagement created from an accepted
+// ProposalVersion by an explicit staff action (blueprint Sections 5, 5.1,
+// 5.2, 9, 13.4, 14.5) — never automatically (Section 5.1's non-automatic
+// creation rule).
+//
+// `clientId` is a direct FK (mirroring this schema's established
+// Proposal.clientId convention) rather than something derived solely by
+// walking `proposalVersion.proposal.clientId`. Service-layer invariant for
+// later implementation, not enforced by a database trigger in this
+// checkpoint: `Booking.clientId` must always equal the Client connected
+// through `Booking.proposalVersion.proposal.clientId`. The future
+// Booking-creation service must verify this transactionally at write time,
+// the same way other cross-row invariants in this schema (e.g. "is this
+// ProposalVersion actually the current client-visible one") are deferred
+// to the service layer rather than expressed as a schema constraint.
+//
+// `proposalVersionId` is `@unique`: at most one Booking may be created
+// from a given ProposalVersion. The database cannot verify that the
+// referenced ProposalVersion actually has an ACCEPT ProposalAcceptance
+// (Section 9) — like ProposalAcceptance's own "is this the current
+// client-visible version" check, that fact depends on the state of other
+// rows, so the future Booking-creation service must verify it
+// transactionally before writing this row.
+//
+// `bookingReference` is the human-facing booking number and is `@unique`.
+//
+// `tourPackageName` is deliberately not a foreign key to any catalogue
+// entity — TourPackage (blueprint Section 14.5) remains deferred (see the
+// file header). This field is only an optional, point-in-time snapshot of
+// the tour/package name at booking time, not a live catalogue relation.
+//
+// `travelStartDate`/`travelEndDate`, `travelerCount`, and the free-text
+// service/notes fields below are all nullable: booking details may not yet
+// be known while `status` is DRAFT (blueprint Section 13.4 lists them as
+// booking fields without stating which are required from creation).
+// `internalNotes` and `clientVisibleNotes` both come from the Booking
+// field list in blueprint Section 13.4 ("Internal notes" / "Client-visible
+// notes"). Preventing clients from ever reading `internalNotes` is a
+// future authorization responsibility for the API/service layer, not
+// something this schema itself restricts.
+//
+// Migration `20260716020734_booking_schema_foundation` adds two CHECK
+// constraints Prisma's schema language cannot express:
+//   ALTER TABLE "booking" ADD CONSTRAINT "booking_traveler_count_positive"
+//     CHECK ("travelerCount" IS NULL OR "travelerCount" > 0);
+//   ALTER TABLE "booking" ADD CONSTRAINT "booking_travel_dates_order"
+//     CHECK (
+//       "travelStartDate" IS NULL OR "travelEndDate" IS NULL
+//       OR "travelStartDate" <= "travelEndDate"
+//     );
+model Booking {
+  id String @id
+
+  bookingReference String @unique
+
+  // `onDelete: Restrict`: a Client can never be removed out from under a
+  // Booking that documents its own commercial history, matching this
+  // schema's established convention (Lead.clientId, Proposal.clientId,
+  // etc.).
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  // `onDelete: Restrict`: never drop the specific accepted ProposalVersion
+  // a Booking was created from, matching this schema's established
+  // convention. See the model doc comment above for the `@unique` and
+  // client-consistency invariants this field carries.
+  proposalVersionId String          @unique
+  proposalVersion   ProposalVersion @relation(fields: [proposalVersionId], references: [id], onDelete: Restrict)
+
+  status BookingStatus @default(DRAFT)
+
+  // Point-in-time snapshot only — see the model doc comment above.
+  tourPackageName String?
+
+  destination String?
+
+  travelStartDate DateTime? @db.Date
+  travelEndDate   DateTime? @db.Date
+
+  travelerCount Int?
+
+  includedServices   String?
+  excludedServices   String?
+  specialRequests    String?
+  internalNotes      String?
+  clientVisibleNotes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statusHistory    BookingStatusHistory[]
+  staffAssignments StaffAssignment[]
+
+  @@index([clientId])
+  @@index([status])
+  @@map("booking")
+}
+
+// Timestamped record of every Booking status change (blueprint Sections
+// 5, 13.4; .claude/rules/database-security.md Identifiers and Timestamps;
+// .claude/rules/backend.md Auditability), mirroring LeadStatusHistory's
+// convention. Append-only in practice: the repository layer built in a
+// later checkpoint must only ever INSERT here.
+//
+// `changedByUserId` here is required, unlike
+// `LeadStatusHistory.changedByUserId` (nullable, because a lead's initial
+// NEW status may originate from an unauthenticated public submission with
+// no staff actor). Booking creation is an explicit staff action (blueprint
+// Section 5.1). Booking status changes require actor/timestamp
+// auditability (.claude/rules/backend.md Auditability). Making this field
+// required is the approved schema policy for this checkpoint.
+//
+// `previousStatus` is nullable for the same reason as LeadStatusHistory's:
+// a Booking's first history row (its initial DRAFT status) has no prior
+// status to record.
+//
+// Migration `20260716020734_booking_schema_foundation` adds one CHECK
+// constraint Prisma cannot express:
+//   ALTER TABLE "booking_status_history"
+//   ADD CONSTRAINT "booking_status_history_status_changed"
+//   CHECK ("previousStatus" IS NULL OR "previousStatus" != "newStatus");
+model BookingStatusHistory {
+  id String @id
+
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  previousStatus BookingStatus?
+  newStatus      BookingStatus
+
+  // `onDelete: Restrict`: never drop the acting staff member's identity off
+  // an existing history row, matching this schema's established
+  // convention (LeadStatusHistory.changedByUserId, AuditLog.actorId). See
+  // the model doc comment above for why this is required, not nullable.
+  changedByUserId String
+  changedBy       User   @relation("BookingStatusHistoryActor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@index([bookingId, createdAt])
+  @@index([changedByUserId])
+  @@index([createdAt])
+  @@map("booking_status_history")
 }
