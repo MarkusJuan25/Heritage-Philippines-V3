@@ -1,13 +1,15 @@
 import { z } from 'zod';
 
+import { BookingStatus } from '@/generated/prisma/client';
+
 // Booking-creation contract for this checkpoint (blueprint Sections 5, 5.1,
 // 5.2, 9). The client supplies only the accepted ProposalVersion to create
 // from — `bookingReference` is always server-generated (never accepted from
 // a request body; see features/bookings/service.ts's
 // `generateBookingReference`), and no editable Booking snapshot field
 // (destination, travel dates, notes, etc.) is accepted yet — those remain
-// deferred to a later checkpoint alongside status-transition and
-// Booking-detail-update behavior.
+// deferred to a later checkpoint alongside Booking-detail-update behavior.
+// Status transitions are covered separately below.
 //
 // `.strict()`: an unrecognized property (most importantly a caller-supplied
 // `bookingReference`, but any other field too) fails validation with a 400
@@ -25,6 +27,24 @@ export type CreateBookingInput = z.infer<typeof createBookingSchema>;
 export const bookingIdParamSchema = z.object({
   id: z.string().uuid('id must be a valid UUID'),
 });
+
+// The status-transition contract (docs/HERITAGE_V3_DECISIONS_LOG.md D-014).
+// `expectedStatus` is the caller's optimistic-concurrency check — the
+// service rejects with BOOKING_CONFLICT if the Booking's actual current
+// status no longer matches it (features/bookings/service.ts's
+// `updateBookingStatus`) — not merely documentation of intent. `.strict()`,
+// matching `createBookingSchema`: no `reason` field is accepted in this
+// checkpoint (D-014 explicitly defers it), and no other property is
+// silently accepted or stripped.
+const bookingStatusSchema = z.nativeEnum(BookingStatus);
+
+export const updateBookingStatusSchema = z
+  .object({
+    expectedStatus: bookingStatusSchema,
+    newStatus: bookingStatusSchema,
+  })
+  .strict();
+export type UpdateBookingStatusInput = z.infer<typeof updateBookingStatusSchema>;
 
 // Pagination only, mirroring features/staff/schemas.ts's
 // `listStaffAccountsQuerySchema` page/pageSize convention. No status filter

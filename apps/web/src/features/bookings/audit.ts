@@ -1,9 +1,9 @@
 // Action names written to AuditLog.action (blueprint Section 14.9;
-// .claude/rules/backend.md's Auditability rule). Only booking *creation* is
-// audited in this checkpoint — no status-transition or update actions exist
-// yet to name.
+// .claude/rules/backend.md's Auditability rule). Booking creation and
+// status transitions are audited; no other Booking mutation exists yet.
 export const BOOKING_AUDIT_ACTIONS = {
   BOOKING_CREATED: 'BOOKING_CREATED',
+  BOOKING_STATUS_CHANGED: 'BOOKING_STATUS_CHANGED',
 } as const;
 
 // AuditLog.entityType for every booking-management audit entry — the
@@ -45,4 +45,18 @@ export function sanitizeBookingSnapshot(record: {
     proposalVersionId: record.proposalVersionId,
     status: record.status,
   };
+}
+
+export type AuditBookingStatusSnapshot = { status: string };
+
+/**
+ * Builds the AuditLog before/afterState snapshot for a status transition
+ * (docs/HERITAGE_V3_DECISIONS_LOG.md D-014's "Audit only:
+ * beforeState: { status: previousStatus }, afterState: { status: newStatus }").
+ * Deliberately narrower than `sanitizeBookingSnapshot` above — a status
+ * change's audit trail only ever needs the two status values themselves,
+ * never the rest of the Booking record.
+ */
+export function sanitizeBookingStatusSnapshot(status: string): AuditBookingStatusSnapshot {
+  return { status };
 }
