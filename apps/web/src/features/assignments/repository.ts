@@ -22,6 +22,7 @@ export type AssignmentRecord = {
   assignedByUserId: string;
   leadId: string | null;
   clientId: string | null;
+  bookingId: string | null;
   createdAt: Date;
   updatedAt: Date;
   endedAt: Date | null;
@@ -33,6 +34,7 @@ const ASSIGNMENT_SELECT = {
   assignedByUserId: true,
   leadId: true,
   clientId: true,
+  bookingId: true,
   createdAt: true,
   updatedAt: true,
   endedAt: true,
@@ -50,6 +52,13 @@ export async function findClientById(
   id: string,
 ): Promise<{ id: string } | null> {
   return db.client.findUnique({ where: { id }, select: { id: true } });
+}
+
+export async function findBookingById(
+  db: Prisma.TransactionClient,
+  id: string,
+): Promise<{ id: string } | null> {
+  return db.booking.findUnique({ where: { id }, select: { id: true } });
 }
 
 export type AssigneeCandidate = { id: string; role: AppRole; isActive: boolean };
@@ -103,6 +112,26 @@ export async function findActiveAssignmentForClient(
 }
 
 /**
+ * The Booking's current active assignment, if any — see the Lead variant
+ * above. Independent of any Client-level assignment: this scopes only by
+ * `bookingId`, never by walking through the Booking's Client (blueprint
+ * Section 4.2's "lead/client/booking assignments" names Booking as its own
+ * assignment target, distinct from Client). The database's partial unique
+ * index on (`bookingId`) `WHERE endedAt IS NULL` (see the StaffAssignment
+ * model's doc comment in apps/web/prisma/schema.prisma) guarantees at most
+ * one row can ever match.
+ */
+export async function findActiveAssignmentForBooking(
+  db: Prisma.TransactionClient,
+  bookingId: string,
+): Promise<AssignmentRecord | null> {
+  return db.staffAssignment.findFirst({
+    where: { bookingId, endedAt: null },
+    select: ASSIGNMENT_SELECT,
+  });
+}
+
+/**
  * Whether the given User is linked, via ClientProfile, to the given Client
  * — the client-portal ownership check backing `canAccessClient`'s CLIENT
  * branch (blueprint Sections 4.6, 14.1). Scoped by both `userId` and
@@ -131,6 +160,7 @@ export async function createAssignment(
     assignedByUserId: string;
     leadId?: string;
     clientId?: string;
+    bookingId?: string;
   },
 ): Promise<AssignmentRecord> {
   return db.staffAssignment.create({
@@ -140,6 +170,7 @@ export async function createAssignment(
       assignedByUserId: input.assignedByUserId,
       leadId: input.leadId,
       clientId: input.clientId,
+      bookingId: input.bookingId,
     },
     select: ASSIGNMENT_SELECT,
   });
