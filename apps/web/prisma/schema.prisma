@@ -109,11 +109,15 @@
 // and the schema up to date (D-016). Their application to staging or
 // production is not implied by this file and must be verified
 // independently — docs/HERITAGE_V3_TASK_BOARD.md remains the source for
-// verified environment/migration-application status. This checkpoint deliberately
-// models at most one related record per Conversation (an optional Booking
-// or an optional Proposal, never both) and defers a VisaCase relation
-// entirely, since VisaCase does not exist anywhere in this schema yet (see
-// the StaffAssignment model doc comment's own VisaCase deferral above).
+// verified environment/migration-application status. This checkpoint
+// deliberately modeled at most one related record per Conversation (an
+// optional Booking or an optional Proposal, never both) and deferred a
+// VisaCase relation entirely, since VisaCase did not exist anywhere in
+// this schema at the time. The Visa Case Schema Foundation checkpoint,
+// Stage A (docs/HERITAGE_V3_DECISIONS_LOG.md D-017) has since added
+// `Conversation.relatedVisaCaseId` at the schema level — see the
+// Conversation model's own doc comment below for its current, up-to-date
+// state and the still-pending three-column constraint replacement.
 // Read state is modeled as a per-participant
 // `ConversationParticipant.lastReadAt` timestamp (D-016), not a shared
 // Message-level boolean, since a Conversation may have more than two
@@ -126,11 +130,65 @@
 // notification delivery, attachment malware scanning/signed-URL issuance,
 // and tests/seed data).
 //
+// VisaCase and VisaStatusHistory, and the StaffAssignment/Conversation
+// extensions making VisaCase a supported assignment target and Conversation
+// related-record type, are covered by this checkpoint — the Visa Case
+// Schema Foundation checkpoint (blueprint Sections 4.5, 4.7, 5, 5.1, 5.2, 8,
+// 13.8, 14.1, 14.8; docs/HERITAGE_V3_DECISIONS_LOG.md D-017). Stage A first
+// added this schema and D-017 without creating or applying any migration.
+// Migration `20260717024618_visa_case_schema_foundation` was subsequently
+// generated, reviewed, hand-augmented with the constraints D-017 requires
+// (see the StaffAssignment and Conversation model doc comments below for
+// each), and applied to the local `heritage_v3_dev` database on July 17,
+// 2026 — `docs/HERITAGE_V3_TASK_BOARD.md` records this. It has not been
+// applied to staging or production, and service/API enforcement and every
+// other deferred item listed below remain deferred regardless.
+// Per D-017: this checkpoint models exactly one VisaCase per Booking for
+// the MVP (`VisaCase.bookingId @unique`) — not multiple historical or
+// simultaneous VisaCases, and not traveler-level VisaCase modeling, both
+// out of scope. `VisaCaseStatus` is a full nine-value enum this checkpoint
+// itself defines (D-017), unlike every earlier status enum in this file:
+// blueprint Section 13.8 explicitly states "the detailed visa status list
+// will be finalized alongside implementation planning" and Section 16.2
+// separately lists it as an open decision — D-017 resolves it, so this is
+// the one enum in this file whose values come from an explicit decision
+// rather than being adopted directly from blueprint text. No transition
+// matrix is modeled or implied by the enum's ordering; that is explicitly
+// deferred to a later service/API checkpoint, matching how BookingStatus's
+// transition matrix was deferred to its own later D-014 checkpoint.
+//
+// Deliberately out of scope for this checkpoint (Stage A and beyond):
+// - VisaRequirement, Document, DocumentRequirement, and DocumentReview —
+//   VisaRequirement's blueprint description (Section 14.8) overlaps
+//   structurally with DocumentRequirement (Section 14.7), and neither
+//   Document nor DocumentRequirement exists anywhere in this schema yet;
+//   modeling VisaRequirement now risks a shape that would need reworking
+//   once those entities land. No placeholder document model is added.
+// - Any applicant/traveler, passport, nationality, embassy, or other
+//   identity-document field — VisaCase in this checkpoint is a workflow/
+//   status shell only, consistent with the data-minimization principle in
+//   `.claude/rules/database-security.md` and blueprint Section 9.1's
+//   caution against storing identity documents or unrelated personal
+//   information outside their proper, dedicated model.
+// - Any notes or arbitrary JSON field on VisaCase — blueprint Section 13.8
+//   gives no VisaCase field list (unlike Client Section 13.3 or Booking
+//   Section 13.4), so none is invented.
+// - `features/assignments`' `TargetKind` union, service, audit, and
+//   authorization code — VisaCase is added as a schema-level
+//   StaffAssignment target only (see the StaffAssignment model doc
+//   comment below); wiring it into the assignment service is a separate,
+//   later checkpoint, exactly mirroring how the Booking Schema Foundation
+//   checkpoint added `bookingId` to the schema without touching
+//   `features/assignments`, with that wiring following in the later,
+//   separate D-015 checkpoint.
+// - VisaCase/VisaStatusHistory repository and service layers, API routes,
+//   admin dashboard and client portal UI, VisaCase-authorization rules
+//   (who may create or change a VisaCase; how VisaCase-level and
+//   Booking-level StaffAssignment interact — both left open by D-017, not
+//   assumed here), status-transition enforcement, notifications, and
+//   tests/seed data — all deferred to future checkpoints.
+//
 // Deliberately out of scope here:
-// - VisaCase as a StaffAssignment target — still deferred until that
-//   entity exists (blueprint Section 14.1). Booking is now a supported
-//   StaffAssignment target as of the Booking Schema Foundation checkpoint
-//   above.
 // - A Client status field/enum — the blueprint does not define an approved
 //   status list for it anywhere; see the Client model doc comment.
 // - A Permission database table — permissions stay expressed in code
@@ -184,11 +242,11 @@
 //   signed/expiring download-link issuance (Section 12.3); and tests/seed
 //   data — all deferred to future checkpoints.
 // - Every other later-phase business entity in blueprint Section 14
-//   (PaymentPlan, Document, VisaCase, etc.) — remaining for later Phase 1
-//   database-schema checkpoints under the "Implement database schema and
-//   reviewed migrations from the approved Phase 0 entity plan" checklist
-//   item (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
-//   implementation once modeled.
+//   (PaymentPlan, Document, VisaRequirement, etc.) — remaining for later
+//   Phase 1 database-schema checkpoints under the "Implement database
+//   schema and reviewed migrations from the approved Phase 0 entity plan"
+//   checklist item (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+
+//   feature implementation once modeled.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -298,6 +356,21 @@ model User {
   // Message model doc comment below).
   conversationParticipations ConversationParticipant[]
   authoredMessages           Message[]
+
+  // The Visa Case Schema Foundation checkpoint, Stage A (blueprint
+  // Sections 4.5, 14.8; docs/HERITAGE_V3_DECISIONS_LOG.md D-017). Every
+  // VisaStatusHistory row this staff member wrote — required on every row,
+  // including the initial one, per D-017's own MVP policy, not something
+  // blueprint Section 5.1 itself imposes: Section 5.1 establishes only
+  // that a VisaCase is created deliberately, by an explicit staff *or
+  // system* action, never automatically as a side effect — it does not by
+  // itself require every creation or status change to be
+  // staff-attributed. Matches `BookingStatusHistory.changedByUserId`'s
+  // required shape, unlike `LeadStatusHistory.changedByUserId`'s nullable
+  // one. A future automated or actorless status-change path would require
+  // a superseding decision and a schema change to this field's
+  // nullability — it is not supported by this MVP schema.
+  visaStatusChanges VisaStatusHistory[] @relation("VisaStatusHistoryActor")
 
   @@map("user")
 }
@@ -588,16 +661,30 @@ model Client {
   // Booking or Proposal.
   conversations Conversation[]
 
+  // The Visa Case Schema Foundation checkpoint, Stage A (blueprint
+  // Sections 5, 5.2, 13.8, 14.8; docs/HERITAGE_V3_DECISIONS_LOG.md D-017).
+  // Per D-017, a Client has at most one VisaCase per Booking for the MVP
+  // (see the VisaCase model doc comment below) but may still accumulate
+  // more than one over time across different Bookings, hence the array.
+  visaCases VisaCase[]
+
   @@index([normalizedEmail])
   @@index([normalizedPhone])
   @@map("client")
 }
 
-// Records which staff member is assigned to which Lead, Client, or
-// Booking — the assignment-based access model (blueprint Section 4,
+// Records which staff member is assigned to which Lead, Client, Booking, or
+// VisaCase — the assignment-based access model (blueprint Section 4,
 // Section 14.1). Extended to support Booking as of the Booking Schema
-// Foundation schema-and-migration checkpoint (below); VisaCase remains
-// deferred to the checkpoint that introduces that entity.
+// Foundation schema-and-migration checkpoint (below). Extended to support
+// VisaCase by the Visa Case Schema Foundation checkpoint
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-017). Migration
+// `20260717024618_visa_case_schema_foundation` added this column and its
+// constraints (below) and has been applied to local `heritage_v3_dev`;
+// `features/assignments`' `TargetKind` union/service/audit/authorization
+// code remains deliberately untouched, matching how the Booking Schema
+// Foundation checkpoint added `bookingId` to the schema before its own
+// later, separate service-wiring checkpoint (D-015).
 //
 // Exactly one of `leadId` / `clientId` / `bookingId` must be non-null.
 // Prisma's schema language cannot express a column-level XOR/CHECK
@@ -614,6 +701,20 @@ model Client {
 // Do not rely on application code alone to hold this invariant.
 // Migration-application status (which environments have actually run this
 // migration) is tracked in docs/HERITAGE_V3_TASK_BOARD.md, not this file.
+//
+// Migration `20260717024618_visa_case_schema_foundation` extended this
+// three-column CHECK to a four-column one — dropping the prior constraint
+// and adding its replacement, the same mechanical pattern used for the
+// two-to-three-column change above:
+//   ALTER TABLE "staff_assignment"
+//     DROP CONSTRAINT "staff_assignment_lead_xor_client_xor_booking";
+//   ALTER TABLE "staff_assignment" ADD CONSTRAINT
+//     "staff_assignment_lead_xor_client_xor_booking_xor_visa_case"
+//     CHECK (num_nonnulls("leadId", "clientId", "bookingId", "visaCaseId") = 1);
+// This four-column CHECK is applied and validated on local
+// `heritage_v3_dev` — the database XOR constraint now covers `leadId`,
+// `clientId`, `bookingId`, and `visaCaseId` there. Its application to
+// staging or production must still be verified independently.
 //
 // `endedAt` is null while the assignment is active and is set once revoked,
 // so assignment history is preserved rather than deleted
@@ -633,6 +734,13 @@ model Client {
 //   CREATE UNIQUE INDEX "staff_assignment_active_booking_key"
 //     ON "staff_assignment" ("bookingId")
 //     WHERE "endedAt" IS NULL AND "bookingId" IS NOT NULL;
+// The same migration also added the equivalent partial unique index for
+// it; `staff_assignment_active_visa_case_key` is applied on local
+// `heritage_v3_dev` and now enforces at most one active assignment per
+// VisaCase there:
+//   CREATE UNIQUE INDEX "staff_assignment_active_visa_case_key"
+//     ON "staff_assignment" ("visaCaseId")
+//     WHERE "endedAt" IS NULL AND "visaCaseId" IS NOT NULL;
 // Whether "at most one active assignment" should instead vary by an
 // assignment type/role (e.g. a Travel Consultant and a Finance user each
 // holding a concurrent active assignment on the same Client) is not defined
@@ -674,17 +782,25 @@ model StaffAssignment {
   bookingId String?
   booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
 
+  // Added by the Visa Case Schema Foundation checkpoint — see the model
+  // doc comment above for the CHECK-constraint and partial-unique-index
+  // changes migration `20260717024618_visa_case_schema_foundation` makes
+  // for this column.
+  visaCaseId String?
+  visaCase   VisaCase? @relation(fields: [visaCaseId], references: [id], onDelete: Restrict)
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   endedAt   DateTime?
 
   // Authorization/active-assignment lookups: "what is this staff member
   // currently assigned to" and "who is currently assigned to this
-  // Lead/Client/Booking" both filter on endedAt IS NULL.
+  // Lead/Client/Booking/VisaCase" both filter on endedAt IS NULL.
   @@index([assignedStaffId, endedAt])
   @@index([leadId, endedAt])
   @@index([clientId, endedAt])
   @@index([bookingId, endedAt])
+  @@index([visaCaseId, endedAt])
   @@index([assignedByUserId])
   @@map("staff_assignment")
 }
@@ -1237,6 +1353,14 @@ model Booking {
   // the Conversation model doc comment below.
   conversations Conversation[]
 
+  // The Visa Case Schema Foundation checkpoint, Stage A (blueprint
+  // Sections 5, 5.2, 13.8, 14.8; docs/HERITAGE_V3_DECISIONS_LOG.md D-017).
+  // Zero or one, per D-017's MVP granularity decision — see the VisaCase
+  // model doc comment below for the `bookingId @unique` field that backs
+  // this and why multiple/historical VisaCases per Booking are out of
+  // scope.
+  visaCase VisaCase?
+
   @@index([clientId])
   @@index([status])
   @@map("booking")
@@ -1408,27 +1532,37 @@ enum ConversationParticipantRole {
 // a General Inquiry or Technical Support category conversation, Section
 // 10.2).
 //
-// `relatedBookingId`/`relatedProposalId` are both optional, and this
-// checkpoint models **at most one** related record: Section 10.1 says a
-// Conversation is "typically tied to... a specific booking, proposal, or
-// case" — a soft, typical link, not a required one, and nothing in the
-// blueprint states a Conversation may reference more than one related
-// record simultaneously. A `relatedVisaCaseId` is deliberately absent:
-// VisaCase does not exist anywhere in this schema yet (see the file header
-// and StaffAssignment's own VisaCase deferral above) — a future checkpoint
-// that introduces VisaCase must add that column and extend the
-// exclusivity constraint below to a three-way check, not silently reuse
-// this two-column one. `onDelete: Restrict` on both: never drop a Booking
-// or Proposal out from under a Conversation that references it, matching
-// this schema's established convention.
+// `relatedBookingId`/`relatedProposalId`/`relatedVisaCaseId` are all
+// optional, and this checkpoint models **at most one** related record:
+// Section 10.1 says a Conversation is "typically tied to... a specific
+// booking, proposal, or case" — a soft, typical link, not a required one,
+// and nothing in the blueprint states a Conversation may reference more
+// than one related record simultaneously. `relatedVisaCaseId` was added by
+// the Visa Case Schema Foundation checkpoint
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-017). `onDelete: Restrict` on all
+// three: never drop a Booking, Proposal, or VisaCase out from under a
+// Conversation that references it, matching this schema's established
+// convention.
 //
-// Prisma's schema language cannot express "at most one of two nullable
+// Prisma's schema language cannot express "at most one of these nullable
 // columns is non-null" as a column-level constraint — migration
-// `20260717010520_conversation_schema_constraints` adds this raw SQL by
-// hand:
+// `20260717010520_conversation_schema_constraints` originally added the
+// two-column version of this raw SQL by hand:
 //   ALTER TABLE "conversation" ADD CONSTRAINT
 //     "conversation_related_record_exclusive"
 //     CHECK (num_nonnulls("relatedBookingId", "relatedProposalId") <= 1);
+// Migration `20260717024618_visa_case_schema_foundation` replaced it with
+// the three-column version below, applied on local `heritage_v3_dev` —
+// `conversation_related_record_exclusive` now covers `relatedBookingId`,
+// `relatedProposalId`, and `relatedVisaCaseId` there:
+//   ALTER TABLE "conversation"
+//     DROP CONSTRAINT "conversation_related_record_exclusive";
+//   ALTER TABLE "conversation" ADD CONSTRAINT
+//     "conversation_related_record_exclusive"
+//     CHECK (num_nonnulls("relatedBookingId", "relatedProposalId", "relatedVisaCaseId") <= 1);
+// Its application to staging or production must still be verified
+// independently. The related conversation-creation/messaging service
+// enforcement described below remains deferred regardless.
 //
 // Service-layer invariants for later implementation, not enforced by any
 // database constraint in this checkpoint (the database cannot verify a
@@ -1437,6 +1571,7 @@ enum ConversationParticipantRole {
 // version" checks):
 //   - `relatedBooking.clientId` must equal `Conversation.clientId`.
 //   - `relatedProposal.clientId` must equal `Conversation.clientId`.
+//   - `relatedVisaCase.clientId` must equal `Conversation.clientId`.
 //   - a CLIENT-role `ConversationParticipant` on this Conversation must
 //     resolve (via ClientProfile) to this exact `Conversation.clientId`.
 // The future Conversation-creation/messaging service must verify each of
@@ -1465,6 +1600,12 @@ model Conversation {
   relatedProposalId String?
   relatedProposal   Proposal? @relation(fields: [relatedProposalId], references: [id], onDelete: Restrict)
 
+  // Added by the Visa Case Schema Foundation checkpoint — see the model
+  // doc comment above for the exclusivity-constraint replacement migration
+  // `20260717024618_visa_case_schema_foundation` makes for this column.
+  relatedVisaCaseId String?
+  relatedVisaCase   VisaCase? @relation(fields: [relatedVisaCaseId], references: [id], onDelete: Restrict)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1475,6 +1616,7 @@ model Conversation {
   @@index([category])
   @@index([relatedBookingId])
   @@index([relatedProposalId])
+  @@index([relatedVisaCaseId])
   @@map("conversation")
 }
 
@@ -1700,4 +1842,207 @@ model MessageAttachment {
 
   @@index([messageId])
   @@map("message_attachment")
+}
+
+// --- Visa Case Schema Foundation: schema-and-migration checkpoint ---
+// Adds VisaCaseStatus, VisaCase, and VisaStatusHistory, and extends
+// StaffAssignment and Conversation (see their model doc comments above)
+// so VisaCase is a supported assignment target and Conversation
+// related-record type (blueprint Sections 4.5, 4.7, 5, 5.1, 5.2, 8, 13.8,
+// 14.1, 14.8; docs/HERITAGE_V3_DECISIONS_LOG.md D-017).
+//
+// Stage A first added this schema and D-017 without creating or applying
+// any migration. Migration `20260717024618_visa_case_schema_foundation`
+// was subsequently generated (a single `prisma migrate dev --create-only`
+// invocation — see D-016 for why re-invoking that command is unsafe and
+// must not happen a second time), reviewed, hand-augmented with the
+// constraints documented on each model below, and applied to local
+// `heritage_v3_dev` on July 17, 2026. It has not been applied to staging
+// or production. No repository layer, service layer, API route, admin
+// dashboard or client portal UI, tests, or seed data exists either. In
+// particular, this checkpoint deliberately does NOT implement:
+//
+// - VisaRequirement, Document, DocumentRequirement, or DocumentReview —
+//   VisaRequirement's blueprint description (Section 14.8: "defines what
+//   is required for a specific VisaCase (documents, forms, deadlines)")
+//   overlaps structurally with DocumentRequirement (Section 14.7: "defines
+//   which document categories are required for a given Booking or
+//   VisaCase"), and neither Document nor DocumentRequirement exists
+//   anywhere in this schema yet. Modeling VisaRequirement now risks a
+//   shape that would need reworking once those entities land, so it is
+//   deferred entirely rather than guessed at.
+// - Any applicant/traveler, passport, nationality, embassy, or other
+//   identity-document field, and any notes or arbitrary JSON field —
+//   VisaCase in this checkpoint is a workflow/status shell only. Blueprint
+//   Section 13.8 gives no VisaCase field list (unlike Client Section 13.3
+//   or Booking Section 13.4), so none is invented; the data-minimization
+//   principle in `.claude/rules/database-security.md` and blueprint
+//   Section 9.1's caution against storing identity documents or unrelated
+//   personal information outside their proper, dedicated model both apply
+//   with particular force to visa data specifically.
+// - A VisaCase status-transition matrix — the nine `VisaCaseStatus` values
+//   (D-017) name states only; no transition graph is modeled or implied by
+//   their declaration order. Enforcement is deferred to a later service/API
+//   checkpoint, the same way `BookingStatus`'s transition matrix was
+//   deferred to its own later, separate D-014 checkpoint.
+// - `features/assignments`' `TargetKind` union, service, audit, and
+//   authorization code — see the StaffAssignment model doc comment above.
+// - VisaCase/VisaStatusHistory repository and service layers, API routes,
+//   UI, VisaCase-authorization rules (who may create or change a VisaCase;
+//   how VisaCase-level and Booking-level StaffAssignment interact — both
+//   left open by D-017, not assumed here), notifications, and tests/seed
+//   data.
+
+// A full, self-defined enum — unlike every earlier status enum in this
+// file (LeadStatus, BookingStatus, PortalInvitationStatus), which were
+// each adopted directly from an explicit blueprint-given list, blueprint
+// Section 13.8 states outright that "the detailed visa status list will be
+// finalized alongside implementation planning," and Section 16.2
+// separately lists it as an open decision. D-017 resolves it. `APPROVED`,
+// `REJECTED`, and `WITHDRAWN` are terminal (D-017) — nothing in this
+// schema enforces that terminality yet; a future transition-enforcement
+// checkpoint owns that rule, the same way `BookingStatus`'s terminal
+// states (`COMPLETED`, `CANCELLED`) are enforced only by D-014's
+// service-layer transition matrix, never by the enum declaration itself.
+enum VisaCaseStatus {
+  OPENED
+  REQUIREMENTS_PENDING
+  UNDER_REVIEW
+  ADDITIONAL_INFORMATION_REQUIRED
+  READY_FOR_SUBMISSION
+  SUBMITTED
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+// The conditional visa workflow record for a Booking (blueprint Sections
+// 5, 8, 13.8, 14.8), created only when visa assistance is actually
+// required — never automatically for every Booking (Section 5.1's
+// non-automatic creation rule; Section 8: "A visa case is only created
+// when the client or destination actually requires visa assistance").
+//
+// Per D-017, this checkpoint models exactly **zero or one** VisaCase per
+// Booking for the MVP — not multiple historical or simultaneous
+// VisaCases, and not traveler-level VisaCase modeling (e.g. one case per
+// traveler on a multi-traveler Booking), both explicitly out of scope.
+// `bookingId` is `@unique` to enforce this at the database level: a second
+// `POST`-equivalent attempt against the same Booking would violate this
+// constraint rather than silently succeed. This is deliberately a plain
+// `@unique`, not a partial unique index — unlike
+// `ProposalVersion`'s "at most one *current* version" or
+// `StaffAssignment`'s "at most one *active* assignment" patterns, there is
+// no historical/superseded VisaCase concept in this checkpoint for a
+// partial index to distinguish; the constraint is simply "at most one,
+// ever, per Booking."
+//
+// `clientId` is a direct FK, mirroring this schema's established
+// Lead.clientId/Proposal.clientId/Booking.clientId/Conversation.clientId
+// convention, rather than something derivable only by walking
+// `booking.clientId`. Service-layer invariant for later implementation,
+// not enforced by any database constraint in this checkpoint (the
+// database cannot verify a fact that depends on the state of another row,
+// matching this schema's established precedent for Booking.clientId vs.
+// its ProposalVersion's Proposal.clientId): **`VisaCase.clientId` must
+// always equal the Client connected through `VisaCase.booking.clientId`.**
+// The future VisaCase-creation service must verify this transactionally
+// at write time — skipping it risks a cross-client data leak, which
+// `.claude/rules/client-portal.md` treats as critical severity. This
+// schema does not, and cannot, attempt to solve this with duplicated or
+// derived-column logic; do not add one.
+//
+// `status` defaults to `OPENED`. Who may create a VisaCase, and who beyond
+// Visa Documentation Staff (blueprint Section 4.5) may change its status —
+// including whether Admin/Manager's Section 4.2 "full visibility" extends
+// to edit capability here, which is not explicitly granted the way other
+// roles' "manage X" capabilities are — is left an open decision (D-017),
+// not assumed by this schema.
+//
+// `onDelete: Restrict` on both `client` and `booking`: neither can be
+// removed out from under a VisaCase that documents its own workflow
+// history, matching this schema's established convention.
+model VisaCase {
+  id String @id
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  bookingId String  @unique
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  status VisaCaseStatus @default(OPENED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statusHistory    VisaStatusHistory[]
+  staffAssignments StaffAssignment[]
+
+  // The Conversation Schema Foundation's related-record model, extended by
+  // this checkpoint — see the Conversation model doc comment above.
+  conversations Conversation[]
+
+  @@index([clientId])
+  @@index([status])
+  @@map("visa_case")
+}
+
+// Timestamped record of every VisaCase status change (blueprint Sections
+// 13.8, 14.8; .claude/rules/database-security.md Identifiers and
+// Timestamps; .claude/rules/backend.md Auditability), mirroring
+// BookingStatusHistory's convention exactly. Append-only in practice: the
+// repository layer built in a later checkpoint must only ever INSERT here.
+//
+// `changedByUserId` is required (D-017), not nullable — matching
+// `BookingStatusHistory.changedByUserId` rather than
+// `LeadStatusHistory.changedByUserId` (nullable there because a lead's
+// initial NEW status may originate from an unauthenticated public
+// submission with no staff actor). This is D-017's own MVP policy, not a
+// requirement blueprint Section 5.1 itself imposes: Section 5.1
+// establishes only that a VisaCase is created deliberately, by an
+// explicit staff *or system* action, never automatically as a side
+// effect — it does not say every creation must be staff-attributed. Per
+// D-017, this MVP schema requires an attributable staff User on every
+// row, including the initial one; a future automated/actorless status
+// change would need a superseding decision and a schema change (making
+// this column nullable again) before it could be modeled.
+//
+// `previousStatus` is nullable for the same reason as
+// `BookingStatusHistory`'s: a VisaCase's first history row (its initial
+// `OPENED` status) has no prior status to record.
+//
+// Migration `20260717024618_visa_case_schema_foundation` added one CHECK
+// constraint Prisma cannot express, mirroring
+// `booking_status_history_status_changed` in spirit (though using `<>`
+// rather than that constraint's `!=` — both are equivalent PostgreSQL
+// inequality operators; this one simply matches the exact text reviewed
+// and approved for this constraint):
+//   ALTER TABLE "visa_status_history"
+//   ADD CONSTRAINT "visa_status_history_status_changed"
+//   CHECK ("previousStatus" IS NULL OR "previousStatus" <> "newStatus");
+// This constraint is applied and validated on local `heritage_v3_dev`; see
+// the file-header note above this section for staging/production status.
+model VisaStatusHistory {
+  id String @id
+
+  visaCaseId String
+  visaCase   VisaCase @relation(fields: [visaCaseId], references: [id], onDelete: Restrict)
+
+  previousStatus VisaCaseStatus?
+  newStatus      VisaCaseStatus
+
+  // `onDelete: Restrict`: never drop the acting staff member's identity off
+  // an existing history row, matching this schema's established
+  // convention (LeadStatusHistory.changedByUserId, AuditLog.actorId,
+  // BookingStatusHistory.changedByUserId). See the model doc comment above
+  // for why this is required, not nullable.
+  changedByUserId String
+  changedBy       User   @relation("VisaStatusHistoryActor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@index([visaCaseId, createdAt])
+  @@index([changedByUserId])
+  @@index([createdAt])
+  @@map("visa_status_history")
 }
