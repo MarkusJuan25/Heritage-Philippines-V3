@@ -84,6 +84,48 @@
 // model doc comment for each. Services, APIs, UI, tests, and seed data for
 // Booking all remain deferred to future checkpoints.
 //
+// Conversation, ConversationParticipant, Message, and MessageAttachment are
+// covered by this checkpoint — the Conversation Schema Foundation
+// schema-and-migration checkpoint (blueprint Sections 4.2-4.6, 9.1, 10,
+// 10.1, 10.2, 10.3, 13.9, 14.3; docs/HERITAGE_V3_DECISIONS_LOG.md D-016).
+// This checkpoint spans two migrations rather than one, because of an
+// implementation-session incident recorded in D-016: migration
+// `20260717010445_conversation_schema_foundation` contains the four new
+// tables, three new enums, and their standard (non-partial, non-CHECK)
+// indexes and foreign keys — it was applied to the local `heritage_v3_dev`
+// database ahead of schedule, before its accompanying hand-written
+// PostgreSQL constraints existed, and was left byte-for-byte unchanged
+// rather than edited post-application (editing an already-applied
+// migration file would desync its checksum from the recorded
+// `_prisma_migrations` row). Migration
+// `20260717010520_conversation_schema_constraints` — created empty by the
+// same incident, then renamed and populated with every hand-written
+// PostgreSQL constraint and partial unique index Prisma's schema language
+// cannot express on its own (see the Conversation, ConversationParticipant,
+// and Message model doc comments below for each constraint and its
+// rationale) — was reviewed and then also applied. Both migrations were
+// successfully applied to local `heritage_v3_dev` on July 17, 2026;
+// `prisma migrate status` subsequently reported all 8 migrations applied
+// and the schema up to date (D-016). Their application to staging or
+// production is not implied by this file and must be verified
+// independently — docs/HERITAGE_V3_TASK_BOARD.md remains the source for
+// verified environment/migration-application status. This checkpoint deliberately
+// models at most one related record per Conversation (an optional Booking
+// or an optional Proposal, never both) and defers a VisaCase relation
+// entirely, since VisaCase does not exist anywhere in this schema yet (see
+// the StaffAssignment model doc comment's own VisaCase deferral above).
+// Read state is modeled as a per-participant
+// `ConversationParticipant.lastReadAt` timestamp (D-016), not a shared
+// Message-level boolean, since a Conversation may have more than two
+// participants. No Conversation status/lifecycle field, subject/title
+// field, or `lastMessageAt` denormalization exists — none is defined
+// anywhere in blueprint Section 10, so none is invented here. See the file
+// header's "Deliberately out of scope here" list below, and each model's
+// own doc comment, for the full list of what this checkpoint still defers
+// (repository/service layers, API routes, UI, authorization, email
+// notification delivery, attachment malware scanning/signed-URL issuance,
+// and tests/seed data).
+//
 // Deliberately out of scope here:
 // - VisaCase as a StaffAssignment target — still deferred until that
 //   entity exists (blueprint Section 14.1). Booking is now a supported
@@ -123,12 +165,30 @@
 //   repository and service layers; booking-related API routes; client
 //   portal and admin dashboard UI for bookings; tests; and seed data — all
 //   deferred to future checkpoints.
+// - VisaCase as a Conversation related-record type — deferred until that
+//   entity exists, matching its existing StaffAssignment deferral above;
+//   see the Conversation model doc comment below for the exclusivity
+//   constraint a future checkpoint must extend to a three-way check.
+// - The Conversation/ConversationParticipant/Message/MessageAttachment
+//   repository and service layers; conversation-related API routes; admin
+//   dashboard and client portal UI for Support & Messages; conversation
+//   and message authorization — including Admin/Manager's full,
+//   unconditional visibility (Section 10.1), client ownership and
+//   explicit client participation, Travel Consultant active-assignment
+//   access, explicit Finance/Visa Documentation participation, and
+//   server-side exclusion of INTERNAL_NOTE messages from every
+//   client-facing query (D-016; .claude/rules/admin-dashboard.md
+//   Visibility Scoping) — the cross-table client-consistency checks noted
+//   on the Conversation model doc comment below; Section 10.3's email
+//   notification delivery; attachment malware scanning and
+//   signed/expiring download-link issuance (Section 12.3); and tests/seed
+//   data — all deferred to future checkpoints.
 // - Every other later-phase business entity in blueprint Section 14
-//   (PaymentPlan, Document, VisaCase, Conversation, etc.) — remaining for
-//   later Phase 1 database-schema checkpoints under the "Implement
-//   database schema and reviewed migrations from the approved Phase 0
-//   entity plan" checklist item (docs/HERITAGE_V3_TASK_BOARD.md), to
-//   support Phase 2+ feature implementation once modeled.
+//   (PaymentPlan, Document, VisaCase, etc.) — remaining for later Phase 1
+//   database-schema checkpoints under the "Implement database schema and
+//   reviewed migrations from the approved Phase 0 entity plan" checklist
+//   item (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
+//   implementation once modeled.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -226,6 +286,18 @@ model User {
   // schema policy for this checkpoint; see the BookingStatusHistory model
   // doc comment below.
   bookingStatusChanges BookingStatusHistory[] @relation("BookingStatusHistoryActor")
+
+  // The Conversation Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 10, 10.1, 14.3). `conversationParticipations`:
+  // every Conversation this staff member currently or formerly
+  // participated in (TRAVEL_CONSULTANT, FINANCE_ACCOUNTING, or
+  // VISA_DOCUMENTATION capacity — see ConversationParticipant's own doc
+  // comment for the role/identity split). `authoredMessages`: every
+  // Message this staff member sent — never populated for a client-authored
+  // Message, which is attributed to a ClientProfile instead (see the
+  // Message model doc comment below).
+  conversationParticipations ConversationParticipant[]
+  authoredMessages           Message[]
 
   @@map("user")
 }
@@ -509,6 +581,13 @@ model Client {
   // ProposalVersions (see the Booking model doc comment below).
   bookings Booking[]
 
+  // The Conversation Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 10, 10.1, 14.3). Every Conversation tied to this
+  // Client over time — see the Conversation model doc comment below for
+  // why `clientId` is a direct FK rather than derived through a related
+  // Booking or Proposal.
+  conversations Conversation[]
+
   @@index([normalizedEmail])
   @@index([normalizedPhone])
   @@map("client")
@@ -671,6 +750,16 @@ model ClientProfile {
   // instead (see ProposalAcceptance below).
   proposalAcceptances ProposalAcceptance[]
 
+  // The Conversation Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 10, 10.1, 14.3). `conversationParticipations`:
+  // every Conversation this activated client account currently or
+  // formerly participated in (CLIENT capacity — see
+  // ConversationParticipant's own doc comment). `authoredMessages`: every
+  // Message this client account sent — never populated for a
+  // staff-authored Message (see the Message model doc comment below).
+  conversationParticipations ConversationParticipant[]
+  authoredMessages           Message[]
+
   @@map("client_profile")
 }
 
@@ -784,6 +873,12 @@ model Proposal {
   updatedAt DateTime @updatedAt
 
   versions ProposalVersion[]
+
+  // The Conversation Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 10, 10.1, 14.3). Every Conversation that names this
+  // Proposal as its (at most one, per this checkpoint) related record —
+  // see the Conversation model doc comment below.
+  conversations Conversation[]
 
   @@index([clientId])
   @@map("proposal")
@@ -1136,6 +1231,12 @@ model Booking {
   statusHistory    BookingStatusHistory[]
   staffAssignments StaffAssignment[]
 
+  // The Conversation Schema Foundation schema-and-migration checkpoint
+  // (blueprint Sections 10, 10.1, 14.3). Every Conversation that names this
+  // Booking as its (at most one, per this checkpoint) related record — see
+  // the Conversation model doc comment below.
+  conversations Conversation[]
+
   @@index([clientId])
   @@index([status])
   @@map("booking")
@@ -1186,4 +1287,417 @@ model BookingStatusHistory {
   @@index([changedByUserId])
   @@index([createdAt])
   @@map("booking_status_history")
+}
+
+// --- Conversation Schema Foundation: schema-and-migration checkpoint ---
+// Adds ConversationCategory, MessageVisibility, ConversationParticipantRole,
+// Conversation, ConversationParticipant, Message, and MessageAttachment
+// (blueprint Sections 4.2-4.6, 9.1, 10, 10.1, 10.2, 10.3, 13.9, 14.3;
+// docs/HERITAGE_V3_DECISIONS_LOG.md D-016). Split across two migrations —
+// see D-016 for why: `20260717010445_conversation_schema_foundation`
+// (tables, enums, standard indexes, foreign keys) and
+// `20260717010520_conversation_schema_constraints` (every hand-added
+// PostgreSQL CHECK constraint and partial unique index Prisma's schema
+// language cannot express on its own). Both were successfully applied to
+// local `heritage_v3_dev` on July 17, 2026, and `prisma migrate status`
+// subsequently reported all 8 migrations applied and the schema up to
+// date. Application to staging or production must still be verified
+// independently — migration-application status per environment is tracked
+// in docs/HERITAGE_V3_TASK_BOARD.md, not this file. No repository layer,
+// service layer, API route, admin dashboard or client portal UI, tests, or
+// seed data exists yet. In particular, this checkpoint deliberately does
+// NOT implement:
+//
+// - Conversation/Message authorization. The future enforcement checkpoint
+//   must account for all of: Admin/Manager's full, unconditional
+//   visibility into every Conversation (Section 10.1 — a role-wide grant,
+//   never an inserted ConversationParticipant row, matching
+//   ADMIN_MANAGER's existing assignment-free treatment in
+//   `canAccessClient`, apps/web/src/features/assignments/authorization.ts);
+//   a CLIENT actor's own ownership of the Conversation's Client (via
+//   ClientProfile, matching `canAccessClient`'s existing ownership check)
+//   together with their explicit ConversationParticipant membership; a
+//   TRAVEL_CONSULTANT's active Client/Booking assignment
+//   (`StaffAssignment.endedAt IS NULL`); and explicit
+//   ConversationParticipant membership for FINANCE_ACCOUNTING and
+//   VISA_DOCUMENTATION actors, who have no assignment-based path onto a
+//   Conversation at all. Conversation authorization must never be
+//   described or implemented as "participant rows alone" — Admin/Manager's
+//   visibility, and possibly a Travel Consultant's, may need to hold
+//   without any ConversationParticipant row existing for them; whether
+//   Travel Consultant access requires an explicit participant row or
+//   active Client/Booking assignment alone suffices (as it already does
+//   for Booking read/status access, D-014/D-015) is left an open decision
+//   for that future checkpoint.
+// - Server-side exclusion of INTERNAL_NOTE messages from every
+//   client-facing query — never a client-side filter
+//   (.claude/rules/admin-dashboard.md Visibility Scoping).
+// - The cross-table client-consistency checks noted on the Conversation
+//   model doc comment below (`relatedBooking.clientId`/
+//   `relatedProposal.clientId` must equal `Conversation.clientId`; a
+//   CLIENT participant must belong to `Conversation.clientId`).
+// - Section 10.3's email notification delivery, and attachment malware
+//   scanning / signed-expiring-URL issuance (Section 12.3).
+//
+// See each model's own doc comment below for further detail.
+
+// The eight closed categories a Conversation may belong to (blueprint
+// Section 10.2), adopted directly as the working enum, the same way
+// LeadStatus (Section 6.1) and BookingStatus (Section 13.4) were each
+// adopted directly from their own blueprint list.
+enum ConversationCategory {
+  GENERAL_INQUIRY
+  PROPOSAL_ROS
+  BOOKING
+  PAYMENT
+  DOCUMENTS
+  VISA
+  TRAVEL_PREPARATION
+  TECHNICAL_SUPPORT
+}
+
+// Blueprint Section 10.1's "client-visible messages vs. internal staff
+// notes" distinction. Modeled as a two-value enum, not a boolean, matching
+// this schema's convention of naming blueprint-given terms directly
+// (ProposalResponseType, PortalInvitationStatus) rather than encoding them
+// as an unnamed boolean. Internal notes must never be exposed on the
+// client portal (Section 10.1) — enforced by the future service/query
+// layer on every client-facing read, never by client-side filtering
+// (.claude/rules/admin-dashboard.md Visibility Scoping); see the Message
+// model doc comment below for the one database-level restriction this
+// schema does add (a client-authored message can never be INTERNAL_NOTE).
+enum MessageVisibility {
+  CLIENT_VISIBLE
+  INTERNAL_NOTE
+}
+
+// The participant capacities blueprint Section 10.1 actually documents:
+// the assigned Travel Consultant by default, plus an optional Finance
+// participant and/or optional Visa Documentation participant "when
+// relevant," and the Client themself (Section 4.6: clients "send and
+// receive Support & Messages for their own records"). Deliberately does
+// NOT include an ADMIN_MANAGER value: Section 10.1 describes Admin/
+// Manager's full visibility into every Conversation as a role-wide grant,
+// not participation in a specific thread — the same way `canAccessClient`
+// grants ADMIN_MANAGER access without an assignment row
+// (apps/web/src/features/assignments/authorization.ts). The future
+// conversation-authorization checkpoint must implement that visibility as
+// a role check, never by inserting a ConversationParticipant row for every
+// Admin/Manager account. See ConversationParticipant's own doc comment
+// below for how this enum interacts with the staffUserId/clientProfileId
+// identity split.
+enum ConversationParticipantRole {
+  CLIENT
+  TRAVEL_CONSULTANT
+  FINANCE_ACCOUNTING
+  VISA_DOCUMENTATION
+}
+
+// A message thread tied to a Client (blueprint Sections 10, 10.1, 14.3).
+// Blueprint Section 10 does not define an exact conversation-creation
+// policy — who may create a Conversation, and whether a client may
+// self-initiate one for particular categories (e.g. Technical Support)
+// versus every category requiring staff to open it — so this schema does
+// not assume or encode one. That policy, and its authorization, are
+// deferred to the future conversation-enforcement checkpoint.
+//
+// `clientId` is a direct FK, mirroring this schema's established
+// Lead.clientId/Proposal.clientId/Booking.clientId convention, rather than
+// something derivable only by walking a related Booking or Proposal —
+// necessary because a Conversation may have no related record at all (e.g.
+// a General Inquiry or Technical Support category conversation, Section
+// 10.2).
+//
+// `relatedBookingId`/`relatedProposalId` are both optional, and this
+// checkpoint models **at most one** related record: Section 10.1 says a
+// Conversation is "typically tied to... a specific booking, proposal, or
+// case" — a soft, typical link, not a required one, and nothing in the
+// blueprint states a Conversation may reference more than one related
+// record simultaneously. A `relatedVisaCaseId` is deliberately absent:
+// VisaCase does not exist anywhere in this schema yet (see the file header
+// and StaffAssignment's own VisaCase deferral above) — a future checkpoint
+// that introduces VisaCase must add that column and extend the
+// exclusivity constraint below to a three-way check, not silently reuse
+// this two-column one. `onDelete: Restrict` on both: never drop a Booking
+// or Proposal out from under a Conversation that references it, matching
+// this schema's established convention.
+//
+// Prisma's schema language cannot express "at most one of two nullable
+// columns is non-null" as a column-level constraint — migration
+// `20260717010520_conversation_schema_constraints` adds this raw SQL by
+// hand:
+//   ALTER TABLE "conversation" ADD CONSTRAINT
+//     "conversation_related_record_exclusive"
+//     CHECK (num_nonnulls("relatedBookingId", "relatedProposalId") <= 1);
+//
+// Service-layer invariants for later implementation, not enforced by any
+// database constraint in this checkpoint (the database cannot verify a
+// fact that depends on the state of other rows, matching this schema's
+// established precedent for Booking.clientId / ProposalVersion's "current
+// version" checks):
+//   - `relatedBooking.clientId` must equal `Conversation.clientId`.
+//   - `relatedProposal.clientId` must equal `Conversation.clientId`.
+//   - a CLIENT-role `ConversationParticipant` on this Conversation must
+//     resolve (via ClientProfile) to this exact `Conversation.clientId`.
+// The future Conversation-creation/messaging service must verify each of
+// these transactionally at write time — skipping them risks a cross-client
+// data leak, which `.claude/rules/client-portal.md` treats as critical
+// severity.
+//
+// Deliberately excluded from this checkpoint: a status/lifecycle field
+// (open vs. resolved/closed) — blueprint Section 10 defines no such list,
+// unlike LeadStatus/BookingStatus/PortalInvitationStatus, so none is
+// invented; a subject/title field — not described anywhere in Section
+// 10.1's field list; and a denormalized `lastMessageAt` — not documented,
+// and would itself need service-layer maintenance this checkpoint does not
+// add.
+model Conversation {
+  id String @id
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  category ConversationCategory
+
+  relatedBookingId String?
+  relatedBooking   Booking? @relation(fields: [relatedBookingId], references: [id], onDelete: Restrict)
+
+  relatedProposalId String?
+  relatedProposal   Proposal? @relation(fields: [relatedProposalId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([clientId])
+  @@index([category])
+  @@index([relatedBookingId])
+  @@index([relatedProposalId])
+  @@map("conversation")
+}
+
+// Links a staff member or client to a Conversation with a capacity in that
+// thread (blueprint Sections 10.1, 14.3). Two mutually exclusive identity
+// paths, mirroring this schema's established split-attribution pattern
+// (StaffAssignment's assignee-vs-target split, ProposalAcceptance's
+// portal-vs-external response path):
+//
+// - Staff path — `staffUserId` (a User whose Role is TRAVEL_CONSULTANT,
+//   FINANCE_ACCOUNTING, or VISA_DOCUMENTATION) with a matching non-CLIENT
+//   `role` value. `clientProfileId` is null.
+// - Client path — `clientProfileId` (the client's durable portal identity,
+//   matching ProposalAcceptance.respondingClientProfileId's precedent
+//   rather than a raw Client FK, since only an activated portal account
+//   can actually participate) with `role = CLIENT`. `staffUserId` is null.
+//
+// Neither FK is schema-restricted to its expected Role/identity — a
+// foreign key can't constrain another table's column value, the same
+// limitation already documented on StaffAssignment.assignedStaffId above.
+// The future conversation-management service must verify `staffUserId`
+// actually resolves to a User with a matching non-CLIENT role before
+// writing this row, the same way StaffAssignment's own doc comment defers
+// an equivalent check.
+//
+// `joinedAt`/`removedAt` preserve membership history rather than deleting
+// a row when a participant (typically an optional Finance or Visa
+// Documentation participant, Section 10.1) is removed — matching
+// StaffAssignment's `endedAt` convention
+// (.claude/rules/admin-dashboard.md's Destructive and Irreversible
+// Actions). A participant may later rejoin the same Conversation; the
+// partial unique indexes below deliberately scope on `removedAt IS NULL`
+// so a new active row can be added after an old one is marked removed,
+// without deleting or reusing the removed row.
+//
+// `lastReadAt` is per-participant read-state storage only (D-016's MVP
+// read model, blueprint Section 10.1's "read status") — see the Message
+// model doc comment below for exactly how it is interpreted. Storing a
+// read timestamp here does **not** itself grant, extend, or verify
+// access: the future service layer must always run its own authorization
+// check before ever reading or writing this field, never infer
+// authorization from the mere presence of a ConversationParticipant row
+// or a non-null `lastReadAt`.
+//
+// Prisma's schema language cannot express a conditional cross-column
+// constraint tying `role` to which identity column is populated — migration
+// `20260717010520_conversation_schema_constraints` adds this raw SQL by
+// hand. This single constraint both enforces the staff/client role-identity
+// match AND, as a direct consequence of its two mutually exclusive
+// branches, guarantees exactly one of `staffUserId`/`clientProfileId` is
+// non-null (a separate `num_nonnulls` constraint would be redundant with
+// it):
+//   ALTER TABLE "conversation_participant" ADD CONSTRAINT
+//     "conversation_participant_identity_role_match"
+//     CHECK (
+//       ("role" = 'CLIENT' AND "clientProfileId" IS NOT NULL AND "staffUserId" IS NULL)
+//       OR
+//       ("role" != 'CLIENT' AND "staffUserId" IS NOT NULL AND "clientProfileId" IS NULL)
+//     );
+//
+// This schema also cannot express a partial unique index preventing a
+// duplicate *active* membership row for the same person in the same
+// Conversation while still allowing historical removed rows and later
+// rejoining — the same constraints migration adds these two by hand,
+// mirroring StaffAssignment's active-assignment partial-unique-index
+// precedent:
+//   CREATE UNIQUE INDEX "conversation_participant_active_staff_key"
+//     ON "conversation_participant" ("conversationId", "staffUserId")
+//     WHERE "removedAt" IS NULL AND "staffUserId" IS NOT NULL;
+//   CREATE UNIQUE INDEX "conversation_participant_active_client_profile_key"
+//     ON "conversation_participant" ("conversationId", "clientProfileId")
+//     WHERE "removedAt" IS NULL AND "clientProfileId" IS NOT NULL;
+model ConversationParticipant {
+  id String @id
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  role ConversationParticipantRole
+
+  staffUserId String?
+  staffUser   User?   @relation(fields: [staffUserId], references: [id], onDelete: Restrict)
+
+  clientProfileId String?
+  clientProfile   ClientProfile? @relation(fields: [clientProfileId], references: [id], onDelete: Restrict)
+
+  joinedAt  DateTime  @default(now())
+  removedAt DateTime?
+
+  lastReadAt DateTime?
+
+  @@index([conversationId, removedAt])
+  @@index([staffUserId, removedAt])
+  @@index([clientProfileId, removedAt])
+  @@map("conversation_participant")
+}
+
+// An individual entry within a Conversation (blueprint Sections 10.1,
+// 14.3), including its client-visible/internal-note status
+// (`MessageVisibility`, above). Two mutually exclusive author paths,
+// mirroring ConversationParticipant's identity split immediately above:
+//
+// - Staff path — `authorStaffUserId`. `authorClientProfileId` is null.
+// - Client path — `authorClientProfileId` (the client's durable portal
+//   identity, matching ConversationParticipant's own client path).
+//   `authorStaffUserId` is null.
+//
+// Whether an author must hold an active ConversationParticipant row at the
+// moment they post is NOT resolved by this schema — it depends on the
+// same still-open, role-specific authorization policy the file header's
+// authorization-deferral note describes: a CLIENT author's authorization
+// requires both ownership of the Conversation's Client (via ClientProfile)
+// and active participation; FINANCE_ACCOUNTING and VISA_DOCUMENTATION
+// authors require explicit active participation, since neither has an
+// assignment-based path onto a Conversation; a TRAVEL_CONSULTANT author's
+// authorization turns on active Client/Booking assignment, with whether an
+// explicit participant row is additionally required left open; and an
+// ADMIN_MANAGER author may be authorized by role alone, without any
+// participant row, if the future enforcement decision permits posting
+// without participant membership. `authorStaffUserId`/
+// `authorClientProfileId` alone — the mere presence of a value in either
+// column — must never be treated as proof of authorization; they only
+// record who wrote the message, never that they were allowed to. The
+// future messaging service must verify authorization to post according to
+// whichever final policy is adopted, transactionally, before writing a
+// Message; this checkpoint does not resolve that policy.
+//
+// This checkpoint does add one database-level content restriction: a
+// client-authored message can never be INTERNAL_NOTE — internal staff
+// notes are by definition not something a client writes (Section 10.1: a
+// message is either client-visible or an internal-only note; clients only
+// ever produce client-visible ones). Prisma's schema language cannot
+// express a conditional cross-column constraint tying `visibility` to
+// which author column is populated, so migration
+// `20260717010520_conversation_schema_constraints` adds this raw SQL by
+// hand, alongside the author-path exclusivity check:
+//   ALTER TABLE "message" ADD CONSTRAINT "message_author_path_exclusive"
+//     CHECK (num_nonnulls("authorStaffUserId", "authorClientProfileId") = 1);
+//   ALTER TABLE "message" ADD CONSTRAINT
+//     "message_client_author_not_internal_note"
+//     CHECK ("authorClientProfileId" IS NULL OR "visibility" != 'INTERNAL_NOTE');
+//
+// Read state (blueprint Section 10.1's "read status") is deliberately NOT
+// a field on this model — a Conversation may have more than two
+// participants (Section 10.1), so a single shared boolean cannot
+// correctly represent "read" for every participant at once. Per D-016's
+// MVP read model, read state is instead per-participant: a Message is
+// considered read for a given ConversationParticipant when this row's
+// `createdAt` is at or before that participant's
+// `ConversationParticipant.lastReadAt` (see that model's doc comment
+// above). The future service layer owns updating `lastReadAt` and
+// resolving any timestamp/ordering edge cases (e.g. a message inserted
+// with a `createdAt` earlier than an already-recorded `lastReadAt`, or two
+// messages sharing an identical `createdAt`); this schema only stores the
+// raw values.
+//
+// No edit/delete flag or read booleans exist here — the blueprint does
+// not describe message editing or deletion (Section 10.1 lists only
+// "timestamps and read status"), so none is modeled.
+model Message {
+  id String @id
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  body       String
+  visibility MessageVisibility
+
+  authorStaffUserId String?
+  authorStaffUser   User?   @relation(fields: [authorStaffUserId], references: [id], onDelete: Restrict)
+
+  authorClientProfileId String?
+  authorClientProfile   ClientProfile? @relation(fields: [authorClientProfileId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  attachments MessageAttachment[]
+
+  // Deterministic conversation-ordering: (conversationId, createdAt, id) —
+  // `id` as the final tiebreaker so two messages sharing an identical
+  // `createdAt` still sort deterministically, since `id` is never reused
+  // (.claude/rules/database-security.md's Identifiers and Timestamps).
+  @@index([conversationId, createdAt, id])
+  @@index([authorStaffUserId])
+  @@index([authorClientProfileId])
+  @@map("message")
+}
+
+// A file attached to a Message (blueprint Sections 10.1, 14.3). Minimal
+// secure metadata only, consistent with this project's backend-mediated
+// storage boundary (`.claude/rules/architecture.md`'s Storage boundary:
+// "access mediated by the backend (never direct public bucket URLs for
+// sensitive files)") and Section 12.3's signed/expiring-link requirement
+// for sensitive files generally.
+//
+// `storageKey` is an opaque, backend-resolved identifier for the
+// underlying stored object — never a public or directly browsable URL.
+// `@unique` so the same storage object can never be attached to two
+// MessageAttachment rows, mirroring PortalInvitation.tokenHash's
+// uniqueness rationale (a value that must resolve to exactly one owning
+// record). Actual signed/expiring URL issuance, malware scanning, and
+// file-type/size validation at upload time are future service-layer
+// concerns (Section 12.3; .claude/rules/database-security.md's Safe file
+// handling for uploads) — not enforced or modeled by this schema beyond
+// storing `mimeType`/`fileSizeBytes` for that future validation to read
+// and act on.
+//
+// `onDelete: Restrict` on `message`: never drop a Message out from under
+// an attachment that documents it, matching this schema's established
+// convention.
+model MessageAttachment {
+  id String @id
+
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Restrict)
+
+  storageKey    String @unique
+  fileName      String
+  mimeType      String
+  fileSizeBytes Int
+
+  createdAt DateTime @default(now())
+
+  @@index([messageId])
+  @@map("message_attachment")
 }
