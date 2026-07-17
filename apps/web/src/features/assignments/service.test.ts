@@ -15,9 +15,11 @@ vi.mock('@/lib/db', () => ({ prisma: { $transaction: transactionMock } }));
 const repositoryMocks = vi.hoisted(() => ({
   findLeadById: vi.fn(),
   findClientById: vi.fn(),
+  findBookingById: vi.fn(),
   findAssigneeCandidateById: vi.fn(),
   findActiveAssignmentForLead: vi.fn(),
   findActiveAssignmentForClient: vi.fn(),
+  findActiveAssignmentForBooking: vi.fn(),
   createAssignment: vi.fn(),
   endAssignmentById: vi.fn(),
   insertAuditLog: vi.fn(),
@@ -31,6 +33,7 @@ import type { AssignmentRecord } from './repository';
 import {
   endClientAssignment,
   endLeadAssignment,
+  setBookingAssignment,
   setClientAssignment,
   setLeadAssignment,
 } from './service';
@@ -46,6 +49,7 @@ const ACTOR: AuthenticatedUser = {
 
 const LEAD_ID = 'lead-1';
 const CLIENT_ID = 'client-1';
+const BOOKING_ID = 'booking-1';
 const STAFF_ID = 'staff-1';
 
 function assignmentRecord(overrides: Partial<AssignmentRecord> = {}): AssignmentRecord {
@@ -55,6 +59,7 @@ function assignmentRecord(overrides: Partial<AssignmentRecord> = {}): Assignment
     assignedByUserId: ACTOR.id,
     leadId: LEAD_ID,
     clientId: null,
+    bookingId: null,
     createdAt: new Date('2026-07-01T00:00:00Z'),
     updatedAt: new Date('2026-07-01T00:00:00Z'),
     endedAt: null,
@@ -80,6 +85,7 @@ beforeEach(() => {
   transactionMock.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(TX_CLIENT));
   repositoryMocks.findLeadById.mockResolvedValue({ id: LEAD_ID });
   repositoryMocks.findClientById.mockResolvedValue({ id: CLIENT_ID });
+  repositoryMocks.findBookingById.mockResolvedValue({ id: BOOKING_ID });
 });
 
 describe('setLeadAssignment', () => {
@@ -162,6 +168,7 @@ describe('setLeadAssignment', () => {
         assignedByUserId: ACTOR.id,
         leadId: LEAD_ID,
         clientId: null,
+        bookingId: null,
         endedAt: null,
       },
     });
@@ -224,6 +231,7 @@ describe('setLeadAssignment', () => {
         assignedByUserId: ACTOR.id,
         leadId: LEAD_ID,
         clientId: null,
+        bookingId: null,
         endedAt: null,
       },
       afterState: {
@@ -232,6 +240,7 @@ describe('setLeadAssignment', () => {
         assignedByUserId: ACTOR.id,
         leadId: LEAD_ID,
         clientId: null,
+        bookingId: null,
         endedAt: null,
         reason: 'Rebalancing workload',
       },
@@ -314,6 +323,7 @@ describe('endLeadAssignment', () => {
         assignedByUserId: ACTOR.id,
         leadId: LEAD_ID,
         clientId: null,
+        bookingId: null,
         endedAt: null,
       },
       afterState: {
@@ -322,6 +332,7 @@ describe('endLeadAssignment', () => {
         assignedByUserId: ACTOR.id,
         leadId: LEAD_ID,
         clientId: null,
+        bookingId: null,
         endedAt: '2026-07-20T10:00:00.000Z',
         reason: 'Consultant left the team',
       },
@@ -398,5 +409,223 @@ describe('setClientAssignment / endClientAssignment (Client-target dispatch)', (
         entityId: CLIENT_ID,
       }),
     );
+  });
+});
+
+describe('setBookingAssignment (Booking-target dispatch)', () => {
+  it('creates the initial Booking assignment, targeting bookingId (not leadId/clientId), with the Booking action/entity names', async () => {
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(null);
+    repositoryMocks.findAssigneeCandidateById.mockResolvedValue(eligibleAssignee());
+    const created = assignmentRecord({ leadId: null, clientId: null, bookingId: BOOKING_ID });
+    repositoryMocks.createAssignment.mockResolvedValue(created);
+
+    const result = await setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID);
+
+    expect(result).toEqual(created);
+    expect(repositoryMocks.findBookingById).toHaveBeenCalledWith(TX_CLIENT, BOOKING_ID);
+    expect(repositoryMocks.findLeadById).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientById).not.toHaveBeenCalled();
+    expect(repositoryMocks.createAssignment).toHaveBeenCalledWith(TX_CLIENT, {
+      id: expect.any(String),
+      assignedStaffId: STAFF_ID,
+      assignedByUserId: ACTOR.id,
+      bookingId: BOOKING_ID,
+    });
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, {
+      actorId: ACTOR.id,
+      action: 'BOOKING_ASSIGNMENT_CREATED',
+      entityType: 'Booking',
+      entityId: BOOKING_ID,
+      beforeState: undefined,
+      afterState: {
+        id: created.id,
+        assignedStaffId: STAFF_ID,
+        assignedByUserId: ACTOR.id,
+        leadId: null,
+        clientId: null,
+        bookingId: BOOKING_ID,
+        endedAt: null,
+      },
+    });
+  });
+
+  it('is independent of any Client-level assignment: never checks or requires an active Client assignment', async () => {
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(null);
+    repositoryMocks.findAssigneeCandidateById.mockResolvedValue(eligibleAssignee());
+    repositoryMocks.createAssignment.mockResolvedValue(
+      assignmentRecord({ leadId: null, clientId: null, bookingId: BOOKING_ID }),
+    );
+
+    await setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID);
+
+    expect(repositoryMocks.findActiveAssignmentForClient).not.toHaveBeenCalled();
+  });
+
+  it('throws BOOKING_NOT_FOUND when the booking does not exist, without checking the assignee', async () => {
+    repositoryMocks.findBookingById.mockResolvedValue(null);
+
+    await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toMatchObject({
+      code: 'BOOKING_NOT_FOUND',
+      status: 404,
+    });
+    expect(repositoryMocks.findAssigneeCandidateById).not.toHaveBeenCalled();
+  });
+
+  it('throws ASSIGNEE_NOT_FOUND when the assignee does not resolve to any account', async () => {
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(null);
+    repositoryMocks.findAssigneeCandidateById.mockResolvedValue(null);
+
+    await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toMatchObject({
+      code: 'ASSIGNEE_NOT_FOUND',
+      status: 404,
+    });
+    expect(repositoryMocks.createAssignment).not.toHaveBeenCalled();
+  });
+
+  it('throws ASSIGNEE_INACTIVE when the assignee account is deactivated', async () => {
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(null);
+    repositoryMocks.findAssigneeCandidateById.mockResolvedValue(
+      eligibleAssignee({ isActive: false }),
+    );
+
+    await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toMatchObject({
+      code: 'ASSIGNEE_INACTIVE',
+      status: 409,
+    });
+    expect(repositoryMocks.createAssignment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'CLIENT',
+    'ADMIN_MANAGER',
+    'FINANCE_ACCOUNTING',
+    'VISA_DOCUMENTATION',
+    'SYSTEM_ADMINISTRATOR',
+  ])('throws ASSIGNEE_INELIGIBLE_ROLE when the assignee holds role %s', async (role) => {
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(null);
+    repositoryMocks.findAssigneeCandidateById.mockResolvedValue(eligibleAssignee({ role }));
+
+    await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toMatchObject({
+      code: 'ASSIGNEE_INELIGIBLE_ROLE',
+      status: 409,
+    });
+    expect(repositoryMocks.createAssignment).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent: assigning the already-active consultant again is a no-op with no eligibility check, no new row, and no audit entry', async () => {
+    const active = assignmentRecord({
+      leadId: null,
+      clientId: null,
+      bookingId: BOOKING_ID,
+      assignedStaffId: STAFF_ID,
+    });
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(active);
+
+    const result = await setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID);
+
+    expect(result).toEqual(active);
+    expect(repositoryMocks.findAssigneeCandidateById).not.toHaveBeenCalled();
+    expect(repositoryMocks.endAssignmentById).not.toHaveBeenCalled();
+    expect(repositoryMocks.createAssignment).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('throws REASON_REQUIRED when replacing an active Booking assignment without a reason', async () => {
+    const active = assignmentRecord({
+      leadId: null,
+      clientId: null,
+      bookingId: BOOKING_ID,
+      assignedStaffId: 'other-staff',
+    });
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(active);
+    repositoryMocks.findAssigneeCandidateById.mockResolvedValue(eligibleAssignee());
+
+    await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toMatchObject({
+      code: 'REASON_REQUIRED',
+      status: 409,
+    });
+    expect(repositoryMocks.endAssignmentById).not.toHaveBeenCalled();
+    expect(repositoryMocks.createAssignment).not.toHaveBeenCalled();
+  });
+
+  it('atomically ends the previous Booking assignment and creates the replacement when reassigning with a reason, writing a BOOKING_ASSIGNMENT_REPLACED audit entry', async () => {
+    const previous = assignmentRecord({
+      id: 'assignment-old',
+      leadId: null,
+      clientId: null,
+      bookingId: BOOKING_ID,
+      assignedStaffId: 'other-staff',
+    });
+    repositoryMocks.findActiveAssignmentForBooking.mockResolvedValue(previous);
+    repositoryMocks.findAssigneeCandidateById.mockResolvedValue(eligibleAssignee());
+    const created = assignmentRecord({
+      id: 'assignment-new',
+      leadId: null,
+      clientId: null,
+      bookingId: BOOKING_ID,
+    });
+    repositoryMocks.createAssignment.mockResolvedValue(created);
+
+    const result = await setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID, 'Rebalancing workload');
+
+    expect(result).toEqual(created);
+    expect(repositoryMocks.endAssignmentById).toHaveBeenCalledWith(TX_CLIENT, previous.id);
+    expect(repositoryMocks.createAssignment).toHaveBeenCalledWith(TX_CLIENT, {
+      id: expect.any(String),
+      assignedStaffId: STAFF_ID,
+      assignedByUserId: ACTOR.id,
+      bookingId: BOOKING_ID,
+    });
+    // Both the end and the create happened inside the single $transaction
+    // callback — never as separate top-level transactions.
+    expect(transactionMock).toHaveBeenCalledTimes(1);
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, {
+      actorId: ACTOR.id,
+      action: 'BOOKING_ASSIGNMENT_REPLACED',
+      entityType: 'Booking',
+      entityId: BOOKING_ID,
+      beforeState: {
+        id: previous.id,
+        assignedStaffId: 'other-staff',
+        assignedByUserId: ACTOR.id,
+        leadId: null,
+        clientId: null,
+        bookingId: BOOKING_ID,
+        endedAt: null,
+      },
+      afterState: {
+        id: created.id,
+        assignedStaffId: STAFF_ID,
+        assignedByUserId: ACTOR.id,
+        leadId: null,
+        clientId: null,
+        bookingId: BOOKING_ID,
+        endedAt: null,
+        reason: 'Rebalancing workload',
+      },
+    });
+  });
+
+  it.each(['P2034', 'P2002', 'P2004'] as const)(
+    'maps a %s conflict to ASSIGNMENT_CONFLICT, never a raw Prisma error',
+    async (code) => {
+      transactionMock.mockImplementation(async () => {
+        throw conflictError(code);
+      });
+
+      await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toMatchObject({
+        code: 'ASSIGNMENT_CONFLICT',
+        status: 409,
+      });
+    },
+  );
+
+  it('rethrows an unrelated, unexpected error unchanged rather than mapping it to ASSIGNMENT_CONFLICT', async () => {
+    const unexpected = new Error('unexpected internal failure');
+    transactionMock.mockImplementation(async () => {
+      throw unexpected;
+    });
+
+    await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toBe(unexpected);
   });
 });

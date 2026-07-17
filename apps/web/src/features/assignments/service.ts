@@ -80,28 +80,41 @@ async function assertEligibleAssignee(
   if (candidate.role !== 'TRAVEL_CONSULTANT') {
     throw new AssignmentError(
       'ASSIGNEE_INELIGIBLE_ROLE',
-      'Only a Travel Consultant may be assigned to a lead or client.',
+      'Only a Travel Consultant may be assigned to a lead, client, or booking.',
     );
   }
 }
 
-type TargetKind = 'LEAD' | 'CLIENT';
+// 'BOOKING' assignment is independent of any Client-level assignment on the
+// same Booking's Client — this module never checks or requires the
+// assignee to already hold the Client assignment, and a Booking assignment
+// is never ended as a side effect of the Client assignment changing (both
+// deliberate; see docs/HERITAGE_V3_DECISIONS_LOG.md's Booking-assignment
+// decision).
+type TargetKind = 'LEAD' | 'CLIENT' | 'BOOKING';
 
 const ENTITY_TYPE: Record<TargetKind, string> = {
   LEAD: ASSIGNMENT_AUDIT_ENTITY_TYPE.LEAD,
   CLIENT: ASSIGNMENT_AUDIT_ENTITY_TYPE.CLIENT,
+  BOOKING: ASSIGNMENT_AUDIT_ENTITY_TYPE.BOOKING,
 };
 const ASSIGNED_ACTION: Record<TargetKind, string> = {
   LEAD: ASSIGNMENT_AUDIT_ACTIONS.LEAD_ASSIGNED,
   CLIENT: ASSIGNMENT_AUDIT_ACTIONS.CLIENT_ASSIGNED,
+  BOOKING: ASSIGNMENT_AUDIT_ACTIONS.BOOKING_ASSIGNED,
 };
 const REASSIGNED_ACTION: Record<TargetKind, string> = {
   LEAD: ASSIGNMENT_AUDIT_ACTIONS.LEAD_REASSIGNED,
   CLIENT: ASSIGNMENT_AUDIT_ACTIONS.CLIENT_REASSIGNED,
+  BOOKING: ASSIGNMENT_AUDIT_ACTIONS.BOOKING_REASSIGNED,
 };
+// Not exercised by any exported function in this checkpoint (no
+// endBookingAssignment/DELETE) — present only so this Record stays
+// complete over every TargetKind.
 const ENDED_ACTION: Record<TargetKind, string> = {
   LEAD: ASSIGNMENT_AUDIT_ACTIONS.LEAD_ASSIGNMENT_ENDED,
   CLIENT: ASSIGNMENT_AUDIT_ACTIONS.CLIENT_ASSIGNMENT_ENDED,
+  BOOKING: ASSIGNMENT_AUDIT_ACTIONS.BOOKING_ASSIGNMENT_ENDED,
 };
 
 async function findTarget(
@@ -109,15 +122,25 @@ async function findTarget(
   kind: TargetKind,
   targetId: string,
 ): Promise<{ id: string } | null> {
-  return kind === 'LEAD'
-    ? repository.findLeadById(tx, targetId)
-    : repository.findClientById(tx, targetId);
+  switch (kind) {
+    case 'LEAD':
+      return repository.findLeadById(tx, targetId);
+    case 'CLIENT':
+      return repository.findClientById(tx, targetId);
+    case 'BOOKING':
+      return repository.findBookingById(tx, targetId);
+  }
 }
 
 function notFoundError(kind: TargetKind): AssignmentError {
-  return kind === 'LEAD'
-    ? new AssignmentError('LEAD_NOT_FOUND', 'Lead not found.')
-    : new AssignmentError('CLIENT_NOT_FOUND', 'Client not found.');
+  switch (kind) {
+    case 'LEAD':
+      return new AssignmentError('LEAD_NOT_FOUND', 'Lead not found.');
+    case 'CLIENT':
+      return new AssignmentError('CLIENT_NOT_FOUND', 'Client not found.');
+    case 'BOOKING':
+      return new AssignmentError('BOOKING_NOT_FOUND', 'Booking not found.');
+  }
 }
 
 async function findActiveAssignment(
@@ -125,9 +148,31 @@ async function findActiveAssignment(
   kind: TargetKind,
   targetId: string,
 ): Promise<AssignmentRecord | null> {
-  return kind === 'LEAD'
-    ? repository.findActiveAssignmentForLead(tx, targetId)
-    : repository.findActiveAssignmentForClient(tx, targetId);
+  switch (kind) {
+    case 'LEAD':
+      return repository.findActiveAssignmentForLead(tx, targetId);
+    case 'CLIENT':
+      return repository.findActiveAssignmentForClient(tx, targetId);
+    case 'BOOKING':
+      return repository.findActiveAssignmentForBooking(tx, targetId);
+  }
+}
+
+// The target-specific field to set on a new StaffAssignment row — exactly
+// one of leadId/clientId/bookingId, matching the database's three-way XOR
+// CHECK constraint (apps/web/prisma/schema.prisma's StaffAssignment model).
+function targetFields(
+  kind: TargetKind,
+  targetId: string,
+): { leadId?: string; clientId?: string; bookingId?: string } {
+  switch (kind) {
+    case 'LEAD':
+      return { leadId: targetId };
+    case 'CLIENT':
+      return { clientId: targetId };
+    case 'BOOKING':
+      return { bookingId: targetId };
+  }
 }
 
 /**
@@ -188,7 +233,7 @@ async function setAssignment(
       id: randomUUID(),
       assignedStaffId,
       assignedByUserId: actor.id,
-      ...(kind === 'LEAD' ? { leadId: targetId } : { clientId: targetId }),
+      ...targetFields(kind, targetId),
     });
 
     await repository.insertAuditLog(tx, {
@@ -275,4 +320,18 @@ export async function endClientAssignment(
   reason: string,
 ): Promise<AssignmentRecord | null> {
   return endAssignment('CLIENT', actor, clientId, reason);
+}
+
+// No endBookingAssignment export — assignment removal without a
+// replacement is out of scope for this checkpoint (Booking assignment
+// enforcement decision). setAssignment's own control flow (idempotent
+// same-assignee no-op, REASON_REQUIRED on replace, atomic
+// end-old/create-new/audit) is reused unchanged for 'BOOKING'.
+export async function setBookingAssignment(
+  actor: AuthenticatedUser,
+  bookingId: string,
+  assignedStaffId: string,
+  reason?: string,
+): Promise<AssignmentRecord> {
+  return setAssignment('BOOKING', actor, bookingId, assignedStaffId, reason);
 }
