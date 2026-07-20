@@ -267,6 +267,143 @@
 //   download-link issuance (Section 12.3; ADR-001), and tests/seed data —
 //   all deferred to future checkpoints.
 //
+// PaymentPlan, Installment, Payment, PaymentStatusHistory,
+// PaymentAllocation, PaymentAllocationReversal, PaymentRefund,
+// PaymentRefundAllocation, and Receipt are covered by this checkpoint —
+// the Payment Schema Foundation checkpoint, Stage A (schema-and-decision-
+// documentation only — schema.prisma and this decisions-log entry, no
+// migration created or applied) (blueprint Sections 4.2-4.7, 5.1-5.2,
+// 11.1-11.7, 13.4, 13.6, 14.5, 14.6; docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-019). D-002 (currency strategy) is refined, not superseded, by this
+// checkpoint: the original PHP-only-MVP proposal remains recorded
+// verbatim, and D-019 records the actual approved refinement — each
+// Booking selects exactly one currency (PHP and USD are supported
+// examples), every amount within that Booking uses it, and mixed-
+// currency/exchange-rate handling inside one Booking is deferred.
+//
+// `Booking.totalAmount`/`currencyCode` are added by this checkpoint, both
+// nullable — see the Booking model doc comment below for the exact
+// backward-compatibility rationale (no existing Booking-creation code
+// path populates either field yet) and the service invariants that
+// govern them (both must exist before a PaymentPlan may be created;
+// neither may change once a PaymentPlan or Payment exists for that
+// Booking).
+//
+// `PaymentPlan` belongs directly to `Booking` (`bookingId @unique` — one
+// plan per Booking for the MVP) and does not duplicate `totalAmount`,
+// `currencyCode`, or a separate deposit-amount field; a deposit is
+// represented as an `Installment` with `isDeposit = true` instead (at
+// most one per plan, enforced by a migration-only partial unique index —
+// see the Installment model doc comment). `Installment` carries no
+// stored status and no waiver fields — payment state is fully derived by
+// the future service layer from allocations, refunds, due date, and
+// amount (D-019), and no approved requirement supports installment
+// waivers, so none is added.
+//
+// `Payment` targets its `Booking` and `Client` directly — never an
+// `installmentId` — and carries no inline confirm/reject/reverse/refund
+// timestamp, actor, or reason field; every status transition is instead
+// recorded on the new append-only `PaymentStatusHistory` (mirroring
+// `BookingStatusHistory`'s convention exactly), which the future service
+// layer must write in the same transaction as every `Payment.status`
+// update. `PaymentAllocation` links a `Payment` to the `Installment`(s)
+// it covers — always a positive amount, append-only, never signed and
+// never directly correctable in place; a misallocation is corrected by
+// writing a `PaymentAllocationReversal` (a complete, one-time reversal of
+// a single allocation) and then creating new, separate positive
+// `PaymentAllocation` rows — never by mutating or deleting the original.
+// A confirmed amount left unallocated to any Installment is unapplied
+// Booking credit and is never automatically applied to a future
+// Installment (D-019).
+//
+// `PaymentRefund` is a separate, append-only record — a row exists only
+// once money has actually been returned, so this checkpoint models no
+// "pending refund" state. Multiple partial refunds against one Payment
+// are supported; a Payment stays `CONFIRMED` while partially refunded and
+// becomes `REFUNDED` only once cumulative refunds equal its full amount
+// (D-019) — this refines, without contradicting, blueprint Section 11.2's
+// "Refunded" row, which was worded at the whole-payment-status level
+// before partial refunds were an approved feature; see the amendment this
+// checkpoint also makes to docs/HERITAGE_V3_PROJECT_BLUEPRINT.md's
+// Payments section. `PaymentRefundAllocation` links a `PaymentRefund` to
+// the specific `PaymentAllocation` row(s) it reduces, preserving exactly
+// which Installment's balance reopens because of a refund; any refunded
+// amount not linked to an allocation is a refund from unapplied Booking
+// credit. The corrected net-contribution formula — `Payment.amount -
+// completed refunds` when `status` is `CONFIRMED` or `REFUNDED`, else
+// `0` — is documented in full, with worked examples, in D-019; it
+// specifically fixes an earlier draft's defect where a fully refunded
+// Payment produced a negative contribution instead of exactly zero.
+//
+// `PaymentStatus` is the exact seven-value closed list from blueprint
+// Section 11.2's table (`PENDING`, `CONFIRMED`, `REJECTED`, `CANCELLED`,
+// `FAILED`, `REFUNDED`, `REVERSED`) — no `VOIDED` or `PARTIALLY_REFUNDED`
+// value is added; a partial refund is represented by a `PaymentRefund`
+// row against a still-`CONFIRMED` Payment, not by a new status.
+//
+// `Receipt` is an immutable historical snapshot (`amount`/`currencyCode`
+// captured at issuance, no `updatedAt`) — one per Payment
+// (`paymentId @unique`), issued only for a validly confirmed Payment, and
+// preserved unchanged after any later reversal or refund of that Payment
+// (blueprint Section 11.5's "original receipts... are never deleted").
+// No receipt-number prefix format is enforced — only uniqueness.
+//
+// `Document.paymentId` (nullable) lets a client-submitted payment-proof
+// upload reuse the existing Document/DocumentReview machinery rather than
+// a parallel review model — the existing `document_context_exclusive`
+// CHECK is widened from two columns to three
+// (`num_nonnulls("bookingId", "visaCaseId", "paymentId") <= 1`) by the
+// same mechanical pattern already used for the Visa Case Schema
+// Foundation's widening. See the DocumentReview model doc comment below
+// for the narrow role-boundary amendment this checkpoint makes:
+// Finance/Accounting may review a Document only when its `paymentId` is
+// non-null — a structural check, not a `category` string match, since
+// `Document.category` remains free-text with no closed list or CHECK
+// constraint (blueprint Section 12.1). No `PAYMENT_PROOF` category
+// constant or CHECK is invented.
+//
+// Every write path (allocate, reverse an allocation, refund, confirm,
+// reverse a Payment) that the future service layer implements must use a
+// unique, caller-supplied `idempotencyKey`, exactly mirroring how
+// `bookings/service.ts`'s existing `createBooking` already handles a
+// unique-constraint race on `bookingReference`/`proposalVersionId` — this
+// checkpoint adds the `idempotencyKey` columns those future services will
+// rely on, but implements none of the retry logic itself.
+//
+// Deliberately out of scope for this checkpoint (Stage A and beyond):
+// - `PaymentAdjustment` — not modeled until its exact balance effect is
+//   approved (D-019); a standalone correction/adjustment concept remains
+//   deferred rather than guessed at.
+// - Payment or PaymentPlan as a `StaffAssignment` target — Payment
+//   authorization derives entirely from the existing Booking-level
+//   assignment (D-019); no new target column is added to
+//   `StaffAssignment`.
+// - Any payment-gateway/processor field (transaction reference, gateway
+//   status, etc.) — payment processor selection itself remains an open
+//   ADR-001 decision ("Items Intentionally Deferred"); nothing here
+//   assumes one.
+// - Mixed-currency or exchange-rate handling within a single Booking —
+//   explicitly deferred by D-019; every amount within a Booking uses that
+//   Booking's single selected `currencyCode`.
+// - An installment-status enum and automatic credit-to-installment
+//   allocation — both explicitly excluded by D-019; installment state is
+//   fully derived, and unapplied credit is never auto-applied.
+// - The refund documentation type (a refund reference, credit note, or
+//   equivalent client-facing document, blueprint Section 11.5/16.2) —
+//   remains open; `PaymentRefund` is a structured internal financial
+//   record only, not automatically that document (D-019).
+// - A post-approval Installment amendment/correction workflow — whether
+//   `Installment.amount`/`dueDate` may be directly mutated after
+//   `PaymentPlan` approval (with an `AuditLog` entry) or must instead
+//   follow its own append-only correction pattern is left open (D-019);
+//   no `PaymentPlan`/`Installment` versioning is invented either way.
+// - PaymentPlan/Installment/Payment/PaymentStatusHistory/
+//   PaymentAllocation/PaymentAllocationReversal/PaymentRefund/
+//   PaymentRefundAllocation/Receipt repository and service layers, API
+//   routes, admin dashboard and client portal UI, malware
+//   scanning/signed-URL issuance for payment-proof documents, and
+//   tests/seed data — all deferred to future checkpoints.
+//
 // Deliberately out of scope here:
 // - A Client status field/enum — the blueprint does not define an approved
 //   status list for it anywhere; see the Client model doc comment.
@@ -294,9 +431,11 @@
 //   UI for proposals; tests; and seed data — all deferred to future
 //   checkpoints.
 // - TourPackage as a catalogue entity/relation, ItineraryVersion and
-//   structured itinerary content, Booking total price and currency
-//   (blocked on D-002), and structured per-traveller records — all
-//   deferred; see the Booking model doc comment below for each.
+//   structured itinerary content, and structured per-traveller records —
+//   all deferred; see the Booking model doc comment below for each.
+//   `Booking.totalAmount`/`currencyCode` are added by the Payment Schema
+//   Foundation checkpoint below, initially nullable — see that
+//   checkpoint's own paragraph and the Booking model doc comment for why.
 // - Booking-creation behavior (the service action that turns an accepted
 //   ProposalVersion into a Booking); the Booking/BookingStatusHistory
 //   repository and service layers; booking-related API routes; client
@@ -321,10 +460,10 @@
 //   signed/expiring download-link issuance (Section 12.3); and tests/seed
 //   data — all deferred to future checkpoints.
 // - Every other later-phase business entity in blueprint Section 14
-//   (PaymentPlan, VisaRequirement, etc.) — remaining for later Phase 1
-//   database-schema checkpoints under the "Implement database schema and
-//   reviewed migrations from the approved Phase 0 entity plan" checklist
-//   item (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
+//   (VisaRequirement, etc.) — remaining for later Phase 1 database-schema
+//   checkpoints under the "Implement database schema and reviewed
+//   migrations from the approved Phase 0 entity plan" checklist item
+//   (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
 //   implementation once modeled.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
@@ -459,6 +598,19 @@ model User {
   // `documentReviews`: every DocumentReview this staff member wrote.
   documentsUploaded Document[]
   documentReviews   DocumentReview[]
+
+  // The Payment Schema Foundation checkpoint, Stage A (blueprint Sections
+  // 4.2-4.7, 11.1-11.7, 14.6; docs/HERITAGE_V3_DECISIONS_LOG.md D-019).
+  // Every Payment-domain row this staff member acted on as the recorded
+  // actor — see each relation's own model doc comment below for exactly
+  // what each captures and why it is required, not nullable.
+  paymentPlansProposed       PaymentPlan[]               @relation("PaymentPlanProposer")
+  paymentPlansApproved       PaymentPlan[]               @relation("PaymentPlanApprover")
+  paymentAllocationsRecorded PaymentAllocation[]
+  paymentAllocationReversals PaymentAllocationReversal[]
+  paymentRefundsPerformed    PaymentRefund[]
+  paymentStatusChanges       PaymentStatusHistory[]      @relation("PaymentStatusHistoryActor")
+  receiptsIssued             Receipt[]
 
   @@map("user")
 }
@@ -762,6 +914,15 @@ model Client {
   // see the Document model doc comment below for why this is a direct FK
   // rather than derived only through a Booking or VisaCase.
   documents Document[]
+
+  // The Payment Schema Foundation checkpoint, Stage A (blueprint Sections
+  // 4.4, 4.6, 11.1-11.7, 14.6; docs/HERITAGE_V3_DECISIONS_LOG.md D-019).
+  // Every PaymentPlan and Payment with this Client as its (always-
+  // required) direct `clientId` — mirrors this schema's established
+  // direct-FK convention (Lead/Proposal/Booking/Document.clientId), rather
+  // than reaching Client only through Booking.
+  paymentPlans PaymentPlan[]
+  payments     Payment[]
 
   @@index([normalizedEmail])
   @@index([normalizedPhone])
@@ -1397,6 +1558,27 @@ enum BookingStatus {
 // future authorization responsibility for the API/service layer, not
 // something this schema itself restricts.
 //
+// The Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019), adds `totalAmount` and
+// `currencyCode` below — both nullable. They cannot be required from day
+// one: `features/bookings/schemas.ts`'s `createBookingSchema` accepts
+// only `proposalVersionId` today (`.strict()`, no other field is even
+// accepted), and `ProposalVersion` itself carries no pricing/currency
+// content yet (see that model's doc comment above) — there is no source
+// to populate either field from at Booking-creation time, and a
+// `NOT NULL` column added without a default would both fail to compile
+// against `createBookingWithInitialHistory`'s existing `data: {...}`
+// shape and fail to apply against any existing Booking row with nothing
+// to backfill from. Per D-019, both fields must exist (be non-null)
+// before a `PaymentPlan` may be created for this Booking, and neither may
+// change once a `PaymentPlan` or `Payment` exists for it — both are
+// service-layer invariants; no trigger or other database mechanism
+// enforces them (this schema uses no triggers anywhere). One selected
+// `currencyCode` applies to every financial amount under this Booking —
+// `Payment`, `Receipt`, and `PaymentRefund` each store their own `amount`
+// but never their own currency, deliberately avoiding a second,
+// potentially inconsistent source of truth (D-019).
+//
 // Migration `20260716020734_booking_schema_foundation` adds two CHECK
 // constraints Prisma's schema language cannot express:
 //   ALTER TABLE "booking" ADD CONSTRAINT "booking_traveler_count_positive"
@@ -1406,6 +1588,15 @@ enum BookingStatus {
 //       "travelStartDate" IS NULL OR "travelEndDate" IS NULL
 //       OR "travelStartDate" <= "travelEndDate"
 //     );
+// The Payment Schema Foundation checkpoint's own future migration will add
+// three more; none of these exist in any database yet — Stage A is
+// schema-only (D-019):
+//   ALTER TABLE "booking" ADD CONSTRAINT "booking_total_amount_positive"
+//     CHECK ("totalAmount" IS NULL OR "totalAmount" > 0);
+//   ALTER TABLE "booking" ADD CONSTRAINT "booking_financials_pairing"
+//     CHECK (("totalAmount" IS NULL) = ("currencyCode" IS NULL));
+//   ALTER TABLE "booking" ADD CONSTRAINT "booking_currency_code_format"
+//     CHECK ("currencyCode" IS NULL OR "currencyCode" ~ '^[A-Z]{3}$');
 model Booking {
   id String @id
 
@@ -1426,6 +1617,12 @@ model Booking {
   proposalVersion   ProposalVersion @relation(fields: [proposalVersionId], references: [id], onDelete: Restrict)
 
   status BookingStatus @default(DRAFT)
+
+  // Nullable — see the model doc comment above for why, and for the
+  // service invariants governing existence-before-PaymentPlan and
+  // immutability-after-PaymentPlan-or-Payment (D-019).
+  totalAmount  Decimal? @db.Decimal(18, 2)
+  currencyCode String?
 
   // Point-in-time snapshot only — see the model doc comment above.
   tourPackageName String?
@@ -1470,6 +1667,16 @@ model Booking {
   // below for the target-exclusivity rules governing both.
   documents            Document[]
   documentRequirements DocumentRequirement[]
+
+  // The Payment Schema Foundation checkpoint, Stage A
+  // (docs/HERITAGE_V3_DECISIONS_LOG.md D-019). Zero or one, per D-019's
+  // one-PaymentPlan-per-Booking MVP decision — see the PaymentPlan model
+  // doc comment below for the `bookingId @unique` field that backs this.
+  // `payments`: every Payment recorded directly against this Booking —
+  // see the Payment model doc comment below for why `bookingId` is a
+  // direct field rather than reached only through an Installment.
+  paymentPlan PaymentPlan?
+  payments    Payment[]
 
   @@index([clientId])
   @@index([status])
@@ -2317,9 +2524,22 @@ enum DocumentReviewOutcome {
 //
 // Prisma's schema language cannot express any of the raw-SQL constraints
 // below — migration `20260717073151_document_schema_foundation` added all
-// of them by hand:
+// of them by hand. `document_context_exclusive` was originally two
+// columns:
 //   ALTER TABLE "document" ADD CONSTRAINT "document_context_exclusive"
 //     CHECK (num_nonnulls("bookingId", "visaCaseId") <= 1);
+// The Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019), adds `paymentId` below and
+// specifies — but does not yet apply, Stage A being schema-only — the
+// widened three-column replacement, following the exact drop-and-re-add
+// pattern already used when `bookingId`/`visaCaseId` were added to
+// earlier target-exclusivity CHECKs elsewhere in this file (see the
+// StaffAssignment and Conversation model doc comments above):
+//   ALTER TABLE "document" DROP CONSTRAINT "document_context_exclusive";
+//   ALTER TABLE "document" ADD CONSTRAINT "document_context_exclusive"
+//     CHECK (num_nonnulls("bookingId", "visaCaseId", "paymentId") <= 1);
+// This widened version does not exist in any database yet. The other
+// three constraints below are unaffected by this checkpoint:
 //   ALTER TABLE "document" ADD CONSTRAINT
 //     "document_uploader_path_exclusive"
 //     CHECK (num_nonnulls("uploadedByStaffUserId", "uploadedByClientProfileId") = 1);
@@ -2342,6 +2562,14 @@ model Document {
 
   visaCaseId String?
   visaCase   VisaCase? @relation(fields: [visaCaseId], references: [id], onDelete: Restrict)
+
+  // The Payment Schema Foundation checkpoint, Stage A
+  // (docs/HERITAGE_V3_DECISIONS_LOG.md D-019). Optional — lets a client
+  // upload payment-proof evidence against a specific Payment, reusing this
+  // model rather than a parallel evidence-review mechanism. Part of the
+  // widened three-column `document_context_exclusive` CHECK above.
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
 
   documentRequirementId String?
   documentRequirement   DocumentRequirement? @relation(fields: [documentRequirementId], references: [id], onDelete: Restrict)
@@ -2373,6 +2601,7 @@ model Document {
   @@index([clientId])
   @@index([bookingId])
   @@index([visaCaseId])
+  @@index([paymentId])
   @@index([documentRequirementId])
   @@index([category])
   @@index([uploadedByStaffUserId])
@@ -2455,6 +2684,21 @@ model DocumentRequirement {
 // blueprint Section 4. No new enum, role field, or database constraint is
 // added for this.
 //
+// Amended by the Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019): the capability boundary above
+// is narrowly extended so that Finance/Accounting may also review a
+// Document whose `paymentId` (see the Document model doc comment above)
+// is non-null — a structural check on that column, never a `category`
+// string match, since `Document.category` remains free-text with no
+// closed list (blueprint Section 12.1). This grants Finance/Accounting no
+// general document-review capability outside that narrow, `paymentId`-
+// scoped case. Approving or rejecting such a Document (the file-level
+// decision recorded here) and the corresponding `Payment.status`
+// transition (the financial decision, recorded on `PaymentStatusHistory`
+// — see the Payment model doc comment below) are two separate write
+// paths that the future service layer must perform atomically, in one
+// transaction; this checkpoint does not implement that service.
+//
 // `reason` is nullable at the Prisma level, but per D-018 and
 // `.claude/rules/admin-dashboard.md`'s explicit "rejecting a document...
 // require[s]... reason" rule, a non-blank `reason` is required whenever
@@ -2499,4 +2743,657 @@ model DocumentReview {
   @@index([documentId, reviewedAt])
   @@index([reviewedByUserId])
   @@map("document_review")
+}
+
+// --- Payment Schema Foundation: schema-only checkpoint (Stage A) ---
+// Adds PaymentStatus, PaymentPlan, Installment, Payment,
+// PaymentStatusHistory, PaymentAllocation, PaymentAllocationReversal,
+// PaymentRefund, PaymentRefundAllocation, and Receipt, and extends
+// Booking and Document (see each model's updated doc comment above) — the
+// Payment Schema Foundation checkpoint (blueprint Sections 4.2-4.7,
+// 5.1-5.2, 11.1-11.7, 13.4, 13.6, 14.5, 14.6;
+// docs/HERITAGE_V3_DECISIONS_LOG.md D-019).
+//
+// Stage A only: no migration exists for anything below. No
+// `prisma migrate` command has been run for this checkpoint; nothing here
+// is reflected in any database, local or otherwise. A later Stage B
+// generates the migration (a single `prisma migrate dev --create-only`
+// invocation — see D-016 for why re-invoking that command is unsafe and
+// must not happen a second time) and hand-adds the constraints documented
+// on each model below; a still-later stage reviews and applies it. No
+// repository layer, service layer, API route, admin dashboard or client
+// portal UI, tests, or seed data exists either. See the file header above
+// for the full list of what this checkpoint deliberately does not
+// implement.
+
+// The exact seven-value closed list from blueprint Section 11.2's table —
+// adopted directly, the same way LeadStatus/BookingStatus were each
+// adopted from their own closed blueprint tables. No `VOIDED` or
+// `PARTIALLY_REFUNDED` value exists (D-019): a partial refund is
+// represented by a `PaymentRefund` row against a still-`CONFIRMED`
+// Payment (see the Payment and PaymentRefund model doc comments below),
+// never by a new status value.
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  CANCELLED
+  FAILED
+  REFUNDED
+  REVERSED
+}
+
+// The deposit/installment structure for a Booking (blueprint Sections 11,
+// 13.6, 14.6), created only through explicit staff action — never
+// automatically (blueprint Section 5.1's non-automatic creation rule) —
+// the Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019).
+//
+// `bookingId @unique`: one PaymentPlan per Booking for the MVP (D-019),
+// the same plain-unique (not partial-unique) pattern already used for
+// `VisaCase.bookingId` — this checkpoint has no "current vs. superseded"
+// PaymentPlan concept for a partial index to distinguish. `clientId` is a
+// direct FK, mirroring this schema's established
+// Lead/Proposal/Booking/Document.clientId convention; the future
+// PaymentPlan-creation service must verify `clientId` equals
+// `booking.clientId` transactionally at write time — a cross-row
+// invariant this schema cannot enforce, deferred the same way
+// `Booking.clientId` vs. its ProposalVersion's client is already
+// deferred.
+//
+// This model deliberately does NOT duplicate `totalAmount`, `currencyCode`
+// (both live only on `Booking` — see that model's doc comment), or a
+// separate `depositAmount` field — a deposit is represented as an
+// `Installment` with `isDeposit = true` instead (D-019; see the
+// Installment model doc comment below).
+//
+// `proposedByStaffUserId` (required) records the Travel Consultant who
+// proposed the plan's commercial terms (blueprint Section 11.3);
+// `approvedByStaffUserId`/`approvedAt` (both nullable, paired) record
+// Finance/Accounting's review and approval (blueprint Section 11.3:
+// "before it becomes active and client-visible") — a timestamp-based
+// lifecycle gate, mirroring `ProposalVersion.clientVisibleAt`'s
+// established pattern, rather than a status enum the blueprint doesn't
+// name for PaymentPlan. Neither FK proves the referenced User's role or
+// account status — that is a service-layer invariant for later
+// implementation, matching this schema's established precedent (e.g.
+// `ProposalVersion.createdByUserId`).
+//
+// Reconciliation invariant (D-019, service-layer only — PostgreSQL CHECK
+// constraints cannot aggregate child rows): before this PaymentPlan may
+// be approved, `SUM(Installment.amount WHERE paymentPlanId = this.id)`
+// must equal `Booking.totalAmount`. A draft (unapproved) plan may be
+// temporarily unreconciled while installments are still being drafted;
+// the future approval service must verify this sum, and write
+// `approvedAt`/`approvedByStaffUserId`, inside one transaction. Whether
+// `Installment.amount`/`dueDate` may be directly mutated after approval
+// (with an `AuditLog` entry recording the correction) or must instead
+// follow its own append-only correction pattern is left open (D-019) — no
+// `PaymentPlan`/`Installment` versioning is invented either way; any
+// future approved post-approval correction workflow must write an
+// `AuditLog` entry (`entityType: 'PaymentPlan'` or `'Installment'`,
+// before/after state), the same generic mechanism this schema already
+// relies on for corrections that have no dedicated history table of their
+// own.
+//
+// Migration-only CHECK Prisma's schema language cannot express — does not
+// exist in any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "payment_plan"
+//     ADD CONSTRAINT "payment_plan_approval_pairing"
+//     CHECK (("approvedAt" IS NULL) = ("approvedByStaffUserId" IS NULL));
+model PaymentPlan {
+  id String @id
+
+  bookingId String  @unique
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  proposedByStaffUserId String
+  proposedBy            User   @relation("PaymentPlanProposer", fields: [proposedByStaffUserId], references: [id], onDelete: Restrict)
+
+  approvedByStaffUserId String?
+  approvedBy            User?     @relation("PaymentPlanApprover", fields: [approvedByStaffUserId], references: [id], onDelete: Restrict)
+  approvedAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  installments Installment[]
+
+  @@index([clientId])
+  @@index([proposedByStaffUserId])
+  @@index([approvedByStaffUserId])
+  @@map("payment_plan")
+}
+
+// A single scheduled amount within a PaymentPlan (blueprint Sections 11.4,
+// 14.6), the Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019).
+//
+// `isDeposit` (default `false`) represents the deposit requirement
+// (blueprint Section 11.4) as the smallest justified field — a boolean —
+// rather than a new enum this checkpoint has no other justified value
+// for. A migration-only partial unique index (below) enforces at most one
+// deposit Installment per PaymentPlan; the future service layer must
+// additionally enforce that a deposit, when present, is
+// `sequenceNumber = 1` — not database-expressible without duplicating
+// that rule into the index predicate, and not attempted here. Whether any
+// given PaymentPlan requires a deposit at all follows that plan's own
+// approved booking terms — blueprint Section 11.4 lists "Deposit
+// requirement" as one structural element of a payment plan without
+// stating every plan must include one, so this checkpoint does not assume
+// universality.
+//
+// No stored status field and no `InstallmentStatus` enum exists (D-019) —
+// operational state (Scheduled/Due/Overdue/Partially Paid/Paid) is fully
+// derived by the future service layer from this Installment's `amount`,
+// `dueDate`, and its `PaymentAllocation`/`PaymentRefundAllocation` rows
+// (see the Payment/PaymentAllocation model doc comments below for the
+// exact net-active-allocation formula), mirroring this schema's
+// established aversion to redundant derived state (`Document.status`,
+// `ProposalVersion`'s accepted/locked state). No waiver field
+// (`waivedAt`/`waivedByStaffUserId`/`waivedReason`) is added — no
+// approved requirement in this repository supports installment waivers;
+// blueprint Section 11.6 lists "Waived" only as one illustrative example
+// among "a status such as Scheduled, Due, Overdue, Partially Paid, Paid,
+// or Waived," explicitly noting "the final list will be confirmed during
+// implementation planning," not as an approved, standalone requirement.
+//
+// `@@unique([paymentPlanId, sequenceNumber])`: installments within one
+// plan are strictly ordered and never share a sequence position.
+//
+// Migration-only CHECK and partial unique index Prisma's schema language
+// cannot express — neither exists in any database yet, Stage A being
+// schema-only (D-019):
+//   ALTER TABLE "installment" ADD CONSTRAINT "installment_amount_positive"
+//     CHECK ("amount" > 0);
+//   CREATE UNIQUE INDEX "installment_active_deposit_key"
+//     ON "installment" ("paymentPlanId")
+//     WHERE "isDeposit" = true;
+model Installment {
+  id String @id
+
+  paymentPlanId String
+  paymentPlan   PaymentPlan @relation(fields: [paymentPlanId], references: [id], onDelete: Restrict)
+
+  sequenceNumber Int
+  isDeposit      Boolean @default(false)
+
+  amount  Decimal  @db.Decimal(18, 2)
+  dueDate DateTime @db.Date
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  allocations PaymentAllocation[]
+
+  @@unique([paymentPlanId, sequenceNumber])
+  @@index([paymentPlanId, dueDate])
+  @@map("installment")
+}
+
+// An individual payment record against a Booking (blueprint Sections
+// 11.2, 14.6), the Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019).
+//
+// `bookingId` and `clientId` are both direct FKs — never an
+// `installmentId` (D-019) — mirroring this schema's established direct-FK
+// convention. Which Installment(s), if any, a Payment covers is recorded
+// separately via `PaymentAllocation` (below), because blueprint Section
+// 14.6 itself describes a Payment as recorded "against an Installment or
+// Booking" and because partial payments (Section 11.4) and one payment
+// covering multiple installments both require a many-to-many shape a
+// single nullable `installmentId` column cannot express. A confirmed
+// amount left unallocated to any Installment is unapplied Booking credit
+// and is never automatically applied to a future Installment (D-019) —
+// see the net-contribution and net-active-allocation formulas below.
+//
+// This model carries no inline `confirmedAt`/`rejectedAt`/`reversedAt`/
+// `refundedAt` timestamp, no inline actor field, and no inline reason
+// field (D-019) — every status transition is instead recorded on the new
+// append-only `PaymentStatusHistory` below, mirroring
+// `BookingStatusHistory`'s established convention exactly, so this model
+// never risks its own `status` column drifting out of sync with a
+// duplicated timestamp/actor/reason set.
+//
+// Corrected net-contribution formula (D-019 — fixes an earlier draft's
+// defect where a fully refunded Payment produced a negative contribution
+// instead of exactly zero; service-layer only, not database-enforced):
+//   net contribution of Payment P =
+//     CASE WHEN P.status IN ('CONFIRMED', 'REFUNDED')
+//       THEN P.amount - SUM(PaymentRefund.amount WHERE paymentId = P.id)
+//       ELSE 0
+//     END
+// Service-layer invariants governing this formula's inputs (D-019):
+//   - A `PaymentRefund` row may exist only for a Payment whose current
+//     status is `CONFIRMED` or `REFUNDED`.
+//   - While `status = CONFIRMED`: `0 <= SUM(refunds) < amount`.
+//   - When `SUM(refunds) = amount`: the service must transition `status`
+//     to `REFUNDED` in the same transaction as that refund's insert.
+//   - A Payment with any `PaymentRefund` row must never transition to
+//     `REVERSED` — a Payment cannot be both reversed and refunded.
+//   - Refund totals must never exceed `amount`.
+// Booking-level formulas built on the above (service-layer only):
+//   net confirmed amount paid   = SUM(net contribution of every Payment
+//                                  under the Booking)
+//   remaining Booking balance   = max(Booking.totalAmount - net confirmed
+//                                  amount paid, 0)
+//   overall Booking overpayment = max(net confirmed amount paid -
+//                                  Booking.totalAmount, 0)
+// See the PaymentAllocation model doc comment below for the corresponding
+// net-active-allocation, unapplied-credit, outstanding-Installment-amount,
+// and next-payment-due formulas.
+//
+// Migration-only CHECK Prisma's schema language cannot express — does not
+// exist in any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "payment" ADD CONSTRAINT "payment_amount_positive"
+//     CHECK ("amount" > 0);
+model Payment {
+  id String @id
+
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  amount Decimal       @db.Decimal(18, 2)
+  status PaymentStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statusHistory     PaymentStatusHistory[]
+  allocations       PaymentAllocation[]
+  refunds           PaymentRefund[]
+  receipt           Receipt?
+  evidenceDocuments Document[]
+
+  @@index([bookingId, status])
+  @@index([clientId])
+  @@map("payment")
+}
+
+// Timestamped, append-only record of every Payment status change
+// (blueprint Section 11.7; .claude/rules/database-security.md Identifiers
+// and Timestamps; .claude/rules/backend.md Auditability), mirroring
+// `BookingStatusHistory`'s convention exactly — the repository layer built
+// in a later checkpoint must only ever INSERT here. The Payment Schema
+// Foundation checkpoint, Stage A (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-019).
+//
+// `previousStatus` is nullable for the same reason as
+// `BookingStatusHistory`'s: a Payment's first history row (its initial
+// `PENDING` status) has no prior status to record.
+//
+// `reason` is nullable at the Prisma level, but per D-019 every real
+// transition after the initial `PENDING` record requires a non-blank
+// reason (standardized, service-generated reasons are acceptable) — a
+// stricter rule than the analogous `document_review_reason_required`
+// pattern, which only requires a reason for specific outcomes; here,
+// every transition beyond the first is required to explain itself,
+// enforced by the CHECK below.
+//
+// `idempotencyKey` is nullable at the Prisma level but required
+// specifically when `newStatus` is `CONFIRMED`, `REVERSED`, or `REFUNDED`
+// (D-019) — these are the financially sensitive transitions ADR-001
+// explicitly requires to be safe to retry without double-applying an
+// effect. The future service layer must, before inserting a row here,
+// check whether a row with the caller-supplied `idempotencyKey` already
+// exists and return that existing result instead of inserting again; the
+// `@unique` constraint is the transactional backstop for a concurrent
+// retry race, exactly mirroring how `bookings/service.ts`'s existing
+// `createBooking` already handles a unique-constraint race on
+// `bookingReference`/`proposalVersionId` (catch the conflict, re-read,
+// and return the existing row — never a raw database error reaching the
+// caller).
+//
+// The future service layer must write the `Payment.status` update, this
+// history row, and the required `AuditLog` entry (blueprint Section 11.7;
+// .claude/rules/backend.md Auditability) all inside one transaction —
+// exactly mirroring `BookingStatusHistory`'s established
+// `updateBookingStatusWithHistory` pattern — so `Payment.status` and its
+// latest `PaymentStatusHistory` row can never drift out of sync.
+//
+// Migration-only CHECK constraints Prisma cannot express — none exist in
+// any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "payment_status_history"
+//     ADD CONSTRAINT "payment_status_history_status_changed"
+//     CHECK ("previousStatus" IS NULL OR "previousStatus" <> "newStatus");
+//   ALTER TABLE "payment_status_history"
+//     ADD CONSTRAINT "payment_status_history_reason_required"
+//     CHECK (
+//       "previousStatus" IS NULL
+//       OR COALESCE(length(btrim("reason")), 0) > 0
+//     );
+//   ALTER TABLE "payment_status_history"
+//     ADD CONSTRAINT "payment_status_history_idempotency_key_required"
+//     CHECK (
+//       "newStatus" NOT IN ('CONFIRMED', 'REVERSED', 'REFUNDED')
+//       OR "idempotencyKey" IS NOT NULL
+//     );
+model PaymentStatusHistory {
+  id String @id
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  previousStatus PaymentStatus?
+  newStatus      PaymentStatus
+
+  // `onDelete: Restrict`: never drop the acting staff member's identity
+  // off an existing history row, matching this schema's established
+  // convention (LeadStatusHistory.changedByUserId, AuditLog.actorId,
+  // BookingStatusHistory.changedByUserId).
+  changedByUserId String
+  changedBy       User   @relation("PaymentStatusHistoryActor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+
+  reason         String?
+  idempotencyKey String? @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([paymentId, createdAt])
+  @@index([changedByUserId])
+  @@index([createdAt])
+  @@map("payment_status_history")
+}
+
+// Links a Payment to the Installment(s) it covers (blueprint Sections
+// 11.4, 14.6), the Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019). Supports one Payment covering
+// multiple Installments and one Installment receiving multiple Payments
+// (both many-to-many via this join model), and partial payments
+// (blueprint Section 11.4) by simply allocating less than an
+// Installment's full `amount`.
+//
+// `amount` is always positive (D-019) — never signed. This model is
+// append-only: a misallocation is never corrected by mutating or deleting
+// an existing row. Instead, the future service layer writes a
+// `PaymentAllocationReversal` (below) — a complete, one-time reversal of
+// this specific allocation — and then creates new, separate positive
+// `PaymentAllocation` rows for the corrected split, so allocation history
+// never silently disappears (D-019). A `PaymentAllocation` that already
+// has any `PaymentRefundAllocation` rows against it must not be reversed
+// unless the service can prove the reversal preserves every
+// refund-allocation invariant below; the default service policy is to
+// reject that operation.
+//
+// `allocatedByStaffUserId`/`allocatedAt` record who performed the
+// allocation and when — every state-changing action in this schema
+// records its actor and timestamp (mirrors `DocumentReview.reviewedByUserId`/
+// `reviewedAt`). `idempotencyKey` is required and unique — allocation
+// creation has no natural uniqueness to detect a retry by (unlike
+// `Booking`'s own `proposalVersionId @unique`), since multiple allocations
+// between the same Payment/Installment pair are explicitly permitted for
+// corrections; the future service layer must check for an existing row
+// with the caller-supplied key before inserting, exactly mirroring
+// `PaymentStatusHistory.idempotencyKey`'s retry pattern above.
+//
+// Cross-row invariants the database cannot enforce, deferred to mandatory
+// transactional service-layer verification at write time (D-019):
+//   - `paymentId` and `installmentId` must resolve to the same Booking
+//     (`payment.bookingId = installment.paymentPlan.bookingId`).
+//   - The active (non-reversed) allocation total for a Payment must never
+//     exceed that Payment's own net contribution (see the Payment model
+//     doc comment above).
+//
+// Net-active-allocation and downstream formulas (D-019, service-layer
+// only):
+//   net active allocation (Installment Y) =
+//       SUM(PaymentAllocation.amount WHERE installmentId = Y
+//           AND payment.status IN ('CONFIRMED', 'REFUNDED')
+//           AND no PaymentAllocationReversal exists for that allocation)
+//     - SUM(PaymentRefundAllocation.amount WHERE paymentAllocationId is
+//           one of the above)
+//   unapplied Booking credit = net confirmed amount paid (Payment model
+//       doc comment above) - SUM(net active allocation across every
+//       Installment in the Booking's PaymentPlan)
+//   outstanding Installment amount = max(Installment.amount - net active
+//       allocation, 0)
+//   next payment due = earliest dueDate among installments with
+//       outstanding amount > 0
+// The future service layer must guarantee `unapplied Booking credit >= 0`
+// and every `net active allocation >= 0` by actively verifying them at
+// write time, never merely hoping the arithmetic stays non-negative
+// (D-019). A fully `REFUNDED` Payment must, by construction, have no
+// remaining net active allocations once every one of its allocations has
+// a matching `PaymentRefundAllocation` — the service should verify this
+// as a closing check when a Payment reaches `REFUNDED`.
+//
+// Migration-only CHECK Prisma's schema language cannot express — does not
+// exist in any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "payment_allocation"
+//     ADD CONSTRAINT "payment_allocation_amount_positive"
+//     CHECK ("amount" > 0);
+model PaymentAllocation {
+  id String @id
+
+  paymentId     String
+  payment       Payment     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  installmentId String
+  installment   Installment @relation(fields: [installmentId], references: [id], onDelete: Restrict)
+
+  amount Decimal @db.Decimal(18, 2)
+
+  allocatedByStaffUserId String
+  allocatedBy            User     @relation(fields: [allocatedByStaffUserId], references: [id], onDelete: Restrict)
+  allocatedAt            DateTime @default(now())
+
+  idempotencyKey String @unique
+
+  createdAt DateTime @default(now())
+
+  reversal          PaymentAllocationReversal?
+  refundAllocations PaymentRefundAllocation[]
+
+  @@index([paymentId])
+  @@index([installmentId])
+  @@index([allocatedByStaffUserId])
+  @@map("payment_allocation")
+}
+
+// An append-only record representing the complete reversal of exactly one
+// PaymentAllocation (blueprint Section 11.7; D-019) — the Payment Schema
+// Foundation checkpoint, Stage A (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-019). `paymentAllocationId @unique`: a given allocation may be
+// reversed at most once, by definition a *complete* reversal, never a
+// partial one — a corrected split is represented by new, separate
+// positive `PaymentAllocation` rows created afterward (see the
+// PaymentAllocation model doc comment above), never by a second reversal
+// of the same row. Neither this row nor the `PaymentAllocation` it
+// reverses is ever deleted or mutated.
+//
+// `reason` is required and non-blank (CHECK below), matching this
+// schema's established `document_review_reason_required` pattern.
+// `idempotencyKey` is required and unique, for the same retry-safety
+// reason documented on `PaymentAllocation.idempotencyKey` above.
+//
+// Migration-only CHECK Prisma's schema language cannot express — does not
+// exist in any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "payment_allocation_reversal"
+//     ADD CONSTRAINT "payment_allocation_reversal_reason_required"
+//     CHECK (COALESCE(length(btrim("reason")), 0) > 0);
+model PaymentAllocationReversal {
+  id String @id
+
+  paymentAllocationId String            @unique
+  paymentAllocation   PaymentAllocation @relation(fields: [paymentAllocationId], references: [id], onDelete: Restrict)
+
+  reversedByStaffUserId String
+  reversedBy            User   @relation(fields: [reversedByStaffUserId], references: [id], onDelete: Restrict)
+
+  reason         String
+  idempotencyKey String @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([reversedByStaffUserId])
+  @@map("payment_allocation_reversal")
+}
+
+// An append-only record of money actually returned to the client against
+// a Payment (blueprint Section 11.5), the Payment Schema Foundation
+// checkpoint, Stage A (docs/HERITAGE_V3_DECISIONS_LOG.md D-019). A row
+// exists only once money has actually been returned — this checkpoint
+// models no "pending refund" state, matching the blueprint's own "A
+// refund represents money returned to the client after a valid confirmed
+// payment" (Section 11.5). Multiple partial refunds against one Payment
+// are supported (D-019); see the Payment model doc comment above for the
+// exact service-layer invariants governing cumulative refund totals and
+// the CONFIRMED-to-REFUNDED transition. Original Payment and Receipt rows
+// are never deleted or overwritten because of a refund (blueprint Section
+// 11.5's "original receipts and payment records are never deleted").
+//
+// `reason` is required and non-blank (CHECK below), matching
+// `document_review_reason_required`'s pattern; `performedByStaffUserId`/
+// `performedAt` record the Finance/Accounting actor and timestamp
+// (blueprint Section 11.5: "performed by Finance/Accounting only").
+// `idempotencyKey` is required and unique, for the same retry-safety
+// reason documented on `PaymentAllocation.idempotencyKey` above — refund
+// creation has no natural uniqueness (multiple partial refunds against
+// one Payment are explicitly permitted), so a caller-supplied key is the
+// only reliable retry-detection mechanism.
+//
+// Refund documentation type (blueprint Section 11.5/16.2) remains open
+// (D-019): this model is a structured internal financial record only — it
+// is not automatically a refund reference, credit note, or equivalent
+// client-facing document; that choice remains deferred, unresolved by
+// this checkpoint.
+//
+// Migration-only CHECK Prisma's schema language cannot express — does not
+// exist in any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "payment_refund"
+//     ADD CONSTRAINT "payment_refund_amount_positive"
+//     CHECK ("amount" > 0);
+//   ALTER TABLE "payment_refund"
+//     ADD CONSTRAINT "payment_refund_reason_required"
+//     CHECK (COALESCE(length(btrim("reason")), 0) > 0);
+model PaymentRefund {
+  id String @id
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  amount Decimal @db.Decimal(18, 2)
+  reason String
+
+  performedByStaffUserId String
+  performedBy            User     @relation(fields: [performedByStaffUserId], references: [id], onDelete: Restrict)
+  performedAt            DateTime @default(now())
+
+  idempotencyKey String @unique
+
+  createdAt DateTime @default(now())
+
+  refundAllocations PaymentRefundAllocation[]
+
+  @@index([paymentId])
+  @@index([performedByStaffUserId])
+  @@map("payment_refund")
+}
+
+// Links a PaymentRefund to the specific PaymentAllocation row(s) it
+// reduces (blueprint Section 11.1's "the remaining balance normally
+// increases by the refunded amount"), the Payment Schema Foundation
+// checkpoint, Stage A (docs/HERITAGE_V3_DECISIONS_LOG.md D-019). Preserves
+// exactly which Installment's balance reopens because of a refund — the
+// linked `PaymentAllocation.installmentId` identifies that Installment
+// directly, so no duplicate `installmentId` column is added here.
+//
+// `@@unique([paymentRefundId, paymentAllocationId])`: a given refund
+// touches a given allocation at most once, preventing an accidental
+// double-count of the same reduction. Any portion of a `PaymentRefund`'s
+// `amount` not represented by a `PaymentRefundAllocation` row is, by
+// construction, a refund from unapplied Booking credit rather than from a
+// specific Installment's allocated balance (D-019).
+//
+// Cross-row invariants the database cannot enforce, deferred to mandatory
+// transactional service-layer verification at write time (D-019):
+//   - The linked `PaymentRefund` and `PaymentAllocation` must belong to
+//     the same Payment
+//     (`paymentRefund.paymentId = paymentAllocation.paymentId`).
+//   - This row's `amount` must never exceed its `PaymentRefund.amount`.
+//   - Cumulative `PaymentRefundAllocation.amount` against one
+//     `PaymentAllocation` must never exceed that allocation's own
+//     (still-active, non-reversed) `amount`.
+//
+// Migration-only CHECK Prisma's schema language cannot express — does not
+// exist in any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "payment_refund_allocation"
+//     ADD CONSTRAINT "payment_refund_allocation_amount_positive"
+//     CHECK ("amount" > 0);
+model PaymentRefundAllocation {
+  id String @id
+
+  paymentRefundId     String
+  paymentRefund       PaymentRefund     @relation(fields: [paymentRefundId], references: [id], onDelete: Restrict)
+  paymentAllocationId String
+  paymentAllocation   PaymentAllocation @relation(fields: [paymentAllocationId], references: [id], onDelete: Restrict)
+
+  amount Decimal @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+
+  @@unique([paymentRefundId, paymentAllocationId])
+  @@index([paymentRefundId])
+  @@index([paymentAllocationId])
+  @@map("payment_refund_allocation")
+}
+
+// The official receipt generated for a confirmed Payment (blueprint
+// Sections 11.5, 14.6), the Payment Schema Foundation checkpoint, Stage A
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-019). An immutable historical
+// snapshot — no `updatedAt` field exists, since nothing in this
+// checkpoint's approved requirements gives a Receipt any editable state
+// after issuance (D-019). `amount` and `currencyCode` are both captured
+// at issuance time rather than re-derived from `Payment`/`Booking`
+// indefinitely, preserving historical correctness independent of any
+// later state on either of those rows.
+//
+// `paymentId @unique`: one Receipt per Payment — "one confirmed Receipt
+// per confirmed Payment" is already named as an example in
+// `.claude/rules/database-security.md`'s Constraints and Indexes section,
+// before this checkpoint existed. Issued only for a Payment that has been
+// validly confirmed — a cross-table invariant the database cannot
+// enforce, deferred to mandatory service-layer verification at write
+// time. A later reversal or refund of the underlying Payment must never
+// delete or mutate this row (blueprint Section 11.5: "original receipts
+// and payment records are never deleted... marked accordingly"); any
+// "refunded"/"reversed" display state is derived by reading the current
+// `payment.status`, never duplicated onto this row.
+//
+// `receiptNumber @unique` — no prefix format is enforced (D-019); only
+// uniqueness is required until an exact numbering format is approved,
+// unlike `Booking.bookingReference`'s already-approved `HPB-`-prefixed
+// convention (docs/HERITAGE_V3_DECISIONS_LOG.md's booking-reference
+// decision).
+//
+// Migration-only CHECK Prisma's schema language cannot express — does not
+// exist in any database yet, Stage A being schema-only (D-019):
+//   ALTER TABLE "receipt" ADD CONSTRAINT "receipt_amount_positive"
+//     CHECK ("amount" > 0);
+//   ALTER TABLE "receipt" ADD CONSTRAINT "receipt_currency_code_format"
+//     CHECK ("currencyCode" ~ '^[A-Z]{3}$');
+model Receipt {
+  id String @id
+
+  paymentId String  @unique
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  receiptNumber String @unique
+
+  issuedByStaffUserId String
+  issuedBy            User     @relation(fields: [issuedByStaffUserId], references: [id], onDelete: Restrict)
+  issuedAt            DateTime @default(now())
+
+  amount       Decimal @db.Decimal(18, 2)
+  currencyCode String
+
+  createdAt DateTime @default(now())
+
+  @@index([issuedByStaffUserId])
+  @@map("receipt")
 }
