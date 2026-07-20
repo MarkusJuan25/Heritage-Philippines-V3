@@ -158,12 +158,15 @@
 // transition matrix was deferred to its own later D-014 checkpoint.
 //
 // Deliberately out of scope for this checkpoint (Stage A and beyond):
-// - VisaRequirement, Document, DocumentRequirement, and DocumentReview —
-//   VisaRequirement's blueprint description (Section 14.8) overlaps
-//   structurally with DocumentRequirement (Section 14.7), and neither
-//   Document nor DocumentRequirement exists anywhere in this schema yet;
-//   modeling VisaRequirement now risks a shape that would need reworking
-//   once those entities land. No placeholder document model is added.
+// - VisaRequirement — blueprint Section 14.8's description overlaps
+//   structurally with `DocumentRequirement` (Section 14.7). `Document`,
+//   `DocumentRequirement`, and `DocumentReview` were added by the later
+//   Document Schema Foundation checkpoint (below); the VisaRequirement /
+//   DocumentRequirement boundary is resolved there
+//   (docs/HERITAGE_V3_DECISIONS_LOG.md D-018) — `DocumentRequirement` owns
+//   uploadable document-category obligations for Bookings and VisaCases,
+//   while VisaRequirement (still deferred) may cover broader non-document
+//   visa procedural requirements, forms, and deadlines.
 // - Any applicant/traveler, passport, nationality, embassy, or other
 //   identity-document field — VisaCase in this checkpoint is a workflow/
 //   status shell only, consistent with the data-minimization principle in
@@ -187,6 +190,82 @@
 //   Booking-level StaffAssignment interact — both left open by D-017, not
 //   assumed here), status-transition enforcement, notifications, and
 //   tests/seed data — all deferred to future checkpoints.
+//
+// Document, DocumentRequirement, and DocumentReview are covered by this
+// checkpoint — the Document Schema Foundation checkpoint. Stage A first
+// added this schema and D-018 without creating or applying any migration.
+// Migration `20260717073151_document_schema_foundation` was subsequently
+// generated, reviewed, and hand-augmented with the six constraints D-018
+// requires (`document_requirement_target_exclusive`,
+// `document_context_exclusive`, `document_uploader_path_exclusive`,
+// `document_version_positive`, `document_previous_not_self`, and
+// `document_review_reason_required` — see each model's doc comment below
+// for every constraint's exact text). `prisma migrate status` confirmed
+// on July 20, 2026 that this migration is applied to the local
+// `heritage_v3_dev` database — 10 migrations found, database schema up to
+// date — it has not been applied to staging or production regardless
+// (blueprint Sections 4.2-4.6,
+// 12.1-12.3, 13.1, 13.3, 13.4, 13.7, 14.7;
+// docs/HERITAGE_V3_DECISIONS_LOG.md D-018). Per D-018: each `Document` row
+// represents one immutable uploaded file/version — a replacement creates a
+// new `Document` linked back through `previousDocumentId`, and the
+// replaced row is retained, never deleted or mutated; no separate
+// `DocumentVersion` model is introduced. `Document.status` is deliberately
+// not a stored field and no `DocumentStatus` enum is modeled — operational
+// status is derived by the future service/repository layer in this exact
+// priority order: (a) if another `Document` references this row through
+// `previousDocumentId` — equivalently, this row's `replacementDocument`
+// reverse relation is non-null — this (older) row is SUPERSEDED/REPLACED,
+// regardless of any `DocumentReview` it may also carry; (b) otherwise, if
+// this `Document` has no `DocumentReview` rows at all, it is
+// PENDING_REVIEW; (c) otherwise, its status is the latest
+// `DocumentReview.outcome`, with "latest" selected deterministically using
+// `reviewedAt DESC, createdAt DESC, id DESC` — a service/repository
+// ordering rule, not a new database constraint or index requirement.
+// `DocumentReviewOutcome` is the only closed enum this checkpoint adds,
+// taken directly from blueprint Section 14.7's own closed three-value list
+// ("approved, rejected, replacement requested"). `documentRequirementId`
+// is nullable — proactive or ad-hoc uploads are permitted, and a document
+// counts toward a formal requirement only when explicitly linked. Every
+// `Document` has a required `clientId`
+// and may additionally target at most one of `bookingId`/`visaCaseId`
+// (never both) — a client-only document with both null is permitted.
+// Every `DocumentRequirement` targets exactly one of `bookingId`/
+// `visaCaseId` (never neither, never both). Cross-row invariants this
+// schema cannot enforce — a linked Document's target/client must agree
+// with its DocumentRequirement's; a replacement must preserve the same
+// client/context/requirement lineage and increment `version` by exactly
+// one; no long replacement cycle may form — are explicitly deferred to
+// mandatory service-layer verification, the same way this schema already
+// defers analogous cross-row checks for Booking.clientId and
+// VisaCase.clientId. Migration `20260717073151_document_schema_foundation`
+// now exists and contains this section's generated tables, enum, indexes,
+// and foreign keys, hand-augmented with the six D-018 CHECK constraints
+// noted above — `docs/HERITAGE_V3_TASK_BOARD.md` remains the source for
+// verified environment/migration-application status, mirroring how the
+// Visa Case Schema Foundation checkpoint's own migration section documents
+// the same discipline. In particular, this checkpoint deliberately does
+// NOT implement:
+//
+// - VisaRequirement — remains deferred (D-018); see the VisaCase section
+//   above for the resolved boundary between it and DocumentRequirement.
+// - ActivityLog-based access/download logging (blueprint Section 12.3's
+//   "access and download audit logs for every document") — deferred to
+//   Phase 4 implementation (D-018); must exist before document
+//   access/download endpoints are considered complete. The existing
+//   `AuditLog` model remains scoped to sensitive/security-relevant staff
+//   actions and must not be repurposed as the routine download-event
+//   store.
+// - Storage-provider/bucket identifier, checksum, malware-scan-status, and
+//   any document-content field — this checkpoint uses only the storage
+//   metadata boundary already established by `MessageAttachment`
+//   (`storageKey`, `fileName`, `mimeType`, `fileSizeBytes`); none of these
+//   additional fields is blueprint-required, so none is added (D-018).
+// - Document/DocumentRequirement/DocumentReview repository and service
+//   layers, API routes, admin dashboard and client portal UI, document
+//   upload/preview/download flows, malware scanning, signed/expiring
+//   download-link issuance (Section 12.3; ADR-001), and tests/seed data —
+//   all deferred to future checkpoints.
 //
 // Deliberately out of scope here:
 // - A Client status field/enum — the blueprint does not define an approved
@@ -242,11 +321,11 @@
 //   signed/expiring download-link issuance (Section 12.3); and tests/seed
 //   data — all deferred to future checkpoints.
 // - Every other later-phase business entity in blueprint Section 14
-//   (PaymentPlan, Document, VisaRequirement, etc.) — remaining for later
-//   Phase 1 database-schema checkpoints under the "Implement database
-//   schema and reviewed migrations from the approved Phase 0 entity plan"
-//   checklist item (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+
-//   feature implementation once modeled.
+//   (PaymentPlan, VisaRequirement, etc.) — remaining for later Phase 1
+//   database-schema checkpoints under the "Implement database schema and
+//   reviewed migrations from the approved Phase 0 entity plan" checklist
+//   item (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
+//   implementation once modeled.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -371,6 +450,15 @@ model User {
   // a superseding decision and a schema change to this field's
   // nullability — it is not supported by this MVP schema.
   visaStatusChanges VisaStatusHistory[] @relation("VisaStatusHistoryActor")
+
+  // The Document Schema Foundation checkpoint, Stage A (blueprint Sections
+  // 4.2-4.6, 12.1-12.3, 14.7; docs/HERITAGE_V3_DECISIONS_LOG.md D-018).
+  // `documentsUploaded`: every Document this staff member uploaded — never
+  // populated for a client-uploaded Document, which is attributed to a
+  // ClientProfile instead (see the Document model doc comment below).
+  // `documentReviews`: every DocumentReview this staff member wrote.
+  documentsUploaded Document[]
+  documentReviews   DocumentReview[]
 
   @@map("user")
 }
@@ -668,6 +756,13 @@ model Client {
   // more than one over time across different Bookings, hence the array.
   visaCases VisaCase[]
 
+  // The Document Schema Foundation checkpoint, Stage A (blueprint Sections
+  // 4.6, 12.1-12.3, 13.3, 14.7; docs/HERITAGE_V3_DECISIONS_LOG.md D-018).
+  // Every Document with this Client as its (always-required) `clientId` —
+  // see the Document model doc comment below for why this is a direct FK
+  // rather than derived only through a Booking or VisaCase.
+  documents Document[]
+
   @@index([normalizedEmail])
   @@index([normalizedPhone])
   @@map("client")
@@ -875,6 +970,13 @@ model ClientProfile {
   // staff-authored Message (see the Message model doc comment below).
   conversationParticipations ConversationParticipant[]
   authoredMessages           Message[]
+
+  // The Document Schema Foundation checkpoint, Stage A (blueprint Sections
+  // 4.6, 12.1-12.3, 14.7; docs/HERITAGE_V3_DECISIONS_LOG.md D-018). Every
+  // Document this activated client account uploaded — never populated for
+  // a staff-uploaded Document, which is attributed to a User instead (see
+  // the Document model doc comment below).
+  documentsUploaded Document[]
 
   @@map("client_profile")
 }
@@ -1360,6 +1462,14 @@ model Booking {
   // this and why multiple/historical VisaCases per Booking are out of
   // scope.
   visaCase VisaCase?
+
+  // The Document Schema Foundation checkpoint, Stage A (blueprint Sections
+  // 4.3, 12.1-12.3, 13.4, 14.7; docs/HERITAGE_V3_DECISIONS_LOG.md D-018).
+  // Every Document and DocumentRequirement that optionally targets this
+  // Booking — see the Document/DocumentRequirement model doc comments
+  // below for the target-exclusivity rules governing both.
+  documents            Document[]
+  documentRequirements DocumentRequirement[]
 
   @@index([clientId])
   @@index([status])
@@ -1982,6 +2092,14 @@ model VisaCase {
   // this checkpoint — see the Conversation model doc comment above.
   conversations Conversation[]
 
+  // The Document Schema Foundation checkpoint, Stage A (blueprint Sections
+  // 4.5, 12.1-12.3, 13.8, 14.7; docs/HERITAGE_V3_DECISIONS_LOG.md D-018).
+  // Every Document and DocumentRequirement that optionally targets this
+  // VisaCase — see the Document/DocumentRequirement model doc comments
+  // below for the target-exclusivity rules governing both.
+  documents            Document[]
+  documentRequirements DocumentRequirement[]
+
   @@index([clientId])
   @@index([status])
   @@map("visa_case")
@@ -2045,4 +2163,340 @@ model VisaStatusHistory {
   @@index([changedByUserId])
   @@index([createdAt])
   @@map("visa_status_history")
+}
+
+// --- Document Schema Foundation: schema-and-migration checkpoint ---
+// Adds DocumentReviewOutcome, Document, DocumentRequirement, and
+// DocumentReview (blueprint Sections 4.2-4.6, 12.1-12.3, 13.1, 13.3, 13.4,
+// 13.7, 14.7; docs/HERITAGE_V3_DECISIONS_LOG.md D-018).
+//
+// Stage A first added this schema and D-018 without creating or applying
+// any migration. Migration `20260717073151_document_schema_foundation`
+// was subsequently generated (a single `prisma migrate dev --create-only`
+// invocation — see D-016 for why re-invoking that command is unsafe and
+// must not happen a second time), reviewed, and hand-augmented with the
+// six constraints documented on each model below. `prisma migrate status`
+// confirmed on July 20, 2026 that this migration is applied to the local
+// `heritage_v3_dev` database — 10 migrations found, database schema up to
+// date — it has not been applied to staging or production regardless; see
+// docs/HERITAGE_V3_TASK_BOARD.md for the current, verified
+// environment/migration-application status. No repository layer, service
+// layer, API route, admin dashboard or client portal UI, tests, or seed
+// data exists either. In particular, this checkpoint deliberately does
+// NOT implement VisaRequirement, ActivityLog-based access/download
+// logging, storage-provider/checksum/malware-scan-status fields, or
+// document-content fields — see the file header above for the full list
+// and rationale for each (D-018).
+
+// The only closed enum this checkpoint adds — taken directly from
+// blueprint Section 14.7's own closed three-value list ("records a staff
+// review outcome (approved, rejected, replacement requested) for a
+// Document"), the same way this schema's other blueprint-given closed
+// lists (LeadStatus, BookingStatus, PortalInvitationStatus) were each
+// adopted directly rather than invented.
+enum DocumentReviewOutcome {
+  APPROVED
+  REJECTED
+  REPLACEMENT_REQUESTED
+}
+
+// An uploaded file (blueprint Sections 12, 14.7). Per D-018, each
+// `Document` row represents one immutable uploaded file/version —
+// replacement creates a new row linked back through `previousDocumentId`
+// (below); the replaced row is retained, never deleted or mutated
+// (Section 12.2: "Version history (a replaced document is retained, not
+// deleted)"). No separate `DocumentVersion` model exists: unlike
+// Proposal/ProposalVersion (blueprint Section 14.4, which explicitly names
+// both), Section 14.7 names only `Document` itself, with "version" as one
+// of its own fields — this checkpoint follows that literal reading
+// (D-018).
+//
+// `clientId` is a direct, required FK, mirroring this schema's established
+// Lead.clientId/Proposal.clientId/Booking.clientId/Conversation.clientId/
+// VisaCase.clientId convention — necessary because a Document may have no
+// Booking or VisaCase context at all (a client-only upload is permitted,
+// D-018). `bookingId`/`visaCaseId` are both optional, and this checkpoint
+// permits **at most one** of them non-null, never both (D-018) — a
+// Document may target a Booking, a VisaCase, or neither, but never both
+// simultaneously. `documentRequirementId` is also optional: per D-018,
+// proactive or ad-hoc uploads are permitted, and a Document counts toward
+// a formal requirement only when explicitly linked; nothing in blueprint
+// Section 12.1 requires every upload to be requirement-first.
+//
+// Service-layer invariants for later implementation, not enforced by any
+// database constraint in this checkpoint — these are cross-row invariants
+// (each depends on the state of a *related* row, not just this one) that
+// no Prisma-expressible CHECK constraint can verify, matching this
+// schema's established precedent for Booking.clientId / VisaCase.clientId:
+//   - Direct-context ownership: if `bookingId` is non-null, the referenced
+//     `Booking.clientId` must equal this Document's own `clientId`; if
+//     `visaCaseId` is non-null, the referenced `VisaCase.clientId` must
+//     equal this Document's own `clientId`. Both checks apply regardless
+//     of whether `documentRequirementId` is set — they are not conditional
+//     on a requirement link.
+//   - Requirement-link agreement: when `documentRequirementId` is set, the
+//     linked DocumentRequirement's own target (its `bookingId` or
+//     `visaCaseId`) must exactly match this Document's target of the same
+//     kind, and that target must resolve to the same Client as this
+//     Document's `clientId`. A requirement-linked Document must never be
+//     client-only — i.e. a non-null `documentRequirementId` requires
+//     exactly one of `bookingId`/`visaCaseId` to also be non-null, not
+//     both null.
+//   - A replacement Document (linked via `previousDocumentId`) must
+//     preserve the same client/context/requirement/category lineage as
+//     the row it replaces, and its `version` must be exactly one greater
+//     than the replaced row's.
+//   - No long replacement cycle may form — the `previousDocumentId
+//     @unique` constraint below prevents two Documents from sharing one
+//     predecessor, but cannot by itself prove the chain terminates.
+// The future Document-service layer must verify each of these
+// transactionally at write time — skipping them risks the same class of
+// cross-client data leak `.claude/rules/client-portal.md` treats as
+// critical severity.
+//
+// `category` is deliberately `String`, not a closed enum — blueprint
+// Section 12.1 gives categories only as examples ("for example: identity
+// documents, visa documents, booking-related forms, and proof of
+// payment"), not a closed list, matching this schema's established
+// open-ended-field precedent (`Lead.source`).
+//
+// `Document.status` is deliberately NOT a stored field, and no
+// `DocumentStatus` enum exists (D-018) — operational status is derived by
+// the future service/repository layer in this exact priority order:
+//   (a) If another `Document` references this row through
+//       `previousDocumentId` — equivalently, this row's
+//       `replacementDocument` reverse relation is non-null — this (older)
+//       row is SUPERSEDED/REPLACED, regardless of any `DocumentReview` it
+//       may also carry.
+//   (b) Otherwise, if this `Document` has no `DocumentReview` rows at
+//       all, it is PENDING_REVIEW.
+//   (c) Otherwise, its status is the latest `DocumentReview.outcome`,
+//       with "latest" selected deterministically using
+//       `reviewedAt DESC, createdAt DESC, id DESC` — a service/repository
+//       ordering rule, not a new database constraint or index
+//       requirement.
+// This mirrors this schema's established aversion to redundant derived
+// state (e.g. `ProposalVersion`'s accepted/locked state, likewise derived
+// rather than stored).
+//
+// `storageKey`/`fileName`/`mimeType`/`fileSizeBytes` reuse exactly the
+// storage-metadata boundary already established by `MessageAttachment` —
+// `storageKey` is an opaque, backend-resolved identifier for the
+// underlying private-storage object, never a public or directly browsable
+// URL (`.claude/rules/architecture.md` Storage boundary; ADR-001's
+// File-storage boundary). No storage-provider/bucket identifier,
+// checksum, or malware-scan-status field exists in this checkpoint
+// (D-018) — none is blueprint-required, and ADR-001 places actual
+// malware-scanning/storage-provider configuration in Phase 4, alongside
+// the Documents feature, not this schema-only checkpoint.
+//
+// The uploader identity uses the same two-path split this schema already
+// established for ConversationParticipant/Message: `uploadedByStaffUserId`
+// (a staff User) or `uploadedByClientProfileId` (the client's durable
+// portal identity, matching ConversationParticipant/Message's own client
+// path) — exactly one of the two is non-null. The `document_uploader_path_
+// exclusive` CHECK below only proves which one of the two columns is
+// populated; it proves nothing about role, account status, or ownership.
+// The following are therefore service-layer invariants for later
+// implementation, not database constraints, matching this checkpoint's
+// established cross-row-invariant precedent above:
+//   - When `uploadedByClientProfileId` is set, the referenced
+//     `ClientProfile.clientId` must equal this Document's own `clientId`.
+//   - `uploadedByStaffUserId` may only ever reference an authenticated,
+//     active, operationally-authorized staff actor at write time — a
+//     CLIENT-role User must never be recorded as `uploadedByStaffUserId`.
+//   - Exact per-role upload capability boundaries (which of Admin/Manager,
+//     Travel Consultant, Finance/Accounting, Visa Documentation Staff may
+//     upload in which context) remain deferred to the future Document
+//     service/API checkpoint, matching this schema's existing deferral of
+//     analogous role-boundary enforcement elsewhere.
+// No additional database role/status/ownership column or CHECK is added
+// for this — `.claude/rules/backend.md`'s authorization-layer rule already
+// places identity/role/ownership verification in the service layer, not
+// the schema.
+//
+// Prisma's schema language cannot express any of the raw-SQL constraints
+// below — migration `20260717073151_document_schema_foundation` added all
+// of them by hand:
+//   ALTER TABLE "document" ADD CONSTRAINT "document_context_exclusive"
+//     CHECK (num_nonnulls("bookingId", "visaCaseId") <= 1);
+//   ALTER TABLE "document" ADD CONSTRAINT
+//     "document_uploader_path_exclusive"
+//     CHECK (num_nonnulls("uploadedByStaffUserId", "uploadedByClientProfileId") = 1);
+//   ALTER TABLE "document" ADD CONSTRAINT "document_version_positive"
+//     CHECK ("version" >= 1);
+//   ALTER TABLE "document" ADD CONSTRAINT "document_previous_not_self"
+//     CHECK ("previousDocumentId" IS NULL OR "previousDocumentId" <> "id");
+// `prisma migrate status` confirmed on July 20, 2026 that these exist in
+// the local database (10 migrations found, database schema up to date);
+// see the section header above and docs/HERITAGE_V3_TASK_BOARD.md for the
+// current, verified status.
+model Document {
+  id String @id
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  bookingId String?
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  visaCaseId String?
+  visaCase   VisaCase? @relation(fields: [visaCaseId], references: [id], onDelete: Restrict)
+
+  documentRequirementId String?
+  documentRequirement   DocumentRequirement? @relation(fields: [documentRequirementId], references: [id], onDelete: Restrict)
+
+  category String
+
+  version Int @default(1)
+
+  previousDocumentId  String?   @unique
+  previousDocument    Document? @relation("DocumentVersionChain", fields: [previousDocumentId], references: [id], onDelete: Restrict)
+  replacementDocument Document? @relation("DocumentVersionChain")
+
+  storageKey    String @unique
+  fileName      String
+  mimeType      String
+  fileSizeBytes Int
+
+  uploadedByStaffUserId String?
+  uploadedByStaffUser   User?   @relation(fields: [uploadedByStaffUserId], references: [id], onDelete: Restrict)
+
+  uploadedByClientProfileId String?
+  uploadedByClientProfile   ClientProfile? @relation(fields: [uploadedByClientProfileId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reviews DocumentReview[]
+
+  @@index([clientId])
+  @@index([bookingId])
+  @@index([visaCaseId])
+  @@index([documentRequirementId])
+  @@index([category])
+  @@index([uploadedByStaffUserId])
+  @@index([uploadedByClientProfileId])
+  @@map("document")
+}
+
+// Defines which document categories are required for a given Booking or
+// VisaCase (blueprint Sections 12.1, 14.7). Per D-018, `DocumentRequirement`
+// owns uploadable document-category obligations for both Bookings and
+// VisaCases — the future VisaRequirement entity (still deferred) may cover
+// broader non-document visa procedural requirements (forms, deadlines) but
+// must not duplicate this responsibility (see the file header and the
+// VisaCase model doc comment above for the full boundary rationale).
+//
+// `bookingId`/`visaCaseId` are both optional, but exactly one must be
+// non-null (D-018; blueprint Section 12.1: "linked to a DocumentRequirement
+// that defines what is required for a given booking or visa case" — read
+// as an exclusive "for a given X or Y," mirroring this schema's
+// established StaffAssignment/Conversation target-exclusivity pattern).
+//
+// `category` is deliberately `String`, not a closed enum, matching
+// `Document.category`'s own rationale above — blueprint Section 12.1 gives
+// only examples, not a closed list.
+//
+// Prisma's schema language cannot express the XOR CHECK below — migration
+// `20260717073151_document_schema_foundation` added it by hand:
+//   ALTER TABLE "document_requirement" ADD CONSTRAINT
+//     "document_requirement_target_exclusive"
+//     CHECK (num_nonnulls("bookingId", "visaCaseId") = 1);
+// `prisma migrate status` confirmed on July 20, 2026 that this constraint
+// exists in the local database (10 migrations found, database schema up
+// to date); see the section header above and docs/HERITAGE_V3_TASK_BOARD.md
+// for the current, verified status.
+model DocumentRequirement {
+  id String @id
+
+  bookingId String?
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  visaCaseId String?
+  visaCase   VisaCase? @relation(fields: [visaCaseId], references: [id], onDelete: Restrict)
+
+  category String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents Document[]
+
+  @@index([bookingId, category])
+  @@index([visaCaseId, category])
+  @@map("document_requirement")
+}
+
+// Records a staff review outcome for a Document (blueprint Sections 12.2,
+// 14.7: "records a staff review outcome (approved, rejected, replacement
+// requested) for a Document"). Append-only in practice, mirroring this
+// schema's established `*StatusHistory` convention: the repository layer
+// built in a later checkpoint must only ever INSERT here.
+//
+// `reviewedByUserId` is required — a DocumentReview is, by definition, a
+// staff action (blueprint Sections 4.3, 4.5: Travel Consultant/Visa
+// Documentation Staff "manage documents"/"visa document reviews"); no
+// client-authored review path exists, unlike Document's own dual
+// staff/client uploader split. As with `Document.uploadedByStaffUserId`
+// above, `reviewedByUserId` being a required, non-nullable FK to `User`
+// only proves a User row is referenced — it proves nothing about that
+// User's role or account status. It is a service-layer invariant for
+// later implementation, not a database constraint, that `reviewedByUserId`
+// must resolve to an authenticated, active, operationally-authorized
+// staff actor at write time; a CLIENT-role User must never create, or be
+// recorded as, a DocumentReview. The exact capability boundary between
+// Admin/Manager, Travel Consultant, and Visa Documentation Staff for
+// which review outcomes each may record remains deferred to the future
+// Document service/API checkpoint, matching this schema's existing
+// deferral of analogous role-boundary enforcement elsewhere — that
+// deferral concerns which staff roles may review, not whether clients
+// may; clients reviewing documents is out of scope under every reading of
+// blueprint Section 4. No new enum, role field, or database constraint is
+// added for this.
+//
+// `reason` is nullable at the Prisma level, but per D-018 and
+// `.claude/rules/admin-dashboard.md`'s explicit "rejecting a document...
+// require[s]... reason" rule, a non-blank `reason` is required whenever
+// `outcome` is `REJECTED` or `REPLACEMENT_REQUESTED`; `APPROVED` may carry
+// an optional reason/note. Prisma's schema language cannot express this
+// conditional, trimmed-nonblank rule — a plain `IS NOT NULL` check would
+// still allow an empty or whitespace-only string, so migration
+// `20260717073151_document_schema_foundation` added this by hand instead. The
+// expression uses `COALESCE(length(btrim("reason")), 0) > 0` rather than
+// an `"reason" IS NOT NULL AND length(...) > 0` guard so the result is
+// unambiguously `TRUE`/`FALSE` by construction rather than relying on
+// `AND`'s short-circuit behavior to avoid a `NULL` CHECK result — a
+// PostgreSQL CHECK constraint that evaluates to `NULL` is treated as
+// satisfied, so any expression capable of producing `NULL` for a
+// `REJECTED`/`REPLACEMENT_REQUESTED` row would be a silent bypass:
+//   ALTER TABLE "document_review" ADD CONSTRAINT
+//     "document_review_reason_required"
+//     CHECK (
+//       "outcome" NOT IN ('REJECTED', 'REPLACEMENT_REQUESTED')
+//       OR COALESCE(length(btrim("reason")), 0) > 0
+//     );
+// `prisma migrate status` confirmed on July 20, 2026 that this constraint
+// exists in the local database (10 migrations found, database schema up
+// to date); see the section header above and docs/HERITAGE_V3_TASK_BOARD.md
+// for the current, verified status.
+model DocumentReview {
+  id String @id
+
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  outcome DocumentReviewOutcome
+
+  reviewedByUserId String
+  reviewedByUser   User     @relation(fields: [reviewedByUserId], references: [id], onDelete: Restrict)
+  reviewedAt       DateTime @default(now())
+
+  reason String?
+
+  createdAt DateTime @default(now())
+
+  @@index([documentId, reviewedAt])
+  @@index([reviewedByUserId])
+  @@map("document_review")
 }
