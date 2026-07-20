@@ -472,7 +472,9 @@ Confirmed amount paid = Sum of payments currently in Confirmed status
 Remaining balance    = Booking total - Confirmed amount paid
 ```
 
-Only the net amount of currently confirmed, non-reversed, non-refunded payments reduces the remaining balance. Pending, Rejected, Cancelled, and Failed payments never count toward the confirmed amount paid. A payment that was Confirmed but is later **Reversed** or **Refunded** stops counting from the moment its status changes — which normally increases the remaining balance by that payment's amount. If a refund should not create a new amount owed (for example, a cancelled service), Finance / Accounting must separately record an approved booking-total or payment-plan adjustment (Section 11.5); the balance formula itself is never bent to achieve that outcome.
+Only the net amount of currently confirmed, non-reversed, non-refunded payments reduces the remaining balance. Pending, Rejected, Cancelled, and Failed payments never count toward the confirmed amount paid. A payment that was Confirmed but is later **Reversed** or fully **Refunded** stops counting from the moment its status changes — which normally increases the remaining balance by that payment's amount. If a refund should not create a new amount owed (for example, a cancelled service), Finance / Accounting must separately record an approved booking-total or payment-plan adjustment (Section 11.5); the balance formula itself is never bent to achieve that outcome.
+
+**Partial refunds:** A payment that has been only partially refunded remains **Confirmed** — only its cumulative refunded amount is subtracted, and only that refunded amount increases the remaining balance; the rest of that payment's amount continues to count toward the confirmed amount paid. A payment's status becomes **Refunded** only once its cumulative refunds equal its full original amount. A Refunded payment therefore contributes exactly zero to the confirmed amount paid — never a negative amount — and must never be subtracted twice (once by no longer counting its original amount, and again by any separate refund total); the calculation always nets a payment's original amount against its own cumulative refunds together, never the two independently. Original payment and receipt records are preserved unchanged by any refund, partial or full (Section 11.5).
 
 ### 11.2 Payment Statuses
 
@@ -483,7 +485,7 @@ Only the net amount of currently confirmed, non-reversed, non-refunded payments 
 | Rejected | Not accepted. Never counts. |
 | Cancelled | Withdrawn before confirmation. Never counts. |
 | Failed | Did not complete. Never counts. |
-| Refunded | Money was returned to the client after a valid confirmed payment. No longer counts toward confirmed amount paid; the remaining balance normally increases by the refunded amount. Any exception is handled through a separate approved adjustment (Sections 11.1 and 11.5), never by leaving the refunded payment counted. |
+| Refunded | Money was returned to the client after a valid confirmed payment, in full — see Section 11.1's partial-refund clarification for a payment that has been only partially refunded, which remains Confirmed. Once fully Refunded, the payment no longer counts toward confirmed amount paid; the remaining balance normally increases by the refunded amount. Any exception is handled through a separate approved adjustment (Sections 11.1 and 11.5), never by leaving the refunded payment counted. |
 | Reversed | An erroneous or invalid confirmation was corrected or voided. No longer counts toward confirmed amount paid; the remaining balance returns to what it was before the erroneous confirmation. |
 
 ### 11.3 Roles and Responsibilities
