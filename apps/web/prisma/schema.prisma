@@ -404,6 +404,33 @@
 //   scanning/signed-URL issuance for payment-proof documents, and
 //   tests/seed data — all deferred to future checkpoints.
 //
+// Notification is covered by this checkpoint — the Notification Schema
+// Foundation checkpoint, Stage A (schema-and-decision-documentation only —
+// schema.prisma and this decisions-log entry, no migration created or
+// applied) (blueprint Section 14.9; docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-020). Blueprint Section 14.9 gives Notification only a one-sentence
+// description ("a system-generated alert to a User (staff or client) about
+// a relevant event") with no field list, type list, or delivery model —
+// see the Notification model doc comment near AuditLog above for the full
+// field-by-field rationale, including why the recipient is a single
+// required `User` relation, why `eventKey` is free-form rather than a
+// closed enum, why no resourceType/resourceId pair or JSON metadata field
+// is added, and why no deduplication/idempotency field is added in Stage
+// A. This checkpoint adds only `Notification` and
+// `User.notificationsReceived`; it resolves the specific gap D-019's own
+// implementation-status update identified — blueprint Section 14.9's
+// Notification entity was, until this checkpoint, "neither implemented in
+// schema.prisma nor explicitly deferred by any decision." No migration has
+// been generated or applied during this Stage A. No `prisma migrate`
+// command was run. No Notification table, column, index, or foreign key
+// exists in any database — local, staging, or production — from this
+// Stage A edit. All operational Notification functionality
+// (repository/service layers, event-production rules, API routes, admin
+// dashboard and client portal UI, recipient authorization enforcement,
+// mark-read behavior, email delivery, background jobs, and tests/seed
+// data) remains deferred to later implementation phases, most falling
+// under Phase 5 ("notifications," docs/HERITAGE_V3_TASK_BOARD.md).
+//
 // Deliberately out of scope here:
 // - A Client status field/enum — the blueprint does not define an approved
 //   status list for it anywhere; see the Client model doc comment.
@@ -459,12 +486,11 @@
 //   notification delivery; attachment malware scanning and
 //   signed/expiring download-link issuance (Section 12.3); and tests/seed
 //   data — all deferred to future checkpoints.
-// - Every other later-phase business entity in blueprint Section 14
-//   (VisaRequirement, etc.) — remaining for later Phase 1 database-schema
-//   checkpoints under the "Implement database schema and reviewed
-//   migrations from the approved Phase 0 entity plan" checklist item
-//   (docs/HERITAGE_V3_TASK_BOARD.md), to support Phase 2+ feature
-//   implementation once modeled.
+// - Section 14 entities not modeled here remain subject to their exact
+//   documented deferrals or checkpoint boundaries; this catch-all does
+//   not broaden those decisions or silently claim any entity implemented.
+//   See the cited decisions above and docs/HERITAGE_V3_TASK_BOARD.md for
+//   current implementation and verified migration-application status.
 //
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
@@ -612,6 +638,13 @@ model User {
   paymentStatusChanges       PaymentStatusHistory[]      @relation("PaymentStatusHistoryActor")
   receiptsIssued             Receipt[]
 
+  // The Notification Schema Foundation checkpoint, Stage A (blueprint
+  // Section 14.9; docs/HERITAGE_V3_DECISIONS_LOG.md D-020). Every
+  // Notification for which this User is the recipient — see the
+  // Notification model doc comment near AuditLog below for the full
+  // field-by-field rationale.
+  notificationsReceived Notification[] @relation("NotificationRecipient")
+
   @@map("user")
 }
 
@@ -707,6 +740,145 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_log")
+}
+
+// Notification represents the durable in-app alert only (blueprint Section
+// 14.9: "a system-generated alert to a User (staff or client) about a
+// relevant event") — the Notification Schema Foundation checkpoint, Stage A
+// (schema-and-decision-documentation only — schema.prisma and this
+// decisions-log entry, no migration created or applied)
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-020).
+//
+// A recipient is exactly one required `recipientUserId` (`User`) — never a
+// split staff/client identity path. Section 14.9 itself names a single
+// User target regardless of role; unlike Message/ConversationParticipant
+// (whose staff/client split exists to record differing *authorship*
+// semantics), a notification recipient is simply "this User's inbox," and
+// `ClientProfile.userId` already proves every activated client account is
+// itself a `User` row. `onDelete: Restrict` preserves a Notification if its
+// recipient User is later deactivated, matching this schema's established
+// historical-record convention (`AuditLog.actorId`,
+// `BookingStatusHistory.changedByUserId`,
+// `PaymentStatusHistory.changedByUserId`) — User accounts are deactivated,
+// never deleted, under this model (see the User model's `isActive` doc
+// comment above), so this FK behavior is a consistency choice, not a
+// practical deletion concern.
+//
+// No actor/creator relation is modeled. Unlike `BookingStatusHistory` or
+// `PaymentStatusHistory`, which record a staff `changedByUserId`, Section
+// 14.9 defines the alert itself as system-generated — there is no
+// blueprint-defined staff "author" of a Notification to attribute.
+//
+// `eventKey` is a free-form, stable string identifier, not a closed enum.
+// No authoritative source in this repository defines a complete
+// notification-type list — unlike `VisaCaseStatus`, where D-017 resolved
+// an explicitly blueprint-flagged open decision, nothing here flags
+// Notification's event types as needing closure. Illustrative, non-
+// exhaustive examples a future event-producer might use:
+// "payment.confirmed", "document.rejected", "visa.status_changed",
+// "message.received" — none of these is approved or reserved by this
+// checkpoint; the future notification-producing service defines the real
+// set.
+//
+// `title` and `message` are durable display-text snapshots — the minimum
+// payload an in-app alert list needs to render itself. The future
+// notification-producing service must keep both minimal and must never
+// copy sensitive payment details, document contents, visa information,
+// private conversation content, or any credential, token, or secret into
+// either field (`.claude/rules/database-security.md`'s Data Minimization
+// and Protecting Sensitive Data; blueprint Section 9.1's caution against
+// storing sensitive content outside its own dedicated model).
+//
+// `actionPath` is nullable and, when present, must be an internal relative
+// application path only (e.g. `/admin/payments/{id}`) — never a permanent
+// public URL or an arbitrary external URL — mirroring this schema's
+// established never-a-public-URL convention (`MessageAttachment.storageKey`;
+// `.claude/rules/architecture.md`'s Storage boundary).
+//
+// No `resourceType`/`resourceId` polymorphic reference pair and no JSON
+// `metadata` field are added in this checkpoint. Unlike `AuditLog`'s
+// `entityType`/`entityId` (accepted there because AuditLog's job is
+// forensic record-keeping, not a live, client-facing UI dereferencing and
+// rendering the target), a dereferenceable pointer or open JSON field on a
+// user-facing Notification risks both losing referential integrity and
+// becoming a place sensitive record content gets copied in. If a future
+// checkpoint needs deep-linking to a specific record, `actionPath` alone —
+// a string the service computes and the client never parses — already
+// covers it.
+//
+// `readAt` is a nullable read-state timestamp, mirroring
+// `ConversationParticipant.lastReadAt`'s established pattern, rather than a
+// mutable boolean or a separate read-history model — Notification has a
+// single recipient (unlike Conversation's many-participants problem that
+// forced `lastReadAt` onto its own join model), so one nullable column on
+// this row is sufficient. No `updatedAt` is added: the one meaningful
+// mutation this row will ever receive under this foundation — being marked
+// read — already has its own dedicated, more precise timestamp column
+// (`readAt`), so a generic `updatedAt` would duplicate, not add,
+// information.
+//
+// `@@index([recipientUserId, createdAt])` supports a recipient's inbox
+// ordered by creation time. `@@index([recipientUserId, readAt, createdAt])`
+// supports filtering a recipient's unread notifications (`readAt IS NULL`)
+// together with creation-time ordering. This is the first schema-
+// foundation checkpoint in this file requiring no hand-written PostgreSQL
+// CHECK constraint or partial unique index — the minimal Stage A shape has
+// no nullable-FK exclusivity and no conditional-string requirement of the
+// kind every earlier checkpoint needed.
+//
+// No deduplication/idempotency field is added in Stage A. Unlike the
+// Payment-domain idempotency keys (D-019), added because specific
+// financially-sensitive writes had no natural uniqueness to retry against,
+// no Notification-producing service, event-production rule, or background
+// job exists yet to design a real retry/duplicate shape against —
+// inventing one now would be guessing at an undesigned need, not
+// documenting an approved one. The future service layer must independently
+// validate non-blank `eventKey`/`title`/`message`, that `actionPath` (when
+// present) is a genuine internal relative path, recipient authorization on
+// every read, and which event maps to which recipient(s) — none of this is
+// enforced by the schema itself.
+//
+// No email provider, delivery channel, sent timestamp, delivery status,
+// delivery-attempt count, expiry, archival, preference/opt-out, or
+// retention field is added — Notification represents the in-app alert
+// only; email remains a separate delivery side effect (blueprint Section
+// 10.3; ADR-001's email-notification boundary), not this checkpoint's
+// system of record, and no retention/expiry policy is approved anywhere in
+// this repository yet (D-003/D-004 remain Open).
+//
+// This is schema only: Notification repository and service layers, event-
+// production rules, synchronous-vs-background creation, retry and
+// deduplication behavior, API routes, admin dashboard and client portal
+// notification UI, recipient-scoped authorization enforcement on every
+// fetch (.claude/rules/backend.md), list and mark-read behavior, email
+// delivery and delivery-attempt tracking, background workers, notification
+// preferences/opt-out, expiry/archival/deletion/retention rules, and
+// tests/seed data are all deferred to future checkpoints — most falling
+// under Phase 5 ("notifications," docs/HERITAGE_V3_TASK_BOARD.md). No
+// migration has been generated or applied for Notification: no `prisma
+// migrate` command was run, and this model does not correspond to any
+// database table, column, index, or foreign key anywhere — local, staging,
+// or production — until a later stage generates and a still-later stage
+// applies the migration.
+model Notification {
+  id String @id
+
+  recipientUserId String
+  recipientUser   User   @relation("NotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Restrict)
+
+  eventKey String
+
+  title   String
+  message String
+
+  actionPath String?
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([recipientUserId, createdAt])
+  @@index([recipientUserId, readAt, createdAt])
+  @@map("notification")
 }
 
 // --- Checkpoint 1: Lead / Client / LeadStatusHistory / StaffAssignment ---
