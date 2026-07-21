@@ -115,6 +115,26 @@ describe('listStaffAccounts', () => {
     });
     expect(result).toEqual({ items, page: 3, pageSize: 10, total: 41 });
   });
+
+  it('forwards role/isActive/search filters to the repository when supplied', async () => {
+    repositoryMocks.listStaffAccounts.mockResolvedValue({ items: [], total: 0 });
+
+    await listStaffAccounts({
+      page: 1,
+      pageSize: 20,
+      role: 'FINANCE_ACCOUNTING',
+      isActive: false,
+      search: 'santos',
+    });
+
+    expect(repositoryMocks.listStaffAccounts).toHaveBeenCalledWith(prisma, {
+      role: 'FINANCE_ACCOUNTING',
+      isActive: false,
+      search: 'santos',
+      skip: 0,
+      take: 20,
+    });
+  });
 });
 
 describe('createStaffAccount', () => {
@@ -204,6 +224,36 @@ describe('createStaffAccount', () => {
     });
     const auditCallArgs = repositoryMocks.insertAuditLog.mock.calls[0]?.[1];
     expect(JSON.stringify(auditCallArgs)).not.toContain('must-never-appear-in-audit-log');
+  });
+
+  it('performs the user creation and audit write inside a single transaction', async () => {
+    repositoryMocks.findUserByEmail.mockResolvedValue(null);
+    repositoryMocks.createStaffUser.mockResolvedValue(staffRecord({ id: 'new-id' }));
+
+    await createStaffAccount(ACTOR, {
+      name: 'New Person',
+      email: 'new@example.test',
+      role: 'FINANCE_ACCOUNTING',
+    });
+
+    expect(transactionMock).toHaveBeenCalledTimes(1);
+    expect(repositoryMocks.createStaffUser).toHaveBeenCalledWith(TX_CLIENT, expect.anything());
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, expect.anything());
+  });
+
+  it('propagates an unexpected repository error unchanged, without translating it into a StaffManagementError', async () => {
+    repositoryMocks.findUserByEmail.mockResolvedValue(null);
+    const dbError = new Error('unexpected db failure');
+    repositoryMocks.createStaffUser.mockRejectedValue(dbError);
+
+    await expect(
+      createStaffAccount(ACTOR, {
+        name: 'New Person',
+        email: 'new@example.test',
+        role: 'FINANCE_ACCOUNTING',
+      }),
+    ).rejects.toBe(dbError);
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
   });
 });
 
@@ -337,6 +387,16 @@ describe('deactivateStaffAccount', () => {
       code: 'SELF_ACTION_FORBIDDEN',
     });
     expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it('throws STAFF_ACCOUNT_NOT_FOUND when the target does not exist', async () => {
+    repositoryMocks.findStaffById.mockResolvedValue(null);
+
+    await expect(deactivateStaffAccount(ACTOR, 'missing-id', 'testing')).rejects.toMatchObject({
+      code: 'STAFF_ACCOUNT_NOT_FOUND',
+      status: 404,
+    });
+    expect(repositoryMocks.setUserActive).not.toHaveBeenCalled();
   });
 
   it('is idempotent: deactivating an already-inactive account is a no-op', async () => {
