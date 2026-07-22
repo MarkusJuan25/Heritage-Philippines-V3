@@ -1,0 +1,160 @@
+# Heritage Philippines V3 — Deployment pipeline skeleton (reusable workflow).
+#
+# This is the Phase 1 "Create deployment pipeline skeleton for staging and
+# production" checklist item (docs/HERITAGE_V3_TASK_BOARD.md;
+# docs/adr/ADR-001-technology-stack.md's Phase 1 follow-up actions). It is a
+# SKELETON only: no hosting provider, managed database, private storage, or
+# email provider has been selected yet (ADR-001's "Items Intentionally
+# Deferred"), so this workflow must never be able to report that a real
+# deployment, migration, or health verification occurred.
+#
+# Callable only via `workflow_call` — see deploy-staging.yml and
+# deploy-production.yml for the two hard-coded entry points that invoke this
+# file with a literal `target_environment` value. This file never runs on
+# its own.
+#
+# Fail-closed design: the first job (`activation-guard`) always fails on
+# purpose, before touching any secret, checking out the repository, or
+# binding to a GitHub Environment. The second job (`deployment-pipeline`)
+# `needs` the guard with plain (non-`always()`) dependency semantics, so it
+# is always skipped while the guard fails — it exists only to document, with
+# real repository commands, the order a future real deployment will follow.
+# Every one of its not-yet-real steps (migration, deploy, health-check) is
+# independently written to fail closed too, in case this job's `needs` gate
+# is ever removed or bypassed by a later, careless edit.
+
+name: Deploy (reusable skeleton)
+
+on:
+  workflow_call:
+    inputs:
+      target_environment:
+        description: >-
+          The GitHub Environment name this skeleton run is bound to (e.g.
+          "staging" or "production"). Supplied only by this repository's own
+          entry-point workflows as a literal value — never user-selectable.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Scoped per target environment so a staging run and a production run never
+# contend with each other. `cancel-in-progress: false`: a deployment must
+# never be cancelled mid-flight merely because another run of the same
+# environment starts — unlike apps/web CI's own concurrency group
+# (.github/workflows/ci.yml), which cancels superseded runs because CI runs
+# have no partial-application risk.
+concurrency:
+  group: deploy-${{ inputs.target_environment }}
+  cancel-in-progress: false
+
+jobs:
+  # Deliberately the only thing that runs today. No `environment:` (so no
+  # GitHub Environment secret or protection rule is ever consulted), no
+  # `secrets.*` reference, and no checkout — this job has nothing to leak
+  # and nothing to deploy. It exists solely to fail, loudly and on purpose,
+  # so this workflow can never complete green while pretending a deployment
+  # happened.
+  activation-guard:
+    name: Activation guard — deployment target not configured
+    runs-on: ubuntu-latest
+    steps:
+      - name: Block until a real deployment target is configured
+        run: |
+          echo "::error title=Deployment target not configured::This is a Phase 1 deployment-pipeline SKELETON for the '${{ inputs.target_environment }}' environment (docs/HERITAGE_V3_TASK_BOARD.md). No hosting provider, managed database, private storage, or email provider has been selected or configured yet (docs/adr/ADR-001-technology-stack.md, 'Items Intentionally Deferred'). This job fails on purpose so the downstream deployment-pipeline job is always skipped, and this workflow can never report a successful deployment."
+          exit 1
+
+  # Unreachable today: `needs: activation-guard` uses default (non-`always()`)
+  # dependency behavior, and the guard above always fails, so this job is
+  # always skipped. It documents — with real repository commands where they
+  # already exist, and explicit fail-closed placeholders where they don't —
+  # the order a future real deployment will follow once a target exists.
+  deployment-pipeline:
+    name: Deployment pipeline (unreachable — guard must pass first)
+    needs: activation-guard
+    runs-on: ubuntu-latest
+    # Binds this job to the named GitHub Environment so any production
+    # approval/review rule configured there (docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md,
+    # "CI/CD Secret Handling") would apply once this job is ever reachable.
+    # `deployment: false`: this is a skeleton only — it must not create a
+    # GitHub Deployment record implying a real deployment occurred.
+    environment:
+      name: ${{ inputs.target_environment }}
+      deployment: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Matches the "packageManager" field in package.json — same
+          # convention as .github/workflows/ci.yml.
+          version: 11.10.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Matches the "engines.node" floor (">=24.0.0") in package.json
+          # and ADR-001's "Node.js active LTS" requirement — same
+          # convention as .github/workflows/ci.yml.
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # Unlike .github/workflows/ci.yml's Build step, which uses fixed
+      # non-secret placeholder values (that step only needs these variables
+      # to be *present* for `next build` to collect page data — see that
+      # file's header comment), this step references the real, environment-
+      # scoped secrets. These are GitHub Environment secrets belonging to
+      # the `${{ inputs.target_environment }}` environment bound above —
+      # never passed as `workflow_call` inputs/secrets and never inherited
+      # from the calling entry-point workflow.
+      - name: Build
+        run: pnpm build
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          BETTER_AUTH_URL: ${{ secrets.BETTER_AUTH_URL }}
+
+      # Fail-closed placeholder: no staging or production database exists
+      # yet. `prisma migrate deploy` must never run against an unconfigured
+      # or unreviewed target (.claude/rules/database-security.md's "Safe
+      # Migrations"; docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md's
+      # "Migration Safety").
+      - name: Run database migrations (not yet configured)
+        run: |
+          echo "::error title=No migration target configured::No staging or production database exists yet for the '${{ inputs.target_environment }}' environment. 'prisma migrate deploy' must not run against an unconfigured or unreviewed target. This step intentionally fails closed and applies no migration."
+          exit 1
+
+      # Fail-closed placeholder: no hosting provider or deployment target
+      # has been selected (ADR-001's "Items Intentionally Deferred").
+      - name: Deploy application (not yet configured)
+        run: |
+          echo "::error title=No deployment target configured::No hosting provider or deployment target has been selected for the '${{ inputs.target_environment }}' environment (docs/adr/ADR-001-technology-stack.md, 'Items Intentionally Deferred'). This step intentionally fails closed rather than reporting a false deployment success."
+          exit 1
+
+      # Fail-closed placeholder: there is no deployed URL yet to verify.
+      # GET /api/health (apps/web/src/app/api/health/route.ts) is the
+      # designated liveness check once a real deployment exists
+      # (docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md's "Deployment
+      # Verification").
+      - name: Verify /api/health (not yet configured)
+        run: |
+          echo "::error title=No deployed URL to verify::There is no deployed '${{ inputs.target_environment }}' URL yet to call GET /api/health against. This step intentionally fails closed rather than reporting a false health-check success."
+          exit 1
