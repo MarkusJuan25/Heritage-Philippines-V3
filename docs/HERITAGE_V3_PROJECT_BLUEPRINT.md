@@ -416,7 +416,7 @@ A visa case is only created when the client or destination actually requires vis
 
 ### 9.1 Recording a Response Received Outside the Portal
 
-Portal-based client acceptance is the preferred flow once an account is activated. So that staff can run the full workflow end to end before the client portal exists (Phase 2) — or when a client responds by phone, email, or in person — a response received outside the portal may be recorded under these controls:
+Portal-based client acceptance is the preferred flow once an account is activated. So that staff can run the full workflow end to end before the client portal exists (Phase 3) — or when a client responds by phone, email, or in person — a response received outside the portal may be recorded under these controls:
 
 - Only the Travel Consultant assigned to that Client, or an Admin / Manager, may record an externally received response.
 - The record must capture: the acceptance method (e.g., phone, email, in person), the client's acceptance timestamp, the acting staff account, and a supporting evidence reference — a pointer or identifier to the originating email, call log, or meeting note (for example, a linked Message/MessageAttachment or a brief reference note), not a full copy of the correspondence, unrelated personal information, or identity documents — sufficient for dispute resolution and audit. Full audit history is retained per Section 14.9, consistent with the data-minimization principle in `.claude/rules/database-security.md`.
