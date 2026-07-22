@@ -4,7 +4,7 @@ Operations platform (admin dashboard + client portal) extending the Heritage Phi
 
 ## Status
 
-Phase 1 — Project Foundation. This is the initial workspace/tooling scaffold only; no business features, authentication, or database are implemented yet.
+Phase 2 — Admin Dashboard Core is active. Phase 1 — Project Foundation is complete. Authentication, the PostgreSQL schema and migration history, staff account/role/assignment management, tested Booking backend capabilities, and the fail-closed deployment-pipeline skeleton are implemented. Lead, Client, Proposal / ROS, and real admin-dashboard workflows remain in progress. See `docs/HERITAGE_V3_TASK_BOARD.md` for current status.
 
 ## Prerequisites
 

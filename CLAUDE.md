@@ -4,7 +4,7 @@
 
 Heritage Philippines V3 extends the stable Heritage Philippines V2 public tourism website into a full operations platform: a secure admin dashboard for staff and a client dashboard/portal for travelers, connecting leads, bookings, payments, documents, visa assistance, and support into one system.
 
-This repository is currently in **Phase 1 — Project Foundation**. No application code, database, or dashboard has been scaffolded yet; the technology-stack ADR (`docs/adr/ADR-001-technology-stack.md`) was accepted on July 9, 2026, and implementation proceeds under Phase 1's own task board checklist and completion gate.
+This repository is currently in **Phase 2 — Admin Dashboard Core**. Phase 1 — Project Foundation is complete: authentication, the PostgreSQL schema and migration history, staff account/role/assignment management, and Booking backend groundwork (creation, status transitions, staff assignment) are implemented and tested. The `/login` and `/dashboard` pages are a Phase 1 login/session verification surface only, not the admin dashboard described in blueprint Section 2.2. Lead, Client, Proposal / ROS, and real admin-dashboard workflow implementation remain incomplete and are Phase 2's active work; implementation proceeds under Phase 2's own task board checklist and completion gate.
 
 ## 2. Source of Truth
 
