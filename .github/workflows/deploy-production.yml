@@ -1,0 +1,27 @@
+# Heritage Philippines V3 — Deploy to Production (Phase 1 skeleton).
+#
+# Thin entry point: manually triggered only, with no logic of its own. It
+# calls deploy-reusable.yml with the literal environment name "production" —
+# never a user-selectable input, never triggered automatically by a push or
+# merge, and never automatically chained after a staging run. It does not
+# implement or bypass a production approval rule itself — that remains
+# whatever protection rule is (or is not) configured on the "production"
+# GitHub Environment, which this workflow only references by name (see
+# deploy-reusable.yml's job-level `environment:` binding). See
+# deploy-reusable.yml for the fail-closed activation guard that keeps this a
+# skeleton: no deployment, migration, or health check can currently occur.
+
+name: Deploy — Production (Phase 1 skeleton)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-skeleton:
+    name: Run deployment skeleton (production)
+    uses: ./.github/workflows/deploy-reusable.yml
+    with:
+      target_environment: production

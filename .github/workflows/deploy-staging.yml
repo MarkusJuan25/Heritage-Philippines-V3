@@ -1,0 +1,23 @@
+# Heritage Philippines V3 — Deploy to Staging (Phase 1 skeleton).
+#
+# Thin entry point: manually triggered only, with no logic of its own. It
+# calls deploy-reusable.yml with the literal environment name "staging" —
+# never a user-selectable input, so a run of this workflow can never
+# accidentally target production. See deploy-reusable.yml for the
+# fail-closed activation guard that keeps this a skeleton: no deployment,
+# migration, or health check can currently occur.
+
+name: Deploy — Staging (Phase 1 skeleton)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-skeleton:
+    name: Run deployment skeleton (staging)
+    uses: ./.github/workflows/deploy-reusable.yml
+    with:
+      target_environment: staging

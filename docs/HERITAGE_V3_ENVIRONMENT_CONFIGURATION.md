@@ -5,7 +5,7 @@
 - Project: Heritage Philippines V3
 - Status: Active — Phase 1 environment-configuration standard
 - Phase: Phase 1 — Project Foundation
-- Last updated: July 10, 2026
+- Last updated: July 22, 2026
 - Authority: This document implements `docs/adr/ADR-001-technology-stack.md` and `.claude/rules/validation-deployment.md`. It does not override the blueprint, task board, or ADR — where this guide and any of those documents conflict, the higher-authority document governs and the conflict should be flagged rather than silently resolved.
 - Companion documents: `docs/HERITAGE_V3_PROJECT_BLUEPRINT.md` (Sections 2.1, 4.1, 10.3, 12.2, 12.3, 14.9, 15.5), `docs/HERITAGE_V3_TASK_BOARD.md` (Phase 1 and Phase 6), `docs/adr/ADR-001-technology-stack.md`, `.claude/rules/database-security.md`, `.claude/rules/backend.md`, `.claude/rules/validation-deployment.md`, `README.md`.
 
@@ -29,12 +29,14 @@ Everything here applies to the single V3 Next.js modular-monolith application (a
 
 ## 2. Current Implementation State
 
-As of this document, the repository is a bare Next.js/TypeScript scaffold (`apps/web`) with:
+As of this document:
 
-- **No environment variables required or read by any code.** `apps/web/.env.example` documents this explicitly and intentionally contains no variables.
-- **No database, authentication, email, or storage integration.** Sections 8–11 below describe planned boundaries for each, not implemented behavior.
-- **No CI or deployment pipeline.** Section 12 describes the standard those will follow once created (Phase 1 checklist items, both currently unchecked).
-- **One implemented observability surface:** `GET /api/health` (`apps/web/src/app/api/health/route.ts`), a liveness endpoint returning service name, status, and timestamp. It does not yet check database, storage, or email connectivity because none of those exist yet.
+- **`DATABASE_URL`, `BETTER_AUTH_SECRET`, and `BETTER_AUTH_URL` are now required, server-only environment variables**, documented in `apps/web/.env.example`. Authentication (Better Auth, database-backed sessions, role guards) and PostgreSQL/Prisma integration are implemented — this is no longer a bare scaffold.
+- **The database schema currently has 12 locally applied migrations** (`apps/web/prisma/migrations/`), applied to the local `heritage_v3_dev` and/or disposable `heritage_v3_test` databases only. **Staging and production migration application remain unverified and are not claimed** — no migration has been confirmed applied to either environment.
+- **GitHub Actions CI exists and runs the repository quality gate** (`.github/workflows/ci.yml`): formatting, lint, type check, tests, and build, on every pull request and push to `main`. It does not deploy anywhere and does not touch a real database.
+- **A provider-neutral deployment-pipeline skeleton now exists** (`.github/workflows/deploy-reusable.yml`, `deploy-staging.yml`, `deploy-production.yml`) — see Section 12 for what it does and, more importantly, does not yet do. **No real staging or production deployment target is configured**, and none of these workflows can currently deploy, migrate, or verify a deployed environment; each unimplemented step fails closed by design.
+- **Email and private object storage remain unimplemented.** Sections 10–11 below describe planned boundaries for each, not implemented behavior.
+- **`GET /api/health` remains a liveness-only check** (`apps/web/src/app/api/health/route.ts`), returning service name, status, and timestamp. It does not verify database, storage, or email connectivity.
 - `NODE_ENV` is managed entirely by Next.js tooling (`next dev`, `next build`, `next start`) and is not set or read manually anywhere in this codebase.
 
 The rest of this document is forward-looking strategy. Section headings below are written as durable standards; where a section describes something not yet built, it says so explicitly rather than implying it already exists.
@@ -171,7 +173,7 @@ Document/attachment storage is a Phase 4 item (ADR-001: "alongside the Documents
 
 ## 12. CI/CD Secret Handling
 
-ADR-001 specifies GitHub Actions as the CI foundation; no workflow exists yet (Phase 1 checklist item, unchecked). Standard for when one is created:
+ADR-001 specifies GitHub Actions as the CI foundation. `.github/workflows/ci.yml` (the Phase 1 "CI basics" checklist item) exists and runs the repository's quality gate on every pull request and push to `main`; it deploys nowhere and touches no real database. Standard for a deploy workflow, now realized only as the fail-closed skeleton described below:
 
 - Secrets are stored as GitHub Actions encrypted secrets, scoped per GitHub Environment (`staging`, `production`) rather than as repository-wide secrets, so a workflow job only receives the secrets for the environment it's actually deploying to.
 - Production's GitHub Environment should require review/approval before a workflow can use its secrets, giving a human gate on production deploys consistent with Section 18.
@@ -179,6 +181,16 @@ ADR-001 specifies GitHub Actions as the CI foundation; no workflow exists yet (P
 - Workflow steps must not print secret values to logs (GitHub Actions masks known secret values automatically, but commands that transform or re-encode a secret can defeat that masking — avoid doing so).
 - CI does not hold standing, always-available access to production secrets outside of an actual gated deploy job.
 - CI/deploy credentials themselves (e.g., a deploy token to the hosting provider) are treated as secrets under Section 7 — generated with least privilege, rotated on the same triggers, and revoked immediately on offboarding.
+
+### 12.1 Current Deployment-Pipeline Skeleton (Phase 1)
+
+Three workflow files implement the Phase 1 deployment-pipeline-skeleton checklist item, provider-neutrally and fail-closed:
+
+- `.github/workflows/deploy-reusable.yml` — a `workflow_call`-only reusable workflow. Its first job (`activation-guard`) always fails on purpose, before checking out the repository, binding to any GitHub Environment, or referencing any secret. Its second job (`deployment-pipeline`) `needs` that guard with default (non-`always()`) dependency behavior, so it is always skipped today; it exists only to document, with real repository commands where they already exist and explicit fail-closed placeholders where they don't, the order a future real deployment will follow.
+- `.github/workflows/deploy-staging.yml` and `.github/workflows/deploy-production.yml` — `workflow_dispatch`-only entry points with no logic of their own, each calling the reusable workflow with a hard-coded literal environment name (`staging` or `production` respectively) — never a user-selectable input, and never triggered by a push, merge, or schedule.
+- **This repository change does not configure or claim that any GitHub Environment secret currently exists.** The activation guard references no secret or GitHub Environment; the currently unreachable deployment job's secret references document values intended for future environment-scoped configuration. No deployment, database migration, or post-deployment health check can currently occur through these workflows — every such step is an explicit, independently fail-closed placeholder.
+- **GitHub Environments (`staging`, `production`) and any production approval/review rule remain external, manually configured repository settings** that cannot be verified from this document or from the repository's own files — this guide does not assert either Environment, or any protection rule on it, currently exists.
+- Activating any of this for a real target — selecting a hosting/database/storage/email provider, populating real environment-scoped secrets, and replacing the fail-closed placeholders with real commands — is explicitly out of scope for this checkpoint and belongs to a later, separately authorized implementation stage.
 
 ## 13. Migration Safety
 
