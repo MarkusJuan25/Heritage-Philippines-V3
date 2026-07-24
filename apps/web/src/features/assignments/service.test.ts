@@ -23,16 +23,19 @@ const repositoryMocks = vi.hoisted(() => ({
   createAssignment: vi.fn(),
   endAssignmentById: vi.fn(),
   insertAuditLog: vi.fn(),
+  listEligibleTravelConsultants: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
 
 import { Prisma } from '@/generated/prisma/client';
+import { prisma } from '@/lib/db';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import type { AssignmentRecord } from './repository';
 import {
   endClientAssignment,
   endLeadAssignment,
+  listEligibleTravelConsultants,
   setBookingAssignment,
   setClientAssignment,
   setLeadAssignment,
@@ -627,5 +630,60 @@ describe('setBookingAssignment (Booking-target dispatch)', () => {
     });
 
     await expect(setBookingAssignment(ACTOR, BOOKING_ID, STAFF_ID)).rejects.toBe(unexpected);
+  });
+});
+
+describe('listEligibleTravelConsultants', () => {
+  const REJECTED_ROLES = [
+    'SYSTEM_ADMINISTRATOR',
+    'TRAVEL_CONSULTANT',
+    'FINANCE_ACCOUNTING',
+    'VISA_DOCUMENTATION',
+    'CLIENT',
+  ];
+
+  it.each(REJECTED_ROLES)(
+    'rejects role %s with ROLE_NOT_PERMITTED, never calling the repository',
+    async (role) => {
+      const actor = { ...ACTOR, role: role as AuthenticatedUser['role'] };
+
+      await expect(
+        listEligibleTravelConsultants(actor, { page: 1, pageSize: 20 }),
+      ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED', status: 403 });
+      expect(repositoryMocks.listEligibleTravelConsultants).not.toHaveBeenCalled();
+    },
+  );
+
+  it('delegates to the repository with computed skip/take for ADMIN_MANAGER', async () => {
+    repositoryMocks.listEligibleTravelConsultants.mockResolvedValue({ items: [], total: 0 });
+
+    const result = await listEligibleTravelConsultants(ACTOR, { page: 3, pageSize: 10 });
+
+    expect(repositoryMocks.listEligibleTravelConsultants).toHaveBeenCalledWith(prisma, {
+      search: undefined,
+      skip: 20,
+      take: 10,
+    });
+    expect(result).toEqual({ items: [], page: 3, pageSize: 10, total: 0 });
+  });
+
+  it('forwards an optional search term to the repository', async () => {
+    repositoryMocks.listEligibleTravelConsultants.mockResolvedValue({ items: [], total: 0 });
+
+    await listEligibleTravelConsultants(ACTOR, { search: 'maria', page: 1, pageSize: 20 });
+
+    expect(repositoryMocks.listEligibleTravelConsultants).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ search: 'maria' }),
+    );
+  });
+
+  it('returns the items unchanged from the repository', async () => {
+    const items = [{ id: 'tc-1', name: 'Maria Santos', email: 'maria@example.test' }];
+    repositoryMocks.listEligibleTravelConsultants.mockResolvedValue({ items, total: 1 });
+
+    const result = await listEligibleTravelConsultants(ACTOR, { page: 1, pageSize: 20 });
+
+    expect(result.items).toEqual(items);
   });
 });

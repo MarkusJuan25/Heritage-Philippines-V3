@@ -7,11 +7,33 @@ import {
   findDuplicateClientMatches,
   findDuplicateLeadMatches,
   findLeadById,
+  findLeadByIdForRead,
   insertAuditLog,
   listLeadsForActor,
+  listLeadStatusHistory,
   updateLeadFields,
   updateLeadStatusWithHistory,
 } from './repository';
+
+// The exact 12 fields LeadRecord (afe1201) carries — used to prove
+// createLeadWithInitialHistory/updateLeadFields/updateLeadStatusWithHistory
+// never gain an `assignment` key (Stage 2 correction: D-023's additive
+// `assignment` field is authorized only for GET /api/leads and
+// GET /api/leads/[id], never for the mutation-backing functions below).
+const LEAD_RECORD_KEYS = [
+  'id',
+  'status',
+  'fullName',
+  'email',
+  'phone',
+  'normalizedEmail',
+  'normalizedPhone',
+  'source',
+  'notes',
+  'clientId',
+  'createdAt',
+  'updatedAt',
+].sort();
 
 const ADMIN_MANAGER = { id: 'admin-1', role: 'ADMIN_MANAGER' as const };
 const TRAVEL_CONSULTANT = { id: 'tc-1', role: 'TRAVEL_CONSULTANT' as const };
@@ -31,6 +53,104 @@ describe('findLeadById', () => {
       where: { id: 'lead-1' },
       select: expect.any(Object),
     });
+  });
+
+  it('returns the Prisma row unchanged — never carries assignment (Stage 2 correction: reused directly by updateLead/updateLeadStatus/getLeadStatusHistory, whose responses must never gain assignment)', async () => {
+    const row = {
+      id: 'lead-1',
+      status: 'NEW',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+      source: 'Walk-in',
+      notes: null,
+      clientId: null,
+      createdAt: new Date('2026-07-23T00:00:00Z'),
+      updatedAt: new Date('2026-07-23T00:00:00Z'),
+    };
+    const findUnique = vi.fn().mockResolvedValue(row);
+    const db = { lead: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findLeadById(db, 'lead-1');
+
+    expect(result).toBe(row);
+    expect(Object.keys(result!).sort()).toEqual(LEAD_RECORD_KEYS);
+  });
+
+  it('returns null unchanged when the Lead does not exist', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { lead: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findLeadById(db, 'missing-lead');
+
+    expect(result).toBeNull();
+  });
+});
+
+describe('findLeadByIdForRead', () => {
+  it('fetches unscoped by id (authorization already decided by canAccessLead)', async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: 'lead-1', assignments: [] });
+    const db = { lead: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findLeadByIdForRead(db, 'lead-1');
+
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: 'lead-1' },
+      select: expect.any(Object),
+    });
+  });
+
+  it('composes the select with the nested active-assignment clause (D-023 §5)', async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: 'lead-1', assignments: [] });
+    const db = { lead: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findLeadByIdForRead(db, 'lead-1');
+
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: 'lead-1' },
+      select: expect.objectContaining({
+        assignments: {
+          where: { endedAt: null },
+          take: 1,
+          select: {
+            assignedStaffId: true,
+            assignedStaff: { select: { id: true, name: true } },
+          },
+        },
+      }),
+    });
+  });
+
+  it('maps no active assignment to assignment: null', async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: 'lead-1', assignments: [] });
+    const db = { lead: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findLeadByIdForRead(db, 'lead-1');
+
+    expect(result?.assignment).toBeNull();
+  });
+
+  it('maps an active assignment to { staffId, staffName }', async () => {
+    const findUnique = vi.fn().mockResolvedValue({
+      id: 'lead-1',
+      assignments: [{ assignedStaffId: 'tc-1', assignedStaff: { id: 'tc-1', name: 'TC One' } }],
+    });
+    const db = { lead: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findLeadByIdForRead(db, 'lead-1');
+
+    expect(result?.assignment).toEqual({ staffId: 'tc-1', staffName: 'TC One' });
+  });
+
+  it('returns null unchanged when the Lead does not exist (never maps a null row)', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { lead: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findLeadByIdForRead(db, 'missing-lead');
+
+    expect(result).toBeNull();
   });
 });
 
@@ -107,6 +227,28 @@ describe('listLeadsForActor', () => {
 
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 40, take: 20 }));
   });
+
+  it('maps each row active assignment independently (D-023 §5)', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      { id: 'lead-1', assignments: [] },
+      {
+        id: 'lead-2',
+        assignments: [{ assignedStaffId: 'tc-1', assignedStaff: { id: 'tc-1', name: 'TC One' } }],
+      },
+    ]);
+    const count = vi.fn().mockResolvedValue(2);
+    const db = { lead: { findMany, count } } as unknown as Prisma.TransactionClient;
+
+    const { items } = await listLeadsForActor(db, ADMIN_MANAGER, { skip: 0, take: 20 });
+
+    expect(items).toEqual([
+      expect.objectContaining({ id: 'lead-1', assignment: null }),
+      expect.objectContaining({
+        id: 'lead-2',
+        assignment: { staffId: 'tc-1', staffName: 'TC One' },
+      }),
+    ]);
+  });
 });
 
 describe('createLeadWithInitialHistory', () => {
@@ -141,6 +283,40 @@ describe('createLeadWithInitialHistory', () => {
       select: expect.any(Object),
     });
   });
+
+  it('returns the exact pre-D-023 (afe1201) shape, with no assignment key (Stage 2 correction: POST /api/leads must never gain assignment)', async () => {
+    const row = {
+      id: 'lead-1',
+      status: 'NEW',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+      source: 'Walk-in',
+      notes: null,
+      clientId: null,
+      createdAt: new Date('2026-07-23T00:00:00Z'),
+      updatedAt: new Date('2026-07-23T00:00:00Z'),
+    };
+    const create = vi.fn().mockResolvedValue(row);
+    const db = { lead: { create } } as unknown as Prisma.TransactionClient;
+
+    const result = await createLeadWithInitialHistory(db, {
+      id: 'lead-1',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+      source: 'Walk-in',
+      notes: null,
+      changedByUserId: 'actor-1',
+    });
+
+    expect(result).toBe(row);
+    expect(Object.keys(result).sort()).toEqual(LEAD_RECORD_KEYS);
+  });
 });
 
 describe('updateLeadFields', () => {
@@ -155,6 +331,30 @@ describe('updateLeadFields', () => {
       data: { fullName: 'New Name' },
       select: expect.any(Object),
     });
+  });
+
+  it('returns the exact pre-D-023 (afe1201) shape, with no assignment key (Stage 2 correction: PATCH /api/leads/[id] must never gain assignment)', async () => {
+    const row = {
+      id: 'lead-1',
+      status: 'NEW',
+      fullName: 'New Name',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+      source: 'Walk-in',
+      notes: null,
+      clientId: null,
+      createdAt: new Date('2026-07-23T00:00:00Z'),
+      updatedAt: new Date('2026-07-23T00:00:00Z'),
+    };
+    const update = vi.fn().mockResolvedValue(row);
+    const db = { lead: { update } } as unknown as Prisma.TransactionClient;
+
+    const result = await updateLeadFields(db, { id: 'lead-1', fullName: 'New Name' });
+
+    expect(result).toBe(row);
+    expect(Object.keys(result).sort()).toEqual(LEAD_RECORD_KEYS);
   });
 });
 
@@ -184,6 +384,35 @@ describe('updateLeadStatusWithHistory', () => {
       },
       select: expect.any(Object),
     });
+  });
+
+  it('returns the exact pre-D-023 (afe1201) shape, with no assignment key (Stage 2 correction: PUT /api/leads/[id]/status must never gain assignment)', async () => {
+    const row = {
+      id: 'lead-1',
+      status: 'QUALIFIED',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+      source: 'Walk-in',
+      notes: null,
+      clientId: null,
+      createdAt: new Date('2026-07-23T00:00:00Z'),
+      updatedAt: new Date('2026-07-23T00:00:00Z'),
+    };
+    const update = vi.fn().mockResolvedValue(row);
+    const db = { lead: { update } } as unknown as Prisma.TransactionClient;
+
+    const result = await updateLeadStatusWithHistory(db, {
+      id: 'lead-1',
+      previousStatus: 'CONTACTED',
+      newStatus: 'QUALIFIED',
+      changedByUserId: 'actor-1',
+    });
+
+    expect(result).toBe(row);
+    expect(Object.keys(result).sort()).toEqual(LEAD_RECORD_KEYS);
   });
 });
 
@@ -298,5 +527,90 @@ describe('insertAuditLog', () => {
         afterState: { status: 'NEW' },
       }),
     });
+  });
+});
+
+describe('listLeadStatusHistory', () => {
+  it('scopes the query by leadId and orders createdAt desc, id desc (D-023 §8)', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const db = {
+      leadStatusHistory: { findMany, count },
+    } as unknown as Prisma.TransactionClient;
+
+    await listLeadStatusHistory(db, { leadId: 'lead-1', skip: 0, take: 20 });
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { leadId: 'lead-1' },
+      select: expect.any(Object),
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: 0,
+      take: 20,
+    });
+    expect(count).toHaveBeenCalledWith({ where: { leadId: 'lead-1' } });
+  });
+
+  it('applies pagination skip/take', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const db = {
+      leadStatusHistory: { findMany, count },
+    } as unknown as Prisma.TransactionClient;
+
+    await listLeadStatusHistory(db, { leadId: 'lead-1', skip: 40, take: 20 });
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 40, take: 20 }));
+  });
+
+  it('maps changedBy to changedByName, never including a reason field', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        id: 'history-1',
+        previousStatus: null,
+        newStatus: 'NEW',
+        changedByUserId: 'actor-1',
+        changedBy: { name: 'Admin Manager' },
+        createdAt: new Date('2026-07-23T00:00:00Z'),
+      },
+    ]);
+    const count = vi.fn().mockResolvedValue(1);
+    const db = {
+      leadStatusHistory: { findMany, count },
+    } as unknown as Prisma.TransactionClient;
+
+    const { items } = await listLeadStatusHistory(db, { leadId: 'lead-1', skip: 0, take: 20 });
+
+    expect(items).toEqual([
+      {
+        id: 'history-1',
+        previousStatus: null,
+        newStatus: 'NEW',
+        changedByUserId: 'actor-1',
+        changedByName: 'Admin Manager',
+        createdAt: new Date('2026-07-23T00:00:00Z'),
+      },
+    ]);
+    expect(Object.keys(items[0]!)).not.toContain('reason');
+  });
+
+  it('maps a null changedBy (no attributable actor) to changedByName: null', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        id: 'history-1',
+        previousStatus: 'NEW',
+        newStatus: 'UNDER_REVIEW',
+        changedByUserId: null,
+        changedBy: null,
+        createdAt: new Date('2026-07-23T00:00:00Z'),
+      },
+    ]);
+    const count = vi.fn().mockResolvedValue(1);
+    const db = {
+      leadStatusHistory: { findMany, count },
+    } as unknown as Prisma.TransactionClient;
+
+    const { items } = await listLeadStatusHistory(db, { leadId: 'lead-1', skip: 0, take: 20 });
+
+    expect(items[0]?.changedByName).toBeNull();
   });
 });

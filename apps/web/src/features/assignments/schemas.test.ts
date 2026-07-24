@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { assignmentTargetIdParamSchema, endAssignmentSchema, setAssignmentSchema } from './schemas';
+import {
+  assignmentTargetIdParamSchema,
+  endAssignmentSchema,
+  listEligibleTravelConsultantsQuerySchema,
+  setAssignmentSchema,
+} from './schemas';
 
 const VALID_UUID = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
 const OTHER_VALID_UUID = '4fa85f64-5717-4562-b3fc-2c963f66afa6';
@@ -74,5 +79,44 @@ describe('endAssignmentSchema', () => {
 
   it('trims and rejects a whitespace-only reason', () => {
     expect(endAssignmentSchema.safeParse({ reason: '   ' }).success).toBe(false);
+  });
+});
+
+describe('listEligibleTravelConsultantsQuerySchema', () => {
+  it('defaults page to 1 and pageSize to 20 when omitted', () => {
+    const result = listEligibleTravelConsultantsQuerySchema.safeParse({});
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual({ page: 1, pageSize: 20 });
+    }
+  });
+
+  it('accepts an optional trimmed search string', () => {
+    const result = listEligibleTravelConsultantsQuerySchema.safeParse({ search: '  maria  ' });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.search).toBe('maria');
+    }
+  });
+
+  it('rejects a pageSize above the maximum of 100', () => {
+    expect(listEligibleTravelConsultantsQuerySchema.safeParse({ pageSize: 1000 }).success).toBe(
+      false,
+    );
+  });
+
+  it('rejects a page below 1', () => {
+    expect(listEligibleTravelConsultantsQuerySchema.safeParse({ page: 0 }).success).toBe(false);
+  });
+
+  it('coerces string query values to numbers', () => {
+    const result = listEligibleTravelConsultantsQuerySchema.safeParse({
+      page: '2',
+      pageSize: '5',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual({ page: 2, pageSize: 5 });
+    }
   });
 });

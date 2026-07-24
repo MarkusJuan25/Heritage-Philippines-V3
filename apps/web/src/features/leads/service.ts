@@ -23,10 +23,16 @@ import {
 import { LeadError } from './errors';
 import { normalizeEmail, normalizePhone } from './normalize';
 import * as repository from './repository';
-import type { LeadActor, LeadRecord, UpdateLeadFieldsInput } from './repository';
+import type {
+  LeadActor,
+  LeadRecord,
+  LeadRecordWithAssignment,
+  UpdateLeadFieldsInput,
+} from './repository';
 import type {
   CreateLeadInput,
   ListLeadsQuery,
+  ListLeadStatusHistoryQuery,
   UpdateLeadInput,
   UpdateLeadStatusInput,
 } from './schemas';
@@ -234,8 +240,15 @@ export async function createLead(
 }
 
 /** Single-Lead read, authorized via the existing `canAccessLead` (D-022
- * §2/§8) — never a duplicated role/assignment check. */
-export async function getLeadById(actor: AuthenticatedUser, id: string): Promise<LeadRecord> {
+ * §2/§8) — never a duplicated role/assignment check. Uses
+ * `repository.findLeadByIdForRead` (not `findLeadById`), the structurally
+ * separate read path D-023 §5 requires, so this response — and only this
+ * response, plus `listLeads` below — carries `assignment` (Stage 2
+ * correction). */
+export async function getLeadById(
+  actor: AuthenticatedUser,
+  id: string,
+): Promise<LeadRecordWithAssignment> {
   const leadActor = assertLeadActor(actor);
 
   const access = await canAccessLead(actor, id);
@@ -243,7 +256,7 @@ export async function getLeadById(actor: AuthenticatedUser, id: string): Promise
     throw notFoundOrForbidden(leadActor);
   }
 
-  const found = await repository.findLeadById(prisma, id);
+  const found = await repository.findLeadByIdForRead(prisma, id);
   if (!found) {
     // Unreachable for TRAVEL_CONSULTANT: an active assignment (proven by
     // canAccessLead above) implies the Lead exists (StaffAssignment.leadId
@@ -255,7 +268,7 @@ export async function getLeadById(actor: AuthenticatedUser, id: string): Promise
 }
 
 export type ListLeadsResult = {
-  items: LeadRecord[];
+  items: LeadRecordWithAssignment[];
   page: number;
   pageSize: number;
   total: number;
@@ -484,4 +497,46 @@ export async function updateLeadStatus(
     }
     throw error;
   }
+}
+
+export type ListLeadStatusHistoryResult = {
+  items: repository.LeadStatusHistoryRow[];
+  page: number;
+  pageSize: number;
+  total: number;
+};
+
+/**
+ * Paginated Lead status-history read (D-023 §8), authorized identically to
+ * `getLeadById`: `assertLeadActor` gates the role, `canAccessLead` gates the
+ * specific Lead, and the same `notFoundOrForbidden` split preserves the
+ * ADMIN_MANAGER-vs-TRAVEL_CONSULTANT anti-enumeration behavior (D-022 §8)
+ * unchanged. Deliberately does not surface the transition `reason` —
+ * `LeadStatusHistory` has no reason column, and this checkpoint does not
+ * authorize a general AuditLog reader or a schema change (D-023 §8).
+ */
+export async function getLeadStatusHistory(
+  actor: AuthenticatedUser,
+  id: string,
+  query: ListLeadStatusHistoryQuery,
+): Promise<ListLeadStatusHistoryResult> {
+  const leadActor = assertLeadActor(actor);
+
+  const access = await canAccessLead(actor, id);
+  if (!access.allowed) {
+    throw notFoundOrForbidden(leadActor);
+  }
+
+  const existing = await repository.findLeadById(prisma, id);
+  if (!existing) {
+    throw notFoundOrForbidden(leadActor);
+  }
+
+  const skip = (query.page - 1) * query.pageSize;
+  const { items, total } = await repository.listLeadStatusHistory(prisma, {
+    leadId: id,
+    skip,
+    take: query.pageSize,
+  });
+  return { items, page: query.page, pageSize: query.pageSize, total };
 }

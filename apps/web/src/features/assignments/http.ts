@@ -78,6 +78,22 @@ export async function parseJsonBody<Schema extends z.ZodTypeAny>(
 }
 
 /**
+ * Parses `URLSearchParams` against `schema` — the query-string counterpart
+ * to `parseJsonBody`, mirroring features/leads/http.ts's `parseQuery`
+ * exactly (D-023 §6's `GET /api/assignments/travel-consultants`).
+ */
+export function parseQuery<Schema extends z.ZodTypeAny>(
+  searchParams: URLSearchParams,
+  schema: Schema,
+): ParsedBody<Schema> {
+  const result = schema.safeParse(Object.fromEntries(searchParams));
+  if (!result.success) {
+    return { success: false, response: validationErrorResponse(result.error.issues) };
+  }
+  return { success: true, data: result.data };
+}
+
+/**
  * Runs an assignment-management service call and shapes its outcome into a
  * Response: `onSuccess(result)` on success, or the standard AssignmentError
  * envelope on a known domain error. Any other error is rethrown so the

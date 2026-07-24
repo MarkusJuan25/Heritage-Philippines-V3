@@ -214,3 +214,44 @@ export async function insertAuditLog(
     },
   });
 }
+
+export type EligibleTravelConsultant = { id: string; name: string; email: string };
+
+/**
+ * The eligible-assignee read for the Lead assignment picker (D-023 §6).
+ * Unconditionally scoped to active TRAVEL_CONSULTANT accounts only — the
+ * same eligibility rule `assertEligibleAssignee` already enforces at write
+ * time (above), so this read can never surface a candidate the write path
+ * would reject. Ordered deterministically by `name` ascending, then `id`
+ * ascending (D-023 §6).
+ */
+export async function listEligibleTravelConsultants(
+  db: Prisma.TransactionClient,
+  params: { search?: string; skip: number; take: number },
+): Promise<{ items: EligibleTravelConsultant[]; total: number }> {
+  const where: Prisma.UserWhereInput = {
+    role: 'TRAVEL_CONSULTANT',
+    isActive: true,
+    ...(params.search
+      ? {
+          OR: [
+            { name: { contains: params.search, mode: 'insensitive' } },
+            { email: { contains: params.search, mode: 'insensitive' } },
+          ],
+        }
+      : {}),
+  };
+
+  const [items, total] = await Promise.all([
+    db.user.findMany({
+      where,
+      select: { id: true, name: true, email: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      skip: params.skip,
+      take: params.take,
+    }),
+    db.user.count({ where }),
+  ]);
+
+  return { items, total };
+}
