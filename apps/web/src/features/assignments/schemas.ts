@@ -30,3 +30,16 @@ export const endAssignmentSchema = z.object({
   reason: z.string().trim().min(1, 'reason is required').max(500),
 });
 export type EndAssignmentInput = z.infer<typeof endAssignmentSchema>;
+
+// Eligible Travel Consultant list query (D-023 §6): optional trimmed
+// search, plus the existing page/pageSize pagination convention
+// (features/leads/schemas.ts's listLeadsQuerySchema, features/staff/
+// schemas.ts's listStaffAccountsQuerySchema).
+export const listEligibleTravelConsultantsQuerySchema = z.object({
+  search: z.string().trim().min(1).max(200).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+});
+export type ListEligibleTravelConsultantsQuery = z.infer<
+  typeof listEligibleTravelConsultantsQuerySchema
+>;

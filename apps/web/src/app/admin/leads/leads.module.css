@@ -1,0 +1,179 @@
+/* Shared styling for the Lead Management admin UI (D-023 §4/§10). CSS
+   Modules, per D-023 §10 — no runtime CSS framework. Mobile-first: base
+   rules target narrow screens; wider layouts are progressively enhanced
+   via the min-width media query below (.claude/rules/frontend.md). */
+
+/* Visually hidden but still announced by assistive tech — used for a
+   table caption when a visible heading already labels the same content
+   (.claude/rules/frontend.md's accessible-names requirement). */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.filterForm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin-bottom: 1.5rem;
+}
+
+.filterField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 10rem;
+}
+
+.filterActions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.statusBadge {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid currentColor;
+}
+
+.statusActive {
+  color: #1a5fb4;
+}
+
+.statusConverted {
+  color: #1a7a3a;
+}
+
+.statusClosed {
+  color: #6b6b6b;
+}
+
+/* Lead list: stacked cards on narrow screens, a real table from tablet
+   width up (frontend.md's "Every dashboard and portal screen must be
+   usable on a phone" + "Paginate or virtualize long lists"). */
+.leadCards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.leadCard {
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.leadCardRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.leadTable {
+  display: none;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.leadTable th,
+.leadTable td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #e0e0e0;
+  vertical-align: top;
+}
+
+@media (min-width: 48rem) {
+  .leadCards {
+    display: none;
+  }
+
+  .leadTable {
+    display: table;
+  }
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.pageInfo {
+  font-size: 0.9rem;
+  color: #555;
+}
+
+.emptyState,
+.errorState {
+  padding: 1.5rem;
+  border: 1px dashed #c0c0c0;
+  border-radius: 0.5rem;
+  text-align: center;
+}
+
+.errorState {
+  border-color: #c0392b;
+  color: #922b21;
+}
+
+.detailFields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+  margin-bottom: 2rem;
+}
+
+@media (min-width: 40rem) {
+  .detailFields {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.detailField dt {
+  font-size: 0.8rem;
+  color: #666;
+  margin: 0;
+}
+
+.detailField dd {
+  margin: 0.15rem 0 0;
+  font-size: 1rem;
+}
+
+.historyList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.historyItem {
+  border-left: 3px solid #1a5fb4;
+  padding: 0.4rem 0.75rem;
+}
+
+.historyMeta {
+  font-size: 0.85rem;
+  color: #555;
+}

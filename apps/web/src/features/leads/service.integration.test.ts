@@ -93,6 +93,7 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
   let listLeads: (typeof import('./service'))['listLeads'];
   let updateLead: (typeof import('./service'))['updateLead'];
   let updateLeadStatus: (typeof import('./service'))['updateLeadStatus'];
+  let getLeadStatusHistory: (typeof import('./service'))['getLeadStatusHistory'];
   let LeadError: (typeof import('./errors'))['LeadError'];
 
   let adminActor: AuthenticatedUser;
@@ -131,7 +132,7 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
     // 3. Only now — dynamically — import the real, unmocked application
     // modules.
     ({ prisma } = await import('@/lib/db'));
-    ({ createLead, getLeadById, listLeads, updateLead, updateLeadStatus } =
+    ({ createLead, getLeadById, listLeads, updateLead, updateLeadStatus, getLeadStatusHistory } =
       await import('./service'));
     ({ LeadError } = await import('./errors'));
 
@@ -227,9 +228,16 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
     });
     createdLeadIds.push(created.id);
     expect(created.status).toBe('NEW');
+    // Stage 2 correction: POST /api/leads must never carry `assignment` at
+    // all — createLeadWithInitialHistory's response keeps its exact
+    // pre-D-023 (afe1201) shape.
+    expect(created).not.toHaveProperty('assignment');
 
     const retrieved = await getLeadById(adminActor, created.id);
     expect(retrieved.id).toBe(created.id);
+    // D-023 §5: GET /api/leads/[id] is the read path that carries
+    // `assignment` — an ADMIN_MANAGER-created Lead is never auto-assigned.
+    expect(retrieved.assignment).toBeNull();
 
     const { items } = await listLeads(adminActor, { page: 1, pageSize: 100 });
     expect(items.some((item) => item.id === created.id)).toBe(true);
@@ -238,12 +246,17 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
       notes: 'Called back once',
     });
     expect(edited.notes).toBe('Called back once');
+    // Stage 2 correction: PATCH /api/leads/[id] must never carry `assignment`.
+    expect(edited).not.toHaveProperty('assignment');
 
     const transitioned = await updateLeadStatus(adminActor, created.id, {
       expectedStatus: 'NEW',
       newStatus: 'QUALIFIED',
     });
     expect(transitioned.status).toBe('QUALIFIED');
+    // Stage 2 correction: PUT /api/leads/[id]/status must never carry
+    // `assignment`.
+    expect(transitioned).not.toHaveProperty('assignment');
 
     const history = await prisma!.leadStatusHistory.findMany({
       where: { leadId: created.id },
@@ -257,6 +270,23 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
     expect(auditActions.map((row) => row.action).sort()).toEqual(
       ['LEAD_CREATED', 'LEAD_STATUS_CHANGED', 'LEAD_UPDATED'].sort(),
     );
+
+    // D-023 §8: paginated status-history read, ordered createdAt desc, id
+    // desc — the transition (NEW -> QUALIFIED) must appear before the
+    // initial creation row.
+    const statusHistory = await getLeadStatusHistory(adminActor, created.id, {
+      page: 1,
+      pageSize: 20,
+    });
+    expect(statusHistory.total).toBe(2);
+    expect(statusHistory.items.map((item) => item.newStatus)).toEqual(['QUALIFIED', 'NEW']);
+    expect(statusHistory.items[0]?.previousStatus).toBe('NEW');
+    expect(statusHistory.items[0]?.changedByUserId).toBe(adminActor.id);
+    expect(statusHistory.items[0]?.changedByName).toBe(adminActor.name);
+    expect(statusHistory.items[1]?.previousStatus).toBeNull();
+    // No reason field is ever present (D-023 §8 — reasons live only in
+    // sanitized AuditLog state, out of scope for this read).
+    expect(JSON.stringify(statusHistory.items)).not.toContain('"reason"');
   });
 
   it('atomically self-assigns a TRAVEL_CONSULTANT-created Lead, visible to its creator and ADMIN_MANAGER but not a different TC', async () => {
@@ -267,6 +297,10 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
       phone,
     });
     createdLeadIds.push(created.id);
+    // Stage 2 correction: POST /api/leads must never carry `assignment` —
+    // not even null — regardless of whether the creator was auto-assigned.
+    // A subsequent GET (below) is the read path that reflects it.
+    expect(created).not.toHaveProperty('assignment');
 
     const assignment = await prisma!.staffAssignment.findFirst({
       where: { leadId: created.id, endedAt: null },
@@ -279,9 +313,25 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
     });
     expect(assignmentAudit).not.toBeNull();
 
-    await expect(getLeadById(tcActor, created.id)).resolves.toMatchObject({ id: created.id });
-    await expect(getLeadById(adminActor, created.id)).resolves.toMatchObject({ id: created.id });
+    // D-023 §5: GET /api/leads/[id] (unlike the POST creation response
+    // above) is read fresh from the database, so it correctly reflects the
+    // self-assignment written immediately after creation, in the same
+    // transaction.
+    await expect(getLeadById(tcActor, created.id)).resolves.toMatchObject({
+      id: created.id,
+      assignment: { staffId: tcActor.id, staffName: tcActor.name },
+    });
+    await expect(getLeadById(adminActor, created.id)).resolves.toMatchObject({
+      id: created.id,
+      assignment: { staffId: tcActor.id, staffName: tcActor.name },
+    });
     await expect(getLeadById(otherTcActor, created.id)).rejects.toThrow(LeadError);
+    // D-023 §8: status-history read preserves the identical anti-
+    // enumeration behavior — a TC with no active assignment to this Lead
+    // is rejected exactly like getLeadById.
+    await expect(
+      getLeadStatusHistory(otherTcActor, created.id, { page: 1, pageSize: 20 }),
+    ).rejects.toMatchObject({ code: 'LEAD_FORBIDDEN' });
 
     const { items: otherTcItems } = await listLeads(otherTcActor, { page: 1, pageSize: 100 });
     expect(otherTcItems.some((item) => item.id === created.id)).toBe(false);

@@ -131,3 +131,11 @@ export const updateLeadStatusSchema = z
   })
   .strict();
 export type UpdateLeadStatusInput = z.infer<typeof updateLeadStatusSchema>;
+
+// Status-history list query (D-023 §8): pagination only — no filters, no
+// search. Mirrors listLeadsQuerySchema's page/pageSize convention exactly.
+export const listLeadStatusHistoryQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+});
+export type ListLeadStatusHistoryQuery = z.infer<typeof listLeadStatusHistoryQuerySchema>;

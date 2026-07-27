@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { Prisma } from '@/generated/prisma/client';
 
-import { findClientProfileOwnership } from './repository';
+import { findClientProfileOwnership, listEligibleTravelConsultants } from './repository';
 
 // Focused on findClientProfileOwnership only — the new lookup added for
 // client-portal ownership enforcement (blueprint Sections 4.6, 14.1). The
@@ -30,5 +30,66 @@ describe('findClientProfileOwnership', () => {
     const result = await findClientProfileOwnership(db, 'user-1', 'someone-elses-client');
 
     expect(result).toBeNull();
+  });
+});
+
+describe('listEligibleTravelConsultants', () => {
+  it('scopes the query to active TRAVEL_CONSULTANT accounts only, ordered by name then id (D-023 §6)', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const db = { user: { findMany, count } } as unknown as Prisma.TransactionClient;
+
+    await listEligibleTravelConsultants(db, { skip: 0, take: 20 });
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { role: 'TRAVEL_CONSULTANT', isActive: true },
+      select: { id: true, name: true, email: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      skip: 0,
+      take: 20,
+    });
+    expect(count).toHaveBeenCalledWith({ where: { role: 'TRAVEL_CONSULTANT', isActive: true } });
+  });
+
+  it('composes a case-insensitive name/email search into the where clause', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const db = { user: { findMany, count } } as unknown as Prisma.TransactionClient;
+
+    await listEligibleTravelConsultants(db, { search: 'maria', skip: 0, take: 20 });
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          role: 'TRAVEL_CONSULTANT',
+          isActive: true,
+          OR: [
+            { name: { contains: 'maria', mode: 'insensitive' } },
+            { email: { contains: 'maria', mode: 'insensitive' } },
+          ],
+        },
+      }),
+    );
+  });
+
+  it('applies pagination skip/take', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const db = { user: { findMany, count } } as unknown as Prisma.TransactionClient;
+
+    await listEligibleTravelConsultants(db, { skip: 40, take: 20 });
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 40, take: 20 }));
+  });
+
+  it('returns the items and total unchanged from Prisma', async () => {
+    const items = [{ id: 'tc-1', name: 'Maria Santos', email: 'maria@example.test' }];
+    const findMany = vi.fn().mockResolvedValue(items);
+    const count = vi.fn().mockResolvedValue(1);
+    const db = { user: { findMany, count } } as unknown as Prisma.TransactionClient;
+
+    const result = await listEligibleTravelConsultants(db, { skip: 0, take: 20 });
+
+    expect(result).toEqual({ items, total: 1 });
   });
 });

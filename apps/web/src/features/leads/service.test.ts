@@ -13,6 +13,7 @@ vi.mock('@/lib/db', () => ({
 
 const repositoryMocks = vi.hoisted(() => ({
   findLeadById: vi.fn(),
+  findLeadByIdForRead: vi.fn(),
   listLeadsForActor: vi.fn(),
   createLeadWithInitialHistory: vi.fn(),
   updateLeadFields: vi.fn(),
@@ -20,6 +21,7 @@ const repositoryMocks = vi.hoisted(() => ({
   findDuplicateLeadMatches: vi.fn(),
   findDuplicateClientMatches: vi.fn(),
   insertAuditLog: vi.fn(),
+  listLeadStatusHistory: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
 
@@ -39,8 +41,15 @@ import { prisma } from '@/lib/db';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import { LeadError } from './errors';
-import type { LeadRecord } from './repository';
-import { createLead, getLeadById, listLeads, updateLead, updateLeadStatus } from './service';
+import type { LeadRecord, LeadRecordWithAssignment } from './repository';
+import {
+  createLead,
+  getLeadById,
+  getLeadStatusHistory,
+  listLeads,
+  updateLead,
+  updateLeadStatus,
+} from './service';
 
 const ADMIN_MANAGER: AuthenticatedUser = {
   id: 'admin-1',
@@ -71,6 +80,16 @@ function leadRecord(overrides: Partial<LeadRecord> = {}): LeadRecord {
     updatedAt: new Date('2026-07-23T00:00:00Z'),
     ...overrides,
   };
+}
+
+// GET-only fixture (D-023 §5) — deliberately a distinct helper from
+// leadRecord() (Stage 2 correction), matching the structural separation
+// between LeadRecord (mutation responses) and LeadRecordWithAssignment
+// (GET /api/leads, GET /api/leads/[id] only) in repository.ts.
+function leadRecordWithAssignment(
+  overrides: Partial<LeadRecordWithAssignment> = {},
+): LeadRecordWithAssignment {
+  return { ...leadRecord(), assignment: null, ...overrides };
 }
 
 beforeEach(() => {
@@ -123,6 +142,14 @@ describe('role gating', () => {
     ).rejects.toThrow(LeadError);
     expect(authorizationMocks.canAccessLead).not.toHaveBeenCalled();
   });
+
+  it.each(REJECTED_ROLES)('getLeadStatusHistory rejects role %s', async (role) => {
+    const actor = { ...ADMIN_MANAGER, role: role as AuthenticatedUser['role'] };
+    await expect(getLeadStatusHistory(actor, 'lead-1', { page: 1, pageSize: 20 })).rejects.toThrow(
+      LeadError,
+    );
+    expect(authorizationMocks.canAccessLead).not.toHaveBeenCalled();
+  });
 });
 
 describe('createLead', () => {
@@ -143,6 +170,19 @@ describe('createLead', () => {
     );
     expect(assignmentRepositoryMocks.createAssignment).not.toHaveBeenCalled();
     expect(assignmentRepositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/leads response has no assignment key (Stage 2 correction)', async () => {
+    const created = leadRecord();
+    repositoryMocks.createLeadWithInitialHistory.mockResolvedValue(created);
+
+    const result = await createLead(ADMIN_MANAGER, {
+      fullName: 'Juan Dela Cruz',
+      source: 'Walk-in',
+      email: 'juan@example.com',
+    });
+
+    expect(result.lead).not.toHaveProperty('assignment');
   });
 
   it('atomically self-assigns a TRAVEL_CONSULTANT-created Lead and writes LEAD_ASSIGNED', async () => {
@@ -269,16 +309,19 @@ describe('getLeadById', () => {
     });
   });
 
-  it('returns the Lead when authorized and found', async () => {
-    const record = leadRecord();
-    repositoryMocks.findLeadById.mockResolvedValue(record);
+  it('returns the Lead (with assignment) when authorized and found, via findLeadByIdForRead', async () => {
+    const record = leadRecordWithAssignment({
+      assignment: { staffId: 'tc-1', staffName: 'TC One' },
+    });
+    repositoryMocks.findLeadByIdForRead.mockResolvedValue(record);
 
     const result = await getLeadById(ADMIN_MANAGER, 'lead-1');
     expect(result).toBe(record);
+    expect(repositoryMocks.findLeadById).not.toHaveBeenCalled();
   });
 
   it('returns NOT_FOUND for ADMIN_MANAGER when the Lead does not exist despite unconditional access', async () => {
-    repositoryMocks.findLeadById.mockResolvedValue(null);
+    repositoryMocks.findLeadByIdForRead.mockResolvedValue(null);
 
     await expect(getLeadById(ADMIN_MANAGER, 'lead-missing')).rejects.toMatchObject({
       code: 'LEAD_NOT_FOUND',
@@ -298,6 +341,21 @@ describe('listLeads', () => {
       { skip: 10, take: 10, status: undefined, source: undefined, search: undefined },
     );
     expect(result).toEqual({ items: [], page: 2, pageSize: 10, total: 0 });
+  });
+
+  it('returns each item with its populated or null assignment unchanged (D-023 §5)', async () => {
+    const items = [
+      leadRecordWithAssignment({ id: 'lead-1', assignment: null }),
+      leadRecordWithAssignment({
+        id: 'lead-2',
+        assignment: { staffId: 'tc-1', staffName: 'TC One' },
+      }),
+    ];
+    repositoryMocks.listLeadsForActor.mockResolvedValue({ items, total: 2 });
+
+    const result = await listLeads(ADMIN_MANAGER, { page: 1, pageSize: 20 });
+
+    expect(result.items).toEqual(items);
   });
 });
 
@@ -338,6 +396,15 @@ describe('updateLead', () => {
       expect.objectContaining({ id: 'lead-1', email: null, normalizedEmail: null }),
     );
     expect(result.lead.email).toBeNull();
+  });
+
+  it('PATCH /api/leads/[id] response has no assignment key (Stage 2 correction)', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord());
+    repositoryMocks.updateLeadFields.mockResolvedValue(leadRecord({ fullName: 'New Name' }));
+
+    const result = await updateLead(ADMIN_MANAGER, 'lead-1', { fullName: 'New Name' });
+
+    expect(result.lead).not.toHaveProperty('assignment');
   });
 
   it('does not validate contact presence from the partial request alone (existing phone covers an email-only patch)', async () => {
@@ -498,6 +565,21 @@ describe('updateLeadStatus', () => {
     );
   });
 
+  it('PUT /api/leads/[id]/status response has no assignment key (Stage 2 correction)', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'SPAM' }));
+    repositoryMocks.updateLeadStatusWithHistory.mockResolvedValue(
+      leadRecord({ status: 'UNDER_REVIEW' }),
+    );
+
+    const result = await updateLeadStatus(ADMIN_MANAGER, 'lead-1', {
+      expectedStatus: 'SPAM',
+      newStatus: 'UNDER_REVIEW',
+      reason: 'Misclassified as spam',
+    });
+
+    expect(result).not.toHaveProperty('assignment');
+  });
+
   it('does not require a reason for an ordinary forward transition', async () => {
     repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
     repositoryMocks.updateLeadStatusWithHistory.mockResolvedValue(
@@ -522,5 +604,66 @@ describe('updateLeadStatus', () => {
       }),
     ).rejects.toMatchObject({ code: 'LEAD_FORBIDDEN' });
     expect(transactionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('getLeadStatusHistory', () => {
+  it('returns NOT_FOUND for ADMIN_MANAGER when canAccessLead rejects', async () => {
+    authorizationMocks.canAccessLead.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(
+      getLeadStatusHistory(ADMIN_MANAGER, 'lead-1', { page: 1, pageSize: 20 }),
+    ).rejects.toMatchObject({ code: 'LEAD_NOT_FOUND' });
+  });
+
+  it('returns FORBIDDEN for TRAVEL_CONSULTANT when canAccessLead rejects', async () => {
+    authorizationMocks.canAccessLead.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(
+      getLeadStatusHistory(TRAVEL_CONSULTANT, 'lead-1', { page: 1, pageSize: 20 }),
+    ).rejects.toMatchObject({ code: 'LEAD_FORBIDDEN' });
+  });
+
+  it('returns NOT_FOUND for ADMIN_MANAGER when the Lead does not exist despite unconditional access', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(null);
+
+    await expect(
+      getLeadStatusHistory(ADMIN_MANAGER, 'lead-missing', { page: 1, pageSize: 20 }),
+    ).rejects.toMatchObject({ code: 'LEAD_NOT_FOUND' });
+    expect(repositoryMocks.listLeadStatusHistory).not.toHaveBeenCalled();
+  });
+
+  it('delegates to the repository with computed skip/take and forwards page/pageSize', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord());
+    repositoryMocks.listLeadStatusHistory.mockResolvedValue({ items: [], total: 0 });
+
+    const result = await getLeadStatusHistory(ADMIN_MANAGER, 'lead-1', { page: 3, pageSize: 10 });
+
+    expect(repositoryMocks.listLeadStatusHistory).toHaveBeenCalledWith(prisma, {
+      leadId: 'lead-1',
+      skip: 20,
+      take: 10,
+    });
+    expect(result).toEqual({ items: [], page: 3, pageSize: 10, total: 0 });
+  });
+
+  it('returns the items unchanged, never fabricating a reason field', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord());
+    const historyItems = [
+      {
+        id: 'history-1',
+        previousStatus: null,
+        newStatus: 'NEW',
+        changedByUserId: 'actor-1',
+        changedByName: 'Admin Manager',
+        createdAt: new Date('2026-07-23T00:00:00Z'),
+      },
+    ];
+    repositoryMocks.listLeadStatusHistory.mockResolvedValue({ items: historyItems, total: 1 });
+
+    const result = await getLeadStatusHistory(ADMIN_MANAGER, 'lead-1', { page: 1, pageSize: 20 });
+
+    expect(result.items).toEqual(historyItems);
+    expect(JSON.stringify(result.items)).not.toContain('reason');
   });
 });

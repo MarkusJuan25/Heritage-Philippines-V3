@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { Prisma } from '@/generated/prisma/client';
+import { prisma } from '@/lib/db';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -334,4 +335,50 @@ export async function setBookingAssignment(
   reason?: string,
 ): Promise<AssignmentRecord> {
   return setAssignment('BOOKING', actor, bookingId, assignedStaffId, reason);
+}
+
+/**
+ * Defense-in-depth service-boundary authorization for
+ * `listEligibleTravelConsultants` (D-023 §6: "the service never relies
+ * solely on the route guard"), mirroring
+ * features/leads/service.ts's `assertLeadActor` exactly. `withRole` already
+ * gates the route to ADMIN_MANAGER before this handler runs — this protects
+ * the service boundary itself.
+ */
+function assertAssignmentActor(actor: AuthenticatedUser): void {
+  if (actor.role !== 'ADMIN_MANAGER') {
+    throw new AssignmentError(
+      'ROLE_NOT_PERMITTED',
+      'This role is not permitted to view eligible Travel Consultants.',
+    );
+  }
+}
+
+export type ListEligibleTravelConsultantsResult = {
+  items: repository.EligibleTravelConsultant[];
+  page: number;
+  pageSize: number;
+  total: number;
+};
+
+/**
+ * The eligible-assignee read backing the Lead assignment picker (D-023 §6).
+ * ADMIN_MANAGER only — SYSTEM_ADMINISTRATOR is deliberately excluded,
+ * preserving the platform-security-versus-operational-management boundary
+ * (blueprint Section 4.1; D-009(c)). Read-only: never touches assignment
+ * mutation behavior.
+ */
+export async function listEligibleTravelConsultants(
+  actor: AuthenticatedUser,
+  query: { search?: string; page: number; pageSize: number },
+): Promise<ListEligibleTravelConsultantsResult> {
+  assertAssignmentActor(actor);
+
+  const skip = (query.page - 1) * query.pageSize;
+  const { items, total } = await repository.listEligibleTravelConsultants(prisma, {
+    search: query.search,
+    skip,
+    take: query.pageSize,
+  });
+  return { items, page: query.page, pageSize: query.pageSize, total };
 }

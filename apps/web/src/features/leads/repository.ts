@@ -59,6 +59,19 @@ export type LeadRecord = {
   updatedAt: Date;
 };
 
+// D-023 §5's additive read-only extension, kept structurally separate from
+// LeadRecord (Stage 2 correction). LeadRecord is the shared shape every
+// mutation-backing function (createLeadWithInitialHistory,
+// updateLeadFields, updateLeadStatusWithHistory) returns, and D-023's own
+// Constraint requires those responses to keep their exact pre-D-023 shape
+// — never gaining `assignment` merely because a *different* query needed
+// it. Only `findLeadByIdForRead` and `listLeadsForActor` (backing
+// `GET /api/leads/[id]` and `GET /api/leads`, the only two surfaces D-023
+// §5 names) return this richer type.
+export type LeadRecordWithAssignment = LeadRecord & {
+  assignment: { staffId: string; staffName: string } | null;
+};
+
 const LEAD_SELECT = {
   id: true,
   status: true,
@@ -74,13 +87,75 @@ const LEAD_SELECT = {
   updatedAt: true,
 } as const;
 
+// GET-only select (D-023 §5): LEAD_SELECT plus the Lead's current active
+// assignment, retrieved via Prisma's own batched/declarative nested
+// relation select — never one application-level query per Lead. Used only
+// by `findLeadByIdForRead`/`listLeadsForActor`, never by any mutation-
+// backing function, so `assignment` cannot appear in a POST/PATCH/
+// PUT-status response merely through shared-type/shared-select reuse
+// (Stage 2 correction). The database's partial unique index on (leadId)
+// WHERE endedAt IS NULL (see features/assignments/repository.ts's
+// findActiveAssignmentForLead doc comment) guarantees at most one row can
+// ever match.
+const LEAD_SELECT_WITH_ASSIGNMENT = {
+  ...LEAD_SELECT,
+  assignments: {
+    where: { endedAt: null },
+    take: 1,
+    select: {
+      assignedStaffId: true,
+      assignedStaff: { select: { id: true, name: true } },
+    },
+  },
+} as const;
+
+type LeadRowWithAssignment = Prisma.LeadGetPayload<{ select: typeof LEAD_SELECT_WITH_ASSIGNMENT }>;
+
+/**
+ * Maps a raw Prisma Lead row (LEAD_SELECT_WITH_ASSIGNMENT's nested
+ * `assignments` array) to LeadRecordWithAssignment's single `assignment`
+ * field (D-023 §5). `[0]` is a defensive read — the database's own partial
+ * unique active-assignment index is what actually guarantees at most one
+ * row, not this mapping.
+ */
+function toLeadRecordWithAssignment(row: LeadRowWithAssignment): LeadRecordWithAssignment {
+  const { assignments, ...rest } = row;
+  const active = assignments[0];
+  return {
+    ...rest,
+    assignment: active
+      ? { staffId: active.assignedStaffId, staffName: active.assignedStaff.name }
+      : null,
+  };
+}
+
 /** Plain, unscoped single-Lead fetch — the actor-authorization decision has
- * already been made by `canAccessLead` before this is called (service.ts). */
+ * already been made by `canAccessLead` before this is called (service.ts).
+ * Returns the original, assignment-free LeadRecord shape: reused directly
+ * by mutation no-op/existence-check paths (`updateLead`, `updateLeadStatus`,
+ * `getLeadStatusHistory`) whose responses must never carry `assignment`
+ * (Stage 2 correction). `GET /api/leads/[id]` uses the structurally
+ * separate `findLeadByIdForRead` below instead. */
 export async function findLeadById(
   db: Prisma.TransactionClient,
   id: string,
 ): Promise<LeadRecord | null> {
   return db.lead.findUnique({ where: { id }, select: LEAD_SELECT });
+}
+
+/**
+ * `GET /api/leads/[id]`'s own read (D-023 §5) — deliberately a distinct
+ * function/select/type from `findLeadById`, so the richer
+ * LeadRecordWithAssignment shape can never leak into a mutation response
+ * merely by some other call site reusing this function (Stage 2
+ * correction).
+ */
+export async function findLeadByIdForRead(
+  db: Prisma.TransactionClient,
+  id: string,
+): Promise<LeadRecordWithAssignment | null> {
+  const row = await db.lead.findUnique({ where: { id }, select: LEAD_SELECT_WITH_ASSIGNMENT });
+  return row ? toLeadRecordWithAssignment(row) : null;
 }
 
 export type ListLeadsParams = {
@@ -103,7 +178,7 @@ export async function listLeadsForActor(
   db: Prisma.TransactionClient,
   actor: LeadActor,
   params: ListLeadsParams,
-): Promise<{ items: LeadRecord[]; total: number }> {
+): Promise<{ items: LeadRecordWithAssignment[]; total: number }> {
   const where: Prisma.LeadWhereInput = {
     ...leadAssignmentFilter(actor),
     ...(params.status ? { status: params.status } : {}),
@@ -122,7 +197,7 @@ export async function listLeadsForActor(
   const [items, total] = await Promise.all([
     db.lead.findMany({
       where,
-      select: LEAD_SELECT,
+      select: LEAD_SELECT_WITH_ASSIGNMENT,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: params.skip,
       take: params.take,
@@ -130,7 +205,7 @@ export async function listLeadsForActor(
     db.lead.count({ where }),
   ]);
 
-  return { items, total };
+  return { items: items.map(toLeadRecordWithAssignment), total };
 }
 
 export type CreateLeadInput = {
@@ -355,4 +430,61 @@ export async function insertAuditLog(
       afterState: entry.afterState,
     },
   });
+}
+
+export type LeadStatusHistoryRow = {
+  id: string;
+  previousStatus: LeadStatus | null;
+  newStatus: LeadStatus;
+  changedByUserId: string | null;
+  changedByName: string | null;
+  createdAt: Date;
+};
+
+const LEAD_STATUS_HISTORY_SELECT = {
+  id: true,
+  previousStatus: true,
+  newStatus: true,
+  changedByUserId: true,
+  changedBy: { select: { name: true } },
+  createdAt: true,
+} as const;
+
+/**
+ * Paginated status-history read for a single Lead (D-023 §8). Authorization
+ * (canAccessLead / assertLeadActor) is already decided by service.ts before
+ * this is called — this function only fetches, exactly like findLeadById.
+ * Ordered `createdAt desc, id desc`, matching every other list query in
+ * this feature (listLeadsForActor). Deliberately excludes the transition
+ * `reason` — LeadStatusHistory has no reason column (D-023 §8); the reason
+ * lives only in sanitized AuditLog state, out of scope for this read.
+ */
+export async function listLeadStatusHistory(
+  db: Prisma.TransactionClient,
+  params: { leadId: string; skip: number; take: number },
+): Promise<{ items: LeadStatusHistoryRow[]; total: number }> {
+  const where = { leadId: params.leadId };
+
+  const [rows, total] = await Promise.all([
+    db.leadStatusHistory.findMany({
+      where,
+      select: LEAD_STATUS_HISTORY_SELECT,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: params.skip,
+      take: params.take,
+    }),
+    db.leadStatusHistory.count({ where }),
+  ]);
+
+  return {
+    items: rows.map((row) => ({
+      id: row.id,
+      previousStatus: row.previousStatus,
+      newStatus: row.newStatus,
+      changedByUserId: row.changedByUserId,
+      changedByName: row.changedBy?.name ?? null,
+      createdAt: row.createdAt,
+    })),
+    total,
+  };
 }
