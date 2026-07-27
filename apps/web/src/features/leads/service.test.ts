@@ -145,9 +145,9 @@ describe('role gating', () => {
 
   it.each(REJECTED_ROLES)('getLeadStatusHistory rejects role %s', async (role) => {
     const actor = { ...ADMIN_MANAGER, role: role as AuthenticatedUser['role'] };
-    await expect(
-      getLeadStatusHistory(actor, 'lead-1', { page: 1, pageSize: 20 }),
-    ).rejects.toThrow(LeadError);
+    await expect(getLeadStatusHistory(actor, 'lead-1', { page: 1, pageSize: 20 })).rejects.toThrow(
+      LeadError,
+    );
     expect(authorizationMocks.canAccessLead).not.toHaveBeenCalled();
   });
 });
