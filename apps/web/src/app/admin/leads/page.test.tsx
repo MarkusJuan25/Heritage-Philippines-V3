@@ -85,6 +85,22 @@ describe('AdminLeadsPage', () => {
     expect(listLeadsMock).not.toHaveBeenCalled();
   });
 
+  it.each(['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'])(
+    'renders a keyboard-accessible New Lead link to /admin/leads/new for role %s (D-023 §4)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...ADMIN_MANAGER, role });
+      listLeadsMock.mockResolvedValue({ items: [], page: 1, pageSize: 20, total: 0 });
+
+      const jsx = await AdminLeadsPage({ searchParams: searchParams() });
+      render(jsx);
+
+      expect(screen.getByRole('link', { name: 'New Lead' })).toHaveAttribute(
+        'href',
+        '/admin/leads/new',
+      );
+    },
+  );
+
   it.each(['FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR', 'CLIENT'])(
     'renders an in-place permission-denied state for role %s, never calling listLeads',
     async (role) => {
