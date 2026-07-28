@@ -8,11 +8,15 @@ import type { AppRole } from '@/lib/auth/roles';
 import { LeadError } from '@/features/leads/errors';
 import { leadIdParamSchema, listLeadStatusHistoryQuerySchema } from '@/features/leads/schemas';
 import { getLeadById, getLeadStatusHistory } from '@/features/leads/service';
+import { getTransitionOutcome, isReasonRequired } from '@/features/leads/transitions';
 
+import { LEAD_STATUS_VALUES } from '../_components/leadStatusLabels';
 import { LeadStatusBadge } from '../_components/LeadStatusBadge';
 import { Pagination } from '../_components/Pagination';
 import { StatusHistoryTimeline } from '../_components/StatusHistoryTimeline';
 import styles from '../leads.module.css';
+import { EditLeadForm } from './_components/EditLeadForm';
+import { StatusTransitionPanel } from './_components/StatusTransitionPanel';
 
 // Layer 3 of D-023 §2's defense-in-depth authorization — identical to
 // /admin/leads's own gate, independently re-checked here (never trusting
@@ -23,16 +27,21 @@ type PageParams = Promise<{ id: string }>;
 type PageSearchParams = Promise<{ [key: string]: string | string[] | undefined }>;
 
 /**
- * Read-only Lead detail (D-023 §4's `/admin/leads/[id]`, read-only portion
- * only — this stage deliberately has no editing, status-transition, or
- * assignment-change controls). Calls `getLeadById` and
+ * Lead detail (D-023 §4's `/admin/leads/[id]`): read-only summary fields,
+ * status history, ordinary-field editing (`EditLeadForm`), and lifecycle
+ * status-transition controls (`StatusTransitionPanel`). Assignment
+ * management remains a separate, later stage — this page still has no
+ * assignment-change controls. Calls `getLeadById` and
  * `getLeadStatusHistory` (application services, never repositories)
  * directly, per D-023 §9. `LEAD_NOT_FOUND`/`LEAD_FORBIDDEN` are handled
  * explicitly inline, preserving D-022 §8's anti-enumeration property
  * exactly as the service layer already shapes it — this page never adds
  * its own logic to distinguish "missing" from "inaccessible" beyond what
  * `getLeadById` itself returns. Any other error bubbles to this route
- * segment's `error.tsx` boundary.
+ * segment's `error.tsx` boundary. Both `EditLeadForm` and
+ * `StatusTransitionPanel` call the existing, unchanged `PATCH
+ * /api/leads/[id]` and `PUT /api/leads/[id]/status` routes directly from
+ * the browser — this page performs no internal server-side HTTP fetch.
  */
 export default async function AdminLeadDetailPage({
   params,
@@ -120,32 +129,35 @@ export default async function AdminLeadDetailPage({
     redirect(buildHistoryHref(lastValidHistoryPage));
   }
 
+  // Server-computed status-transition options (D-022 §6; D-023 §4) — the
+  // real, authoritative features/leads/transitions.ts matrix decides
+  // exactly what StatusTransitionPanel is allowed to offer. The current
+  // status and CONVERTED_TO_CLIENT are both excluded explicitly: the
+  // ALLOWED-only filter below already excludes CONVERTED_TO_CLIENT on its
+  // own (it is reachable only as DEFERRED_TO_CONVERSION_ENDPOINT from
+  // QUALIFIED, never ALLOWED), but naming it here documents the exclusion
+  // rather than relying on that as an implicit side effect.
+  const statusOptions = LEAD_STATUS_VALUES.filter(
+    (candidate) => candidate !== lead.status && candidate !== 'CONVERTED_TO_CLIENT',
+  )
+    .filter((candidate) => getTransitionOutcome(lead.status, candidate) === 'ALLOWED')
+    .map((candidate) => ({
+      status: candidate,
+      reasonRequired: isReasonRequired(lead.status, candidate),
+    }));
+
   return (
     <div>
       <Link href="/admin/leads">← Back to Leads</Link>
       <h1>{lead.fullName}</h1>
       <LeadStatusBadge status={lead.status} />
 
+      <StatusTransitionPanel leadId={leadId} currentStatus={lead.status} options={statusOptions} />
+
       <dl className={styles.detailFields}>
-        <div className={styles.detailField}>
-          <dt>Source</dt>
-          <dd>{lead.source}</dd>
-        </div>
-        <div className={styles.detailField}>
-          <dt>Email</dt>
-          <dd>{lead.email ?? '—'}</dd>
-        </div>
-        <div className={styles.detailField}>
-          <dt>Phone</dt>
-          <dd>{lead.phone ?? '—'}</dd>
-        </div>
         <div className={styles.detailField}>
           <dt>Assigned Consultant</dt>
           <dd>{lead.assignment ? lead.assignment.staffName : 'Unassigned'}</dd>
-        </div>
-        <div className={styles.detailField}>
-          <dt>Notes</dt>
-          <dd>{lead.notes ?? '—'}</dd>
         </div>
         <div className={styles.detailField}>
           <dt>Created</dt>
@@ -164,6 +176,17 @@ export default async function AdminLeadDetailPage({
           </dd>
         </div>
       </dl>
+
+      <h2>Edit Lead</h2>
+      <EditLeadForm
+        leadId={leadId}
+        initialFullName={lead.fullName}
+        initialSource={lead.source}
+        initialEmail={lead.email}
+        initialPhone={lead.phone}
+        initialNotes={lead.notes}
+        initiallyLocked={lead.status === 'CONVERTED_TO_CLIENT'}
+      />
 
       <h2>Status History</h2>
       <StatusHistoryTimeline items={history.items} />

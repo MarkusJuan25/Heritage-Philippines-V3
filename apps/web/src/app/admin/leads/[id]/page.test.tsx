@@ -15,12 +15,20 @@ vi.mock('@/features/leads/service', () => ({
   getLeadStatusHistory: getLeadStatusHistoryMock,
 }));
 
-const { redirectMock } = vi.hoisted(() => ({
+const { redirectMock, routerRefreshMock } = vi.hoisted(() => ({
   redirectMock: vi.fn((url: string) => {
     throw new Error(`REDIRECT:${url}`);
   }),
+  routerRefreshMock: vi.fn(),
 }));
-vi.mock('next/navigation', () => ({ redirect: redirectMock }));
+// EditLeadForm/StatusTransitionPanel (both rendered by this page) call
+// useRouter().refresh() on their own client-side mutations — this page
+// itself never calls it, but the whole `next/navigation` module is
+// replaced here, so both exports must be provided.
+vi.mock('next/navigation', () => ({
+  redirect: redirectMock,
+  useRouter: () => ({ refresh: routerRefreshMock }),
+}));
 
 // The real LeadError class — not mocked — so this page's own
 // `error instanceof LeadError` checks (LEAD_NOT_FOUND / LEAD_FORBIDDEN)
@@ -160,7 +168,10 @@ describe('AdminLeadDetailPage', () => {
     render(jsx);
 
     expect(screen.getByRole('heading', { name: 'Juan Dela Cruz' })).toBeInTheDocument();
-    expect(screen.getByText('Qualified')).toBeInTheDocument();
+    // "Qualified" now legitimately appears twice (the status badge and
+    // StatusTransitionPanel's "Current status:" line) — matches this same
+    // file's own established getAllByText pattern for exactly this case.
+    expect(screen.getAllByText('Qualified').length).toBeGreaterThan(0);
     expect(screen.getByText('Unassigned')).toBeInTheDocument();
   });
 
@@ -276,6 +287,75 @@ describe('AdminLeadDetailPage', () => {
       render(jsx);
 
       expect(redirectMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Stage 2 — EditLeadForm/StatusTransitionPanel wiring', () => {
+    it('passes the confirmed Lead fields to EditLeadForm, prepopulating it exactly', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(
+        lead({
+          fullName: 'Juan Dela Cruz',
+          source: 'Contact page',
+          email: 'juan@example.com',
+          phone: null,
+          notes: 'Called back once',
+        }),
+      );
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(screen.getByLabelText('Full name')).toHaveValue('Juan Dela Cruz');
+      expect(screen.getByLabelText('Source')).toHaveValue('Contact page');
+      expect(screen.getByLabelText('Email')).toHaveValue('juan@example.com');
+      expect(screen.getByLabelText('Phone')).toHaveValue('');
+      expect(screen.getByLabelText('Notes')).toHaveValue('Called back once');
+    });
+
+    it('passes the confirmed status and the real transition-matrix options to StatusTransitionPanel for QUALIFIED', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ status: 'QUALIFIED' }));
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      const select = screen.getByLabelText('Change status to');
+      const optionLabels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent);
+      // Computed by the real, unmocked features/leads/transitions.ts matrix
+      // (D-022 §6) for QUALIFIED — never the current status, never
+      // Converted to Client (D-023 §4).
+      expect(optionLabels).toEqual([
+        'Select a status…',
+        'Not Proceeding',
+        'Duplicate',
+        'Spam',
+        'Archived',
+      ]);
+      expect(screen.queryByRole('option', { name: 'Qualified' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: 'Converted to Client' })).not.toBeInTheDocument();
+    });
+
+    it('locks editing and offers no status transitions for a CONVERTED_TO_CLIENT lead', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ status: 'CONVERTED_TO_CLIENT' }));
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(
+        screen.getByText('This lead has been converted to a client and can no longer be edited.'),
+      ).toBeInTheDocument();
+      expect(screen.queryByLabelText('Full name')).not.toBeInTheDocument();
+      // Locked, but Source, Email, and Notes remain visible as read-only
+      // values (this lead's Phone is null, rendered as an em dash).
+      expect(screen.getByText('Contact page')).toBeInTheDocument();
+      expect(screen.getByText('juan@example.com')).toBeInTheDocument();
+      expect(screen.getByText('Called back once')).toBeInTheDocument();
+      expect(
+        screen.getByText('No status changes are available for this lead.'),
+      ).toBeInTheDocument();
+      expect(screen.queryByLabelText('Change status to')).not.toBeInTheDocument();
     });
   });
 });
