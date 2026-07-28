@@ -177,3 +177,102 @@
   font-size: 0.85rem;
   color: #555;
 }
+
+/* List-page header: title plus the New Lead link (D-023 §4's
+   /admin/leads/new). Wraps on narrow screens instead of overflowing. */
+.pageHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.newLeadLink {
+  display: inline-block;
+}
+
+/* Manual Lead creation form (D-023 §4's /admin/leads/new). Reuses
+   .filterField for each labeled field; additive only. */
+.leadForm,
+.formSuccess {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 32rem;
+}
+
+.leadForm textarea {
+  font: inherit;
+  resize: vertical;
+}
+
+.formHint {
+  margin: -0.5rem 0 0;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.formAlert {
+  padding: 0.75rem 1rem;
+  border: 1px solid #c0392b;
+  border-radius: 0.5rem;
+  color: #922b21;
+}
+
+.fieldError {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #c0392b;
+}
+
+.formActions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.duplicateWarnings {
+  padding: 0.75rem 1rem;
+  border: 1px dashed #c0a000;
+  border-radius: 0.5rem;
+}
+
+.duplicateList {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.duplicateRestrictedNotice {
+  margin: 0.5rem 0 0;
+  font-style: italic;
+  color: #555;
+}
+
+/* Lead detail (D-023 §4's /admin/leads/[id]): status-transition panel,
+   in-place success feedback, and the CONVERTED_TO_CLIENT locked notice.
+   Additive only — reuses .leadForm/.filterField/.formAlert/.fieldError/
+   .formActions/.duplicateWarnings/.duplicateList/.duplicateRestrictedNotice
+   from the manual-creation form above. */
+.statusPanel {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+}
+
+.lockedNotice {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px dashed #c0a000;
+  border-radius: 0.5rem;
+}
+
+.formSuccessAlert {
+  padding: 0.75rem 1rem;
+  border: 1px solid #1a7a3a;
+  border-radius: 0.5rem;
+  color: #1a7a3a;
+}

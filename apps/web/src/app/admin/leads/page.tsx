@@ -127,7 +127,12 @@ export default async function AdminLeadsPage({ searchParams }: { searchParams: P
 
   return (
     <div>
-      <h1>Leads</h1>
+      <div className={styles.pageHeader}>
+        <h1>Leads</h1>
+        <Link href="/admin/leads/new" className={styles.newLeadLink}>
+          New Lead
+        </Link>
+      </div>
       <LeadFilters status={query.status} source={query.source} search={query.search} />
 
       {items.length === 0 ? (
