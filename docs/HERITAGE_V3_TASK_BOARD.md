@@ -4,7 +4,7 @@
 
 - Project: Heritage Philippines V3
 - Current phase: Phase 2 — Admin Dashboard Core (active since July 22, 2026)
-- Last updated: July 28, 2026
+- Last updated: July 29, 2026
 - Companion document: `docs/HERITAGE_V3_PROJECT_BLUEPRINT.md`
 - Management approval: Management approved the current V3 structure and workflow on July 9, 2026.
 - Creative delegation: The team may refine visual design, UX, and implementation quality, subject to later stakeholder feedback, without overriding security, privacy, authorization, audit, accessibility, mobile-first, or financial-integrity requirements.
@@ -72,7 +72,7 @@ Tasks: confirm technical stack via an ADR (blueprint Section 16.2), environment 
 
 Tasks: dashboard overview, lead and inquiry management (with statuses, duplicate detection, and spam controls), client management, staff assignment, proposal / ROS authoring and versioning, recording externally received proposal responses per blueprint Section 9.1 (Accept, Decline, or Request Changes captured before the client portal exists in Phase 3, with response method, acting staff member, timestamp, and supporting evidence reference), booking management, activity logging.
 
-**Status:** Active since July 22, 2026. The Lead Management Core backend and Lead Management Admin UI are now implemented and verified per D-022 and D-023, including real-PostgreSQL integration coverage and the protected `/admin/leads` workflows. Lead-to-Client conversion, Client management, Proposal / ROS, Booking UI, and the admin-dashboard overview remain incomplete.
+**Status:** Active since July 22, 2026. The Lead Management Core backend, Lead Management Admin UI, and explicit Lead-to-Client conversion are now implemented and verified per D-022, D-023, and D-024, including automated coverage across schema, audit, service, route, UI, and real-PostgreSQL integration tiers. Client management, Proposal / ROS, Booking UI, and the admin-dashboard overview remain incomplete.
 
 ### Checklist
 
@@ -81,7 +81,7 @@ Tasks: dashboard overview, lead and inquiry management (with statuses, duplicate
 - [x] Duplicate detection using normalized contact fields, surfaced for staff review rather than silently merged
 - [x] Inquiry-source tracking
 - [x] Lead management admin UI
-- [ ] Explicit Lead-to-Client conversion
+- [x] Explicit Lead-to-Client conversion
 - [ ] Client management backend and UI
 - [ ] Wire existing Lead/Client staff-assignment functionality (already implemented — `/api/leads/[id]/assignment`, `/api/clients/[id]/assignment`) into actual Lead/Client management workflows
 - [ ] Wire `canAccessLead`/`canAccessClient` (already implemented) into the new Lead/Client resource routes
