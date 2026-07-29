@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  convertLeadSchema,
   createLeadSchema,
   listLeadsQuerySchema,
   updateLeadSchema,
@@ -196,6 +197,51 @@ describe('updateLeadStatusSchema', () => {
       newStatus: 'CONTACTED',
       note: 'nope',
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('convertLeadSchema', () => {
+  it('accepts a valid request without clientId (create-new)', () => {
+    const result = convertLeadSchema.safeParse({ expectedStatus: 'QUALIFIED' });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a valid request with clientId (link-existing)', () => {
+    const result = convertLeadSchema.safeParse({
+      expectedStatus: 'QUALIFIED',
+      clientId: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an empty body', () => {
+    const result = convertLeadSchema.safeParse({});
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a missing expectedStatus', () => {
+    const result = convertLeadSchema.safeParse({
+      clientId: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a non-QUALIFIED expectedStatus literal', () => {
+    const result = convertLeadSchema.safeParse({ expectedStatus: 'NEW' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a malformed clientId', () => {
+    const result = convertLeadSchema.safeParse({
+      expectedStatus: 'QUALIFIED',
+      clientId: 'not-a-uuid',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an unknown property', () => {
+    const result = convertLeadSchema.safeParse({ expectedStatus: 'QUALIFIED', reason: 'nope' });
     expect(result.success).toBe(false);
   });
 });

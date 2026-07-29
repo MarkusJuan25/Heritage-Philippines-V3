@@ -22,6 +22,10 @@ const repositoryMocks = vi.hoisted(() => ({
   findDuplicateClientMatches: vi.fn(),
   insertAuditLog: vi.fn(),
   listLeadStatusHistory: vi.fn(),
+  createClientFromLead: vi.fn(),
+  findClientSummaryById: vi.fn(),
+  convertLeadWithHistory: vi.fn(),
+  findLeadConversionAudit: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
 
@@ -34,15 +38,19 @@ vi.mock('@/features/assignments/authorization', () => authorizationMocks);
 const assignmentRepositoryMocks = vi.hoisted(() => ({
   createAssignment: vi.fn(),
   insertAuditLog: vi.fn(),
+  findActiveAssignmentForLead: vi.fn(),
+  findActiveAssignmentForClient: vi.fn(),
 }));
 vi.mock('@/features/assignments/repository', () => assignmentRepositoryMocks);
 
+import { Prisma } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import { LeadError } from './errors';
 import type { LeadRecord, LeadRecordWithAssignment } from './repository';
 import {
+  convertLead,
   createLead,
   getLeadById,
   getLeadStatusHistory,
@@ -92,6 +100,42 @@ function leadRecordWithAssignment(
   return { ...leadRecord(), assignment: null, ...overrides };
 }
 
+type AssignmentRecordFixture = {
+  id: string;
+  assignedStaffId: string;
+  assignedByUserId: string;
+  leadId: string | null;
+  clientId: string | null;
+  bookingId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  endedAt: Date | null;
+};
+
+function assignmentRecord(
+  overrides: Partial<AssignmentRecordFixture> = {},
+): AssignmentRecordFixture {
+  return {
+    id: 'assignment-1',
+    assignedStaffId: TRAVEL_CONSULTANT.id,
+    assignedByUserId: TRAVEL_CONSULTANT.id,
+    leadId: 'lead-1',
+    clientId: null,
+    bookingId: null,
+    createdAt: new Date('2026-07-23T00:00:00Z'),
+    updatedAt: new Date('2026-07-23T00:00:00Z'),
+    endedAt: null,
+    ...overrides,
+  };
+}
+
+function conflictError(code: 'P2034' | 'P2002' | 'P2004'): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError('Simulated database conflict', {
+    code,
+    clientVersion: '7.8.0',
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   transactionMock.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(TX_CLIENT));
@@ -99,6 +143,8 @@ beforeEach(() => {
   authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
   repositoryMocks.findDuplicateLeadMatches.mockResolvedValue([]);
   repositoryMocks.findDuplicateClientMatches.mockResolvedValue([]);
+  assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(null);
+  assignmentRepositoryMocks.findActiveAssignmentForClient.mockResolvedValue(null);
 });
 
 describe('role gating', () => {
@@ -148,6 +194,14 @@ describe('role gating', () => {
     await expect(getLeadStatusHistory(actor, 'lead-1', { page: 1, pageSize: 20 })).rejects.toThrow(
       LeadError,
     );
+    expect(authorizationMocks.canAccessLead).not.toHaveBeenCalled();
+  });
+
+  it.each(REJECTED_ROLES)('convertLead rejects role %s with ROLE_NOT_PERMITTED', async (role) => {
+    const actor = { ...ADMIN_MANAGER, role: role as AuthenticatedUser['role'] };
+    await expect(
+      convertLead(actor, 'lead-1', { expectedStatus: 'QUALIFIED' }),
+    ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED' });
     expect(authorizationMocks.canAccessLead).not.toHaveBeenCalled();
   });
 });
@@ -665,5 +719,666 @@ describe('getLeadStatusHistory', () => {
 
     expect(result.items).toEqual(historyItems);
     expect(JSON.stringify(result.items)).not.toContain('reason');
+  });
+});
+
+describe('convertLead', () => {
+  const CONVERT_INPUT = { expectedStatus: 'QUALIFIED' as const };
+
+  describe('ADMIN_MANAGER create-new', () => {
+    it("creates a new Client from the Lead's own fields, converts the Lead, and writes both audit entries", async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED', clientId: null });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.createClientFromLead.mockResolvedValue({
+        id: 'client-1',
+        fullName: found.fullName,
+      });
+      repositoryMocks.convertLeadWithHistory.mockResolvedValue(
+        leadRecord({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT', clientId: 'client-1' }),
+      );
+
+      const result = await convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT);
+
+      expect(result.client).toEqual({ id: 'client-1', fullName: found.fullName });
+      expect(result.clientCreated).toBe(true);
+      expect(repositoryMocks.createClientFromLead).toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({
+          fullName: found.fullName,
+          email: found.email,
+          phone: found.phone,
+          normalizedEmail: found.normalizedEmail,
+          normalizedPhone: found.normalizedPhone,
+        }),
+      );
+      expect(repositoryMocks.convertLeadWithHistory).toHaveBeenCalledWith(TX_CLIENT, {
+        id: 'lead-1',
+        clientId: 'client-1',
+        changedByUserId: ADMIN_MANAGER.id,
+      });
+      expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({
+          action: 'CLIENT_CREATED',
+          entityType: 'Client',
+          entityId: 'client-1',
+        }),
+      );
+      expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({
+          action: 'LEAD_CONVERTED_TO_CLIENT',
+          entityType: 'Lead',
+          entityId: 'lead-1',
+          afterState: { status: 'CONVERTED_TO_CLIENT', clientId: 'client-1', clientCreated: true },
+        }),
+      );
+    });
+
+    it('never leaks raw email/phone/notes into either audit snapshot', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'QUALIFIED',
+        email: 'juan@example.com',
+        phone: '639171234567',
+        notes: 'Prefers weekend calls',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.createClientFromLead.mockResolvedValue({
+        id: 'client-1',
+        fullName: found.fullName,
+      });
+      repositoryMocks.convertLeadWithHistory.mockResolvedValue(
+        leadRecord({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT', clientId: 'client-1' }),
+      );
+
+      await convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT);
+
+      const auditPayload = JSON.stringify(repositoryMocks.insertAuditLog.mock.calls);
+      expect(auditPayload).not.toContain('juan@example.com');
+      expect(auditPayload).not.toContain('639171234567');
+      expect(auditPayload).not.toContain('Prefers weekend calls');
+    });
+  });
+
+  describe('TRAVEL_CONSULTANT authorization', () => {
+    it("allows conversion when the TC holds the Lead's current active assignment", async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: TRAVEL_CONSULTANT.id }),
+      );
+      repositoryMocks.createClientFromLead.mockResolvedValue({
+        id: 'client-1',
+        fullName: found.fullName,
+      });
+      assignmentRepositoryMocks.createAssignment.mockResolvedValue(
+        assignmentRecord({ id: 'assignment-2', clientId: 'client-1', leadId: null }),
+      );
+      repositoryMocks.convertLeadWithHistory.mockResolvedValue(
+        leadRecord({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT', clientId: 'client-1' }),
+      );
+
+      const result = await convertLead(TRAVEL_CONSULTANT, 'lead-1', CONVERT_INPUT);
+
+      expect(result.clientCreated).toBe(true);
+      expect(repositoryMocks.convertLeadWithHistory).toHaveBeenCalled();
+    });
+
+    it('rejects at the pre-transaction gate when canAccessLead denies (no assignment)', async () => {
+      authorizationMocks.canAccessLead.mockResolvedValue({ allowed: false, status: 403 });
+
+      await expect(convertLead(TRAVEL_CONSULTANT, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_FORBIDDEN',
+      });
+      expect(transactionMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects via the transaction-scoped recheck when the active assignment ended since the initial check', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(null);
+
+      await expect(convertLead(TRAVEL_CONSULTANT, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_FORBIDDEN',
+      });
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects via the transaction-scoped recheck when the active assignment belongs to a different staff member', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: 'other-tc' }),
+      );
+
+      await expect(convertLead(TRAVEL_CONSULTANT, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_FORBIDDEN',
+      });
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Client matching and linking', () => {
+    it('requires explicit linking (CLIENT_MATCH_REQUIRES_LINK) when a Client match exists and no clientId is supplied', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+        { id: 'client-existing', fullName: 'Maria', matchedOn: ['EMAIL'] },
+      ]);
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'CLIENT_MATCH_REQUIRES_LINK',
+      });
+      expect(repositoryMocks.createClientFromLead).not.toHaveBeenCalled();
+    });
+
+    it('blocks new-Client creation for a TRAVEL_CONSULTANT even when every match is restricted (same code)', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: TRAVEL_CONSULTANT.id }),
+      );
+      repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+        { id: 'client-hidden', fullName: 'Hidden Client', matchedOn: ['PHONE'] },
+      ]);
+
+      await expect(convertLead(TRAVEL_CONSULTANT, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'CLIENT_MATCH_REQUIRES_LINK',
+      });
+      expect(repositoryMocks.createClientFromLead).not.toHaveBeenCalled();
+    });
+
+    it('links to an existing Client on a contact match, without creating a new Client', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+        { id: 'client-existing', fullName: 'Maria', matchedOn: ['EMAIL'] },
+      ]);
+      repositoryMocks.convertLeadWithHistory.mockResolvedValue(
+        leadRecord({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT', clientId: 'client-existing' }),
+      );
+
+      const result = await convertLead(ADMIN_MANAGER, 'lead-1', {
+        expectedStatus: 'QUALIFIED',
+        clientId: 'client-existing',
+      });
+
+      expect(result.client).toEqual({ id: 'client-existing', fullName: 'Maria' });
+      expect(result.clientCreated).toBe(false);
+      expect(repositoryMocks.createClientFromLead).not.toHaveBeenCalled();
+      expect(assignmentRepositoryMocks.createAssignment).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({ action: 'CLIENT_CREATED' }),
+      );
+      expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({
+          action: 'LEAD_CONVERTED_TO_CLIENT',
+          afterState: {
+            status: 'CONVERTED_TO_CLIENT',
+            clientId: 'client-existing',
+            clientCreated: false,
+          },
+        }),
+      );
+    });
+
+    it('rejects a supplied clientId with no matching contact channel (CLIENT_LINK_NOT_AVAILABLE)', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findDuplicateClientMatches.mockResolvedValue([]);
+
+      await expect(
+        convertLead(ADMIN_MANAGER, 'lead-1', {
+          expectedStatus: 'QUALIFIED',
+          clientId: 'client-unrelated',
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_LINK_NOT_AVAILABLE' });
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects at the pre-transaction gate when canAccessClient denies the supplied clientId', async () => {
+      authorizationMocks.canAccessClient.mockResolvedValue({ allowed: false, status: 403 });
+
+      await expect(
+        convertLead(TRAVEL_CONSULTANT, 'lead-1', {
+          expectedStatus: 'QUALIFIED',
+          clientId: 'client-1',
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_LINK_NOT_AVAILABLE' });
+      expect(transactionMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a TRAVEL_CONSULTANT link via the transaction-scoped Client recheck when unassigned to that Client', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: TRAVEL_CONSULTANT.id }),
+      );
+      repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+        { id: 'client-existing', fullName: 'Maria', matchedOn: ['EMAIL'] },
+      ]);
+      assignmentRepositoryMocks.findActiveAssignmentForClient.mockResolvedValue(null);
+
+      await expect(
+        convertLead(TRAVEL_CONSULTANT, 'lead-1', {
+          expectedStatus: 'QUALIFIED',
+          clientId: 'client-existing',
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_LINK_NOT_AVAILABLE' });
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('assignment inheritance', () => {
+    it("inherits the Lead's active assignee onto a newly created Client, actor as assignedByUserId", async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: 'tc-original' }),
+      );
+      repositoryMocks.createClientFromLead.mockResolvedValue({
+        id: 'client-1',
+        fullName: found.fullName,
+      });
+      assignmentRepositoryMocks.createAssignment.mockResolvedValue(
+        assignmentRecord({
+          id: 'assignment-2',
+          assignedStaffId: 'tc-original',
+          clientId: 'client-1',
+          leadId: null,
+        }),
+      );
+      repositoryMocks.convertLeadWithHistory.mockResolvedValue(
+        leadRecord({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT', clientId: 'client-1' }),
+      );
+
+      // ADMIN_MANAGER converts a Lead assigned to a different TC — the
+      // inherited Client assignment keeps the TC as assignee but records
+      // the converting ADMIN_MANAGER as assignedByUserId (D-024 §5).
+      await convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT);
+
+      expect(assignmentRepositoryMocks.createAssignment).toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({
+          assignedStaffId: 'tc-original',
+          assignedByUserId: ADMIN_MANAGER.id,
+          clientId: 'client-1',
+        }),
+      );
+      expect(assignmentRepositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({
+          action: 'CLIENT_ASSIGNMENT_CREATED',
+          entityType: 'Client',
+          entityId: 'client-1',
+        }),
+      );
+    });
+
+    it('creates no assignment when the Lead has no active assignee', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(null);
+      repositoryMocks.createClientFromLead.mockResolvedValue({
+        id: 'client-1',
+        fullName: found.fullName,
+      });
+      repositoryMocks.convertLeadWithHistory.mockResolvedValue(
+        leadRecord({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT', clientId: 'client-1' }),
+      );
+
+      await convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT);
+
+      expect(assignmentRepositoryMocks.createAssignment).not.toHaveBeenCalled();
+      expect(assignmentRepositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('never creates, ends, or changes an assignment when linking to an existing Client', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'QUALIFIED' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: ADMIN_MANAGER.id }),
+      );
+      repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+        { id: 'client-existing', fullName: 'Maria', matchedOn: ['EMAIL'] },
+      ]);
+      repositoryMocks.convertLeadWithHistory.mockResolvedValue(
+        leadRecord({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT', clientId: 'client-existing' }),
+      );
+
+      await convertLead(ADMIN_MANAGER, 'lead-1', {
+        expectedStatus: 'QUALIFIED',
+        clientId: 'client-existing',
+      });
+
+      expect(assignmentRepositoryMocks.createAssignment).not.toHaveBeenCalled();
+      expect(assignmentRepositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('idempotent replay', () => {
+    it('replays a create-new conversion, returning the audited clientCreated: true, with no new writes', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-1',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue({
+        afterState: { status: 'CONVERTED_TO_CLIENT', clientId: 'client-1', clientCreated: true },
+      });
+      repositoryMocks.findClientSummaryById.mockResolvedValue({
+        id: 'client-1',
+        fullName: 'Juan Dela Cruz',
+      });
+
+      const result = await convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT);
+
+      expect(result).toEqual({
+        lead: found,
+        client: { id: 'client-1', fullName: 'Juan Dela Cruz' },
+        clientCreated: true,
+      });
+      expect(repositoryMocks.createClientFromLead).not.toHaveBeenCalled();
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+      expect(assignmentRepositoryMocks.createAssignment).not.toHaveBeenCalled();
+    });
+
+    it('replays a link-existing conversion, returning the audited clientCreated: false, with no new writes', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-existing',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue({
+        afterState: {
+          status: 'CONVERTED_TO_CLIENT',
+          clientId: 'client-existing',
+          clientCreated: false,
+        },
+      });
+      repositoryMocks.findClientSummaryById.mockResolvedValue({
+        id: 'client-existing',
+        fullName: 'Maria',
+      });
+
+      const result = await convertLead(ADMIN_MANAGER, 'lead-1', {
+        expectedStatus: 'QUALIFIED',
+        clientId: 'client-existing',
+      });
+
+      expect(result.clientCreated).toBe(false);
+      expect(result.client).toEqual({ id: 'client-existing', fullName: 'Maria' });
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('replays with an omitted clientId identically to a matching supplied clientId', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-1',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue({
+        afterState: { status: 'CONVERTED_TO_CLIENT', clientId: 'client-1', clientCreated: true },
+      });
+      repositoryMocks.findClientSummaryById.mockResolvedValue({
+        id: 'client-1',
+        fullName: 'Juan Dela Cruz',
+      });
+
+      const result = await convertLead(ADMIN_MANAGER, 'lead-1', {
+        expectedStatus: 'QUALIFIED',
+        clientId: 'client-1',
+      });
+
+      expect(result.clientCreated).toBe(true);
+    });
+
+    it('returns LEAD_CONFLICT when the LEAD_CONVERTED_TO_CLIENT audit entry is missing', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-1',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue(null);
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_CONFLICT',
+      });
+    });
+
+    it('returns LEAD_CONFLICT when the audit afterState.clientId disagrees with Lead.clientId', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-1',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue({
+        afterState: {
+          status: 'CONVERTED_TO_CLIENT',
+          clientId: 'client-other',
+          clientCreated: true,
+        },
+      });
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_CONFLICT',
+      });
+      expect(repositoryMocks.findClientSummaryById).not.toHaveBeenCalled();
+    });
+
+    it('returns LEAD_CONFLICT for a malformed audit afterState shape', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-1',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue({
+        afterState: { status: 'CONVERTED_TO_CLIENT' },
+      });
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_CONFLICT',
+      });
+    });
+
+    it('returns LEAD_CONFLICT when the audit afterState carries the three valid fields plus an unexpected extra key', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-1',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue({
+        afterState: {
+          status: 'CONVERTED_TO_CLIENT',
+          clientId: 'client-1',
+          clientCreated: true,
+          unexpected: 'value',
+        },
+      });
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_CONFLICT',
+      });
+      expect(repositoryMocks.findClientSummaryById).not.toHaveBeenCalled();
+    });
+
+    it('returns LEAD_CONFLICT for a differing supplied clientId on an already-converted Lead, without reading the audit', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-1',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+
+      await expect(
+        convertLead(ADMIN_MANAGER, 'lead-1', {
+          expectedStatus: 'QUALIFIED',
+          clientId: 'client-different',
+        }),
+      ).rejects.toMatchObject({ code: 'LEAD_CONFLICT' });
+      expect(repositoryMocks.findLeadConversionAudit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('TRAVEL_CONSULTANT Client-assignment reauthorization on replay', () => {
+    it('allows a replay with the same supplied clientId when both the Lead and Client assignments belong to that consultant', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-existing',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: TRAVEL_CONSULTANT.id }),
+      );
+      assignmentRepositoryMocks.findActiveAssignmentForClient.mockResolvedValue(
+        assignmentRecord({
+          id: 'assignment-client',
+          assignedStaffId: TRAVEL_CONSULTANT.id,
+          leadId: null,
+          clientId: 'client-existing',
+        }),
+      );
+      repositoryMocks.findLeadConversionAudit.mockResolvedValue({
+        afterState: {
+          status: 'CONVERTED_TO_CLIENT',
+          clientId: 'client-existing',
+          clientCreated: false,
+        },
+      });
+      repositoryMocks.findClientSummaryById.mockResolvedValue({
+        id: 'client-existing',
+        fullName: 'Maria',
+      });
+
+      const result = await convertLead(TRAVEL_CONSULTANT, 'lead-1', {
+        expectedStatus: 'QUALIFIED',
+        clientId: 'client-existing',
+      });
+
+      expect(result).toEqual({
+        lead: found,
+        client: { id: 'client-existing', fullName: 'Maria' },
+        clientCreated: false,
+      });
+    });
+
+    it('rejects the replay with CLIENT_LINK_NOT_AVAILABLE when the Client assignment ended after the pre-transaction check', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-existing',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: TRAVEL_CONSULTANT.id }),
+      );
+      assignmentRepositoryMocks.findActiveAssignmentForClient.mockResolvedValue(null);
+
+      await expect(
+        convertLead(TRAVEL_CONSULTANT, 'lead-1', {
+          expectedStatus: 'QUALIFIED',
+          clientId: 'client-existing',
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_LINK_NOT_AVAILABLE' });
+    });
+
+    it('rejects the replay with CLIENT_LINK_NOT_AVAILABLE when the Client assignment belongs to another consultant', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-existing',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: TRAVEL_CONSULTANT.id }),
+      );
+      assignmentRepositoryMocks.findActiveAssignmentForClient.mockResolvedValue(
+        assignmentRecord({
+          id: 'assignment-client',
+          assignedStaffId: 'other-tc',
+          leadId: null,
+          clientId: 'client-existing',
+        }),
+      );
+
+      await expect(
+        convertLead(TRAVEL_CONSULTANT, 'lead-1', {
+          expectedStatus: 'QUALIFIED',
+          clientId: 'client-existing',
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_LINK_NOT_AVAILABLE' });
+    });
+
+    it('a denied replay reads neither the conversion audit nor the Client summary, and performs no writes', async () => {
+      const found = leadRecord({
+        id: 'lead-1',
+        status: 'CONVERTED_TO_CLIENT',
+        clientId: 'client-existing',
+      });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(
+        assignmentRecord({ assignedStaffId: TRAVEL_CONSULTANT.id }),
+      );
+      assignmentRepositoryMocks.findActiveAssignmentForClient.mockResolvedValue(null);
+
+      await expect(
+        convertLead(TRAVEL_CONSULTANT, 'lead-1', {
+          expectedStatus: 'QUALIFIED',
+          clientId: 'client-existing',
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_LINK_NOT_AVAILABLE' });
+
+      expect(repositoryMocks.findLeadConversionAudit).not.toHaveBeenCalled();
+      expect(repositoryMocks.findClientSummaryById).not.toHaveBeenCalled();
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('stale / non-idempotent conflict', () => {
+    it('returns LEAD_CONFLICT for a Lead that was never QUALIFIED', async () => {
+      const found = leadRecord({ id: 'lead-1', status: 'NEW' });
+      repositoryMocks.findLeadById.mockResolvedValue(found);
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_CONFLICT',
+      });
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('transaction failure propagation', () => {
+    it('propagates a non-conflict transaction failure unchanged, with no partial writes', async () => {
+      repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'QUALIFIED' }));
+      repositoryMocks.createClientFromLead.mockRejectedValue(new Error('db exploded'));
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toThrow(
+        'db exploded',
+      );
+      expect(repositoryMocks.convertLeadWithHistory).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('maps a serialization conflict that survives every retry to LEAD_CONFLICT, never a raw Prisma error', async () => {
+      transactionMock.mockImplementation(async () => {
+        throw conflictError('P2034');
+      });
+
+      await expect(convertLead(ADMIN_MANAGER, 'lead-1', CONVERT_INPUT)).rejects.toMatchObject({
+        code: 'LEAD_CONFLICT',
+      });
+    });
   });
 });

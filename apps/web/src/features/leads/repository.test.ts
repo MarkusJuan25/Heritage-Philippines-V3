@@ -3,16 +3,21 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '@/generated/prisma/client';
 
 import {
+  convertLeadWithHistory,
+  createClientFromLead,
   createLeadWithInitialHistory,
+  findClientSummaryById,
   findDuplicateClientMatches,
   findDuplicateLeadMatches,
   findLeadById,
   findLeadByIdForRead,
+  findLeadConversionAudit,
   insertAuditLog,
   listLeadsForActor,
   listLeadStatusHistory,
   updateLeadFields,
   updateLeadStatusWithHistory,
+  type CreateClientFromLeadInput,
 } from './repository';
 
 // The exact 12 fields LeadRecord (afe1201) carries — used to prove
@@ -612,5 +617,284 @@ describe('listLeadStatusHistory', () => {
     const { items } = await listLeadStatusHistory(db, { leadId: 'lead-1', skip: 0, take: 20 });
 
     expect(items[0]?.changedByName).toBeNull();
+  });
+});
+
+describe('createClientFromLead', () => {
+  it('sends exactly the authorized mapped fields and explicit null profile fields to Prisma', async () => {
+    const create = vi.fn().mockResolvedValue({ id: 'client-1', fullName: 'Juan' });
+    const db = { client: { create } } as unknown as Prisma.TransactionClient;
+
+    await createClientFromLead(db, {
+      id: 'client-1',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+    });
+
+    expect(create).toHaveBeenCalledWith({
+      data: {
+        id: 'client-1',
+        fullName: 'Juan',
+        email: 'juan@example.com',
+        phone: null,
+        normalizedEmail: 'juan@example.com',
+        normalizedPhone: null,
+        notes: null,
+        address: null,
+        nationality: null,
+        dateOfBirth: null,
+        emergencyContact: null,
+      },
+      select: { id: true, fullName: true },
+    });
+  });
+
+  it('never writes Lead notes or any other field beyond the allow-list, even if supplied', async () => {
+    const create = vi.fn().mockResolvedValue({ id: 'client-1', fullName: 'Juan' });
+    const db = { client: { create } } as unknown as Prisma.TransactionClient;
+
+    // Deliberately smuggling fields the declared parameter type forbids
+    // (Lead.notes, a caller-supplied status) to prove the implementation's
+    // explicit field-by-field mapping — never a spread of `input` — drops
+    // them regardless of what a caller passes.
+    const maliciousInput = {
+      id: 'client-1',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+      notes: 'Called back once',
+      status: 'QUALIFIED',
+    } as unknown as CreateClientFromLeadInput;
+
+    await createClientFromLead(db, maliciousInput);
+
+    const dataArg = create.mock.calls[0]![0].data;
+    expect(dataArg.notes).toBeNull();
+    expect(Object.keys(dataArg).sort()).toEqual([
+      'address',
+      'dateOfBirth',
+      'email',
+      'emergencyContact',
+      'fullName',
+      'id',
+      'nationality',
+      'normalizedEmail',
+      'normalizedPhone',
+      'notes',
+      'phone',
+    ]);
+  });
+
+  it('returns only { id, fullName }', async () => {
+    const row = { id: 'client-1', fullName: 'Juan' };
+    const create = vi.fn().mockResolvedValue(row);
+    const db = { client: { create } } as unknown as Prisma.TransactionClient;
+
+    const result = await createClientFromLead(db, {
+      id: 'client-1',
+      fullName: 'Juan',
+      email: null,
+      phone: '639171234567',
+      normalizedEmail: null,
+      normalizedPhone: '639171234567',
+    });
+
+    expect(result).toBe(row);
+    expect(Object.keys(result).sort()).toEqual(['fullName', 'id']);
+  });
+});
+
+describe('findClientSummaryById', () => {
+  it('selects only { id, fullName }', async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: 'client-1', fullName: 'Juan' });
+    const db = { client: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findClientSummaryById(db, 'client-1');
+
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: 'client-1' },
+      select: { id: true, fullName: true },
+    });
+  });
+
+  it('returns an existing row unchanged', async () => {
+    const row = { id: 'client-1', fullName: 'Juan' };
+    const findUnique = vi.fn().mockResolvedValue(row);
+    const db = { client: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientSummaryById(db, 'client-1');
+
+    expect(result).toBe(row);
+  });
+
+  it('returns null unchanged when the Client does not exist', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { client: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientSummaryById(db, 'missing-client');
+
+    expect(result).toBeNull();
+  });
+});
+
+describe('convertLeadWithHistory', () => {
+  it('performs the exact status/clientId/history nested write, hardcoding QUALIFIED -> CONVERTED_TO_CLIENT', async () => {
+    const update = vi.fn().mockResolvedValue({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT' });
+    const db = { lead: { update } } as unknown as Prisma.TransactionClient;
+
+    await convertLeadWithHistory(db, {
+      id: 'lead-1',
+      clientId: 'client-1',
+      changedByUserId: 'actor-1',
+    });
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: 'lead-1' },
+      data: {
+        clientId: 'client-1',
+        status: 'CONVERTED_TO_CLIENT',
+        statusHistory: {
+          create: expect.objectContaining({
+            previousStatus: 'QUALIFIED',
+            newStatus: 'CONVERTED_TO_CLIENT',
+            changedByUserId: 'actor-1',
+          }),
+        },
+      },
+      select: expect.any(Object),
+    });
+  });
+
+  it('returns the existing assignment-free LeadRecord shape, with no assignment key', async () => {
+    const row = {
+      id: 'lead-1',
+      status: 'CONVERTED_TO_CLIENT',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+      source: 'Walk-in',
+      notes: null,
+      clientId: 'client-1',
+      createdAt: new Date('2026-07-28T00:00:00Z'),
+      updatedAt: new Date('2026-07-28T00:00:00Z'),
+    };
+    const update = vi.fn().mockResolvedValue(row);
+    const db = { lead: { update } } as unknown as Prisma.TransactionClient;
+
+    const result = await convertLeadWithHistory(db, {
+      id: 'lead-1',
+      clientId: 'client-1',
+      changedByUserId: 'actor-1',
+    });
+
+    expect(result).toBe(row);
+    expect(Object.keys(result).sort()).toEqual(LEAD_RECORD_KEYS);
+  });
+});
+
+describe('findLeadConversionAudit', () => {
+  it('filters by entityType Lead, entityId, and action LEAD_CONVERTED_TO_CLIENT, ordered createdAt desc then id desc', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const db = { auditLog: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    await findLeadConversionAudit(db, 'lead-1');
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        entityType: 'Lead',
+        entityId: 'lead-1',
+        action: 'LEAD_CONVERTED_TO_CLIENT',
+      },
+      select: { afterState: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+  });
+
+  it('returns the row unchanged when found', async () => {
+    const row = {
+      afterState: { status: 'CONVERTED_TO_CLIENT', clientId: 'client-1', clientCreated: true },
+    };
+    const findFirst = vi.fn().mockResolvedValue(row);
+    const db = { auditLog: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    const result = await findLeadConversionAudit(db, 'lead-1');
+
+    expect(result).toBe(row);
+  });
+
+  it('returns null unchanged when no conversion audit entry exists', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const db = { auditLog: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    const result = await findLeadConversionAudit(db, 'lead-1');
+
+    expect(result).toBeNull();
+  });
+});
+
+describe('Lead-to-Client conversion primitives never touch unrelated models', () => {
+  it('never call staffAssignment, auditLog.create, user, proposal, booking, paymentPlan, visaCase, notification, portalInvitation, or clientProfile', async () => {
+    const forbidden = {
+      staffAssignmentCreate: vi.fn(),
+      auditLogCreate: vi.fn(),
+      userCreate: vi.fn(),
+      proposalCreate: vi.fn(),
+      bookingCreate: vi.fn(),
+      paymentPlanCreate: vi.fn(),
+      visaCaseCreate: vi.fn(),
+      notificationCreate: vi.fn(),
+      portalInvitationCreate: vi.fn(),
+      clientProfileCreate: vi.fn(),
+    };
+
+    const db = {
+      client: {
+        create: vi.fn().mockResolvedValue({ id: 'client-1', fullName: 'Juan' }),
+        findUnique: vi.fn().mockResolvedValue({ id: 'client-1', fullName: 'Juan' }),
+      },
+      lead: {
+        update: vi.fn().mockResolvedValue({ id: 'lead-1', status: 'CONVERTED_TO_CLIENT' }),
+      },
+      auditLog: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: forbidden.auditLogCreate,
+      },
+      staffAssignment: { create: forbidden.staffAssignmentCreate },
+      user: { create: forbidden.userCreate },
+      proposal: { create: forbidden.proposalCreate },
+      booking: { create: forbidden.bookingCreate },
+      paymentPlan: { create: forbidden.paymentPlanCreate },
+      visaCase: { create: forbidden.visaCaseCreate },
+      notification: { create: forbidden.notificationCreate },
+      portalInvitation: { create: forbidden.portalInvitationCreate },
+      clientProfile: { create: forbidden.clientProfileCreate },
+    } as unknown as Prisma.TransactionClient;
+
+    await createClientFromLead(db, {
+      id: 'client-1',
+      fullName: 'Juan',
+      email: 'juan@example.com',
+      phone: null,
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: null,
+    });
+    await findClientSummaryById(db, 'client-1');
+    await convertLeadWithHistory(db, {
+      id: 'lead-1',
+      clientId: 'client-1',
+      changedByUserId: 'actor-1',
+    });
+    await findLeadConversionAudit(db, 'lead-1');
+
+    for (const spy of Object.values(forbidden)) {
+      expect(spy).not.toHaveBeenCalled();
+    }
   });
 });

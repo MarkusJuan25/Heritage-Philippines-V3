@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { LeadStatus, type Prisma } from '@/generated/prisma/client';
 
+import { LEAD_AUDIT_ACTIONS, LEAD_AUDIT_ENTITY_TYPE } from './audit';
+
 // The only layer that talks to the database for this feature
 // (.claude/rules/backend.md's "Repository/data-access layer"). Every
 // function takes a Prisma client or transaction client as its first
@@ -487,4 +489,151 @@ export async function listLeadStatusHistory(
     })),
     total,
   };
+}
+
+// --- Lead-to-Client conversion (D-024 §4/§6/§7) ---
+// Narrow, conversion-scoped primitives only — not a general Client
+// repository. Client CRUD/management remains its own, later, unauthorized
+// feature (D-024 §1); nothing here composes a transaction, creates an
+// assignment or audit entry, or touches any downstream record — that
+// composition is service.ts's job (D-024 §6), a later stage.
+
+export type ClientSummary = { id: string; fullName: string };
+
+const CLIENT_SUMMARY_SELECT = { id: true, fullName: true } as const;
+
+export type CreateClientFromLeadInput = {
+  id: string;
+  fullName: string;
+  email: string | null;
+  phone: string | null;
+  normalizedEmail: string | null;
+  normalizedPhone: string | null;
+};
+
+/**
+ * Creates a Client from a Lead's own data at conversion time (D-024 §4).
+ * Copies exactly `fullName`/`email`/`phone`/`normalizedEmail`/
+ * `normalizedPhone` — `Lead.notes` is deliberately absent from
+ * `CreateClientFromLeadInput`'s type, so it can never be copied — and every
+ * optional profile field (`notes`, `address`, `nationality`, `dateOfBirth`,
+ * `emergencyContact`) is set explicitly to `null` here, never left to a
+ * Prisma column default. Creates exactly one `Client` row and nothing
+ * else: no assignment, no audit entry, no downstream record.
+ */
+export async function createClientFromLead(
+  db: Prisma.TransactionClient,
+  input: CreateClientFromLeadInput,
+): Promise<ClientSummary> {
+  return db.client.create({
+    data: {
+      id: input.id,
+      fullName: input.fullName,
+      email: input.email,
+      phone: input.phone,
+      normalizedEmail: input.normalizedEmail,
+      normalizedPhone: input.normalizedPhone,
+      notes: null,
+      address: null,
+      nationality: null,
+      dateOfBirth: null,
+      emergencyContact: null,
+    },
+    select: CLIENT_SUMMARY_SELECT,
+  });
+}
+
+/**
+ * Reads a minimal Client summary by id (D-024 §7's idempotent-replay
+ * response; D-024 §9's response shape) — deliberately not in
+ * features/assignments/repository.ts, whose existing `findClientById`
+ * selects only `{ id }` for its own, narrower assignment-target-existence
+ * purpose. Returns `null` when the Client does not exist, unchanged.
+ */
+export async function findClientSummaryById(
+  db: Prisma.TransactionClient,
+  id: string,
+): Promise<ClientSummary | null> {
+  return db.client.findUnique({ where: { id }, select: CLIENT_SUMMARY_SELECT });
+}
+
+export type ConvertLeadWithHistoryInput = {
+  id: string;
+  clientId: string;
+  changedByUserId: string;
+};
+
+/**
+ * Performs the Lead-to-Client conversion write (D-024 §6): one nested
+ * Prisma update setting `Lead.clientId`/`Lead.status` and creating the
+ * corresponding `LeadStatusHistory` row, mirroring
+ * `updateLeadStatusWithHistory`'s nested-write style exactly. Unlike that
+ * function, `previousStatus`/`newStatus` are not caller-supplied —
+ * D-024 §2/§6 authorize only the single `QUALIFIED` -> `CONVERTED_TO_CLIENT`
+ * transition for this checkpoint, so both are hardcoded here rather than
+ * accepted as parameters, closing off any possibility of this function ever
+ * recording a different transition. Returns the existing assignment-free
+ * `LeadRecord` shape via `LEAD_SELECT` — never `LeadRecordWithAssignment` —
+ * matching D-024 §9's corrected response-shape requirement.
+ */
+export async function convertLeadWithHistory(
+  db: Prisma.TransactionClient,
+  input: ConvertLeadWithHistoryInput,
+): Promise<LeadRecord> {
+  return db.lead.update({
+    where: { id: input.id },
+    data: {
+      clientId: input.clientId,
+      status: LeadStatus.CONVERTED_TO_CLIENT,
+      statusHistory: {
+        create: {
+          id: randomUUID(),
+          previousStatus: LeadStatus.QUALIFIED,
+          newStatus: LeadStatus.CONVERTED_TO_CLIENT,
+          changedByUserId: input.changedByUserId,
+        },
+      },
+    },
+    select: LEAD_SELECT,
+  });
+}
+
+export type LeadConversionAuditRow = {
+  afterState: Prisma.JsonValue | null;
+};
+
+const LEAD_CONVERSION_AUDIT_SELECT = { afterState: true } as const;
+
+/**
+ * Reads the sanitized `LEAD_CONVERTED_TO_CLIENT` AuditLog entry for a Lead
+ * (D-024 §7) — the sole persisted source the service layer validates an
+ * idempotent conversion replay's `clientId`/`clientCreated` against, since
+ * neither `Lead` nor `Client` itself records whether the original
+ * conversion created or linked the Client. Not a general AuditLog reader:
+ * scoped to exactly one `entityType`/`entityId`/`action` triple, reusing
+ * `LEAD_AUDIT_ENTITY_TYPE`/`LEAD_AUDIT_ACTIONS.LEAD_CONVERTED_TO_CLIENT`
+ * from features/leads/audit.ts (a safe, acyclic import — audit.ts imports
+ * nothing itself) rather than duplicating those string literals here.
+ * `findFirst` with deterministic `createdAt desc, id desc` ordering
+ * (matching every other list query's tie-breaker discipline in this
+ * feature) defensively picks the single most recent match — `AuditLog` has
+ * no unique constraint preventing more than one such row, even though the
+ * transaction that writes this entry (service.ts) never produces a second
+ * one by construction, since the idempotency check it backs always
+ * short-circuits before any write. Returns `null` when no such entry
+ * exists, unchanged.
+ */
+export async function findLeadConversionAudit(
+  db: Prisma.TransactionClient,
+  leadId: string,
+): Promise<LeadConversionAuditRow | null> {
+  return db.auditLog.findFirst({
+    where: {
+      entityType: LEAD_AUDIT_ENTITY_TYPE,
+      entityId: leadId,
+      action: LEAD_AUDIT_ACTIONS.LEAD_CONVERTED_TO_CLIENT,
+    },
+    select: LEAD_CONVERSION_AUDIT_SELECT,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  });
 }
