@@ -52,6 +52,7 @@ import type { LeadRecord, LeadRecordWithAssignment } from './repository';
 import {
   convertLead,
   createLead,
+  getConversionOptions,
   getLeadById,
   getLeadStatusHistory,
   listLeads,
@@ -204,6 +205,17 @@ describe('role gating', () => {
     ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED' });
     expect(authorizationMocks.canAccessLead).not.toHaveBeenCalled();
   });
+
+  it.each(REJECTED_ROLES)(
+    'getConversionOptions rejects role %s with ROLE_NOT_PERMITTED',
+    async (role) => {
+      const actor = { ...ADMIN_MANAGER, role: role as AuthenticatedUser['role'] };
+      await expect(getConversionOptions(actor, 'lead-1')).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+      });
+      expect(authorizationMocks.canAccessLead).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('createLead', () => {
@@ -1380,5 +1392,130 @@ describe('convertLead', () => {
         code: 'LEAD_CONFLICT',
       });
     });
+  });
+});
+
+describe('getConversionOptions', () => {
+  it('returns NOT_FOUND for ADMIN_MANAGER when canAccessLead rejects', async () => {
+    authorizationMocks.canAccessLead.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(getConversionOptions(ADMIN_MANAGER, 'lead-1')).rejects.toMatchObject({
+      code: 'LEAD_NOT_FOUND',
+    });
+  });
+
+  it('returns FORBIDDEN for TRAVEL_CONSULTANT when canAccessLead rejects', async () => {
+    authorizationMocks.canAccessLead.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(getConversionOptions(TRAVEL_CONSULTANT, 'lead-1')).rejects.toMatchObject({
+      code: 'LEAD_FORBIDDEN',
+    });
+  });
+
+  it('returns NOT_FOUND for ADMIN_MANAGER when the Lead does not exist despite unconditional access', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(null);
+
+    await expect(getConversionOptions(ADMIN_MANAGER, 'lead-missing')).rejects.toMatchObject({
+      code: 'LEAD_NOT_FOUND',
+    });
+  });
+
+  it('throws CONVERSION_NOT_ELIGIBLE when the Lead is not QUALIFIED', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
+
+    await expect(getConversionOptions(ADMIN_MANAGER, 'lead-1')).rejects.toMatchObject({
+      code: 'CONVERSION_NOT_ELIGIBLE',
+    });
+    expect(repositoryMocks.findDuplicateClientMatches).not.toHaveBeenCalled();
+  });
+
+  it('throws CONVERSION_NOT_ELIGIBLE for an already-converted Lead (no idempotent-read exception)', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(
+      leadRecord({ status: 'CONVERTED_TO_CLIENT', clientId: 'client-1' }),
+    );
+
+    await expect(getConversionOptions(ADMIN_MANAGER, 'lead-1')).rejects.toMatchObject({
+      code: 'CONVERSION_NOT_ELIGIBLE',
+    });
+  });
+
+  it('returns no matches and restrictedMatchDetected: false when no Client matches the Lead', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'QUALIFIED' }));
+    repositoryMocks.findDuplicateClientMatches.mockResolvedValue([]);
+
+    const result = await getConversionOptions(ADMIN_MANAGER, 'lead-1');
+
+    expect(result).toEqual({ accessibleMatches: [], restrictedMatchDetected: false });
+  });
+
+  it("re-runs Client-only duplicate detection against the Lead's own current contact fields", async () => {
+    const found = leadRecord({
+      status: 'QUALIFIED',
+      normalizedEmail: 'juan@example.com',
+      normalizedPhone: '639171234567',
+    });
+    repositoryMocks.findLeadById.mockResolvedValue(found);
+    repositoryMocks.findDuplicateClientMatches.mockResolvedValue([]);
+
+    await getConversionOptions(ADMIN_MANAGER, 'lead-1');
+
+    expect(repositoryMocks.findDuplicateClientMatches).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        normalizedEmail: 'juan@example.com',
+        normalizedPhone: '639171234567',
+      }),
+    );
+    // Never Lead-type duplicate detection — D-024 §3 re-runs Client
+    // matching only, unlike createLead/updateLead's findDuplicateMatches.
+    expect(repositoryMocks.findDuplicateLeadMatches).not.toHaveBeenCalled();
+  });
+
+  it('returns each accessible Client match with only id/fullName/matchedOn', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'QUALIFIED' }));
+    repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+      { id: 'client-1', fullName: 'Maria', matchedOn: ['EMAIL'] },
+    ]);
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+
+    const result = await getConversionOptions(ADMIN_MANAGER, 'lead-1');
+
+    expect(result).toEqual({
+      accessibleMatches: [{ id: 'client-1', fullName: 'Maria', matchedOn: ['EMAIL'] }],
+      restrictedMatchDetected: false,
+    });
+  });
+
+  it('collapses an inaccessible match into restrictedMatchDetected without leaking its identity', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'QUALIFIED' }));
+    repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+      { id: 'client-hidden', fullName: 'Hidden Client', matchedOn: ['PHONE'] },
+    ]);
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: false, status: 403 });
+
+    const result = await getConversionOptions(TRAVEL_CONSULTANT, 'lead-1');
+
+    expect(result.accessibleMatches).toEqual([]);
+    expect(result.restrictedMatchDetected).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('client-hidden');
+    expect(JSON.stringify(result)).not.toContain('Hidden Client');
+  });
+
+  it('returns both accessible and restricted results together when matches are mixed', async () => {
+    repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'QUALIFIED' }));
+    repositoryMocks.findDuplicateClientMatches.mockResolvedValue([
+      { id: 'client-visible', fullName: 'Visible Client', matchedOn: ['EMAIL'] },
+      { id: 'client-hidden', fullName: 'Hidden Client', matchedOn: ['PHONE'] },
+    ]);
+    authorizationMocks.canAccessClient.mockImplementation(async (_actor: unknown, id: string) =>
+      id === 'client-visible' ? { allowed: true } : { allowed: false, status: 403 },
+    );
+
+    const result = await getConversionOptions(TRAVEL_CONSULTANT, 'lead-1');
+
+    expect(result.accessibleMatches).toEqual([
+      { id: 'client-visible', fullName: 'Visible Client', matchedOn: ['EMAIL'] },
+    ]);
+    expect(result.restrictedMatchDetected).toBe(true);
   });
 });

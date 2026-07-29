@@ -276,3 +276,21 @@
   border-radius: 0.5rem;
   color: #1a7a3a;
 }
+
+/* Lead-to-Client conversion panel (D-024 §10). Additive only — reuses
+   .statusPanel/.leadForm/.formActions/.formAlert/.formSuccessAlert/
+   .duplicateRestrictedNotice from above. */
+.conversionChoices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.conversionChoiceOption {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}

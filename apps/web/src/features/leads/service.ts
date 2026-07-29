@@ -801,3 +801,77 @@ export async function convertLead(
     throw error;
   }
 }
+
+export type AccessibleConversionCandidate = {
+  id: string;
+  fullName: string;
+  matchedOn: ('EMAIL' | 'PHONE')[];
+};
+
+export type ConversionOptions = {
+  accessibleMatches: AccessibleConversionCandidate[];
+  restrictedMatchDetected: boolean;
+};
+
+/**
+ * Read-only conversion-options read (D-024 §10), powering the Lead-detail
+ * conversion panel. Re-runs `convertLead`'s own eligibility (Section 2) and
+ * Client duplicate-matching (Section 3) logic in read-only form — never a
+ * transaction, never a write — always against the live `prisma` singleton,
+ * matching `getLeadById`'s own non-transactional-read precedent. Unlike
+ * `findDuplicateMatches` (used by `createLead`/`updateLead`), this checks
+ * only Client-type matches, never Lead-type ones: D-024 §3 re-runs *Client*
+ * duplicate detection exclusively, using the Lead's own current contact
+ * fields (never a resubmitted value). Returns only what Section 3 already
+ * authorizes exposing — each accessible candidate's `id`/`fullName`/matched
+ * channel(s) — collapsing every inaccessible match into a single
+ * `restrictedMatchDetected: true` flag that never reveals its id, name, or
+ * count, mirroring `findDuplicateMatches`'s existing visibility-shaping
+ * discipline. Throws `CONVERSION_NOT_ELIGIBLE` when the Lead's current
+ * status is not `QUALIFIED` (D-024 §9) — distinct from the mutation's own
+ * `LEAD_CONFLICT` concurrency-conflict code, since this is a plain read
+ * with no `expectedStatus` to be stale against.
+ */
+export async function getConversionOptions(
+  actor: AuthenticatedUser,
+  id: string,
+): Promise<ConversionOptions> {
+  const leadActor = assertLeadActor(actor);
+
+  const access = await canAccessLead(actor, id);
+  if (!access.allowed) {
+    throw notFoundOrForbidden(leadActor);
+  }
+
+  const found = await repository.findLeadById(prisma, id);
+  if (!found) {
+    throw notFoundOrForbidden(leadActor);
+  }
+
+  if (found.status !== LeadStatus.QUALIFIED) {
+    throw new LeadError('CONVERSION_NOT_ELIGIBLE', CONVERSION_STALE_MESSAGE);
+  }
+
+  const clientMatches = await repository.findDuplicateClientMatches(prisma, {
+    normalizedEmail: found.normalizedEmail ?? undefined,
+    normalizedPhone: found.normalizedPhone ?? undefined,
+  });
+
+  const accessibleMatches: AccessibleConversionCandidate[] = [];
+  let restrictedMatchDetected = false;
+
+  for (const match of clientMatches) {
+    const clientAccess = await canAccessClient(actor, match.id);
+    if (clientAccess.allowed) {
+      accessibleMatches.push({
+        id: match.id,
+        fullName: match.fullName,
+        matchedOn: match.matchedOn,
+      });
+    } else {
+      restrictedMatchDetected = true;
+    }
+  }
+
+  return { accessibleMatches, restrictedMatchDetected };
+}
