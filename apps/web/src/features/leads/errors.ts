@@ -8,7 +8,11 @@
 // which schemas.ts cannot see). Every other code mirrors an identical
 // existing code+status pair already defined in
 // features/bookings/errors.ts's BookingError or
-// features/assignments/errors.ts's AssignmentError.
+// features/assignments/errors.ts's AssignmentError. The three D-024
+// conversion codes below — `CONVERSION_NOT_ELIGIBLE`,
+// `CLIENT_MATCH_REQUIRES_LINK`, `CLIENT_LINK_NOT_AVAILABLE` — are new to
+// that checkpoint, not mirrors of an existing Booking/Assignment code; see
+// D-024 §9 for each one's exact meaning.
 export type LeadErrorCode =
   | 'VALIDATION_ERROR'
   | 'ROLE_NOT_PERMITTED'
@@ -18,6 +22,9 @@ export type LeadErrorCode =
   | 'REASON_REQUIRED'
   | 'INVALID_STATUS_TRANSITION'
   | 'CONVERSION_ENDPOINT_REQUIRED'
+  | 'CONVERSION_NOT_ELIGIBLE'
+  | 'CLIENT_MATCH_REQUIRES_LINK'
+  | 'CLIENT_LINK_NOT_AVAILABLE'
   | 'LEAD_CONFLICT';
 
 const STATUS_BY_CODE: Record<LeadErrorCode, 400 | 403 | 404 | 409> = {
@@ -29,6 +36,9 @@ const STATUS_BY_CODE: Record<LeadErrorCode, 400 | 403 | 404 | 409> = {
   REASON_REQUIRED: 409,
   INVALID_STATUS_TRANSITION: 409,
   CONVERSION_ENDPOINT_REQUIRED: 409,
+  CONVERSION_NOT_ELIGIBLE: 409,
+  CLIENT_MATCH_REQUIRES_LINK: 409,
+  CLIENT_LINK_NOT_AVAILABLE: 409,
   LEAD_CONFLICT: 409,
 };
 

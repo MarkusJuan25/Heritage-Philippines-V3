@@ -7,7 +7,7 @@ import type { AppRole } from '@/lib/auth/roles';
 
 import { LeadError } from '@/features/leads/errors';
 import { leadIdParamSchema, listLeadStatusHistoryQuerySchema } from '@/features/leads/schemas';
-import { getLeadById, getLeadStatusHistory } from '@/features/leads/service';
+import { getConversionOptions, getLeadById, getLeadStatusHistory } from '@/features/leads/service';
 import { getTransitionOutcome, isReasonRequired } from '@/features/leads/transitions';
 
 import { LEAD_STATUS_VALUES } from '../_components/leadStatusLabels';
@@ -15,6 +15,7 @@ import { LeadStatusBadge } from '../_components/LeadStatusBadge';
 import { Pagination } from '../_components/Pagination';
 import { StatusHistoryTimeline } from '../_components/StatusHistoryTimeline';
 import styles from '../leads.module.css';
+import { ConvertToClientPanel } from './_components/ConvertToClientPanel';
 import { EditLeadForm } from './_components/EditLeadForm';
 import { StatusTransitionPanel } from './_components/StatusTransitionPanel';
 
@@ -146,6 +147,16 @@ export default async function AdminLeadDetailPage({
       reasonRequired: isReasonRequired(lead.status, candidate),
     }));
 
+  // D-024 §10: the conversion-options read — and the panel it powers — are
+  // authorized, called, and rendered only for a QUALIFIED Lead, never for
+  // any other status, including CONVERTED_TO_CLIENT (which continues to
+  // show only the existing locked/no-transitions state above). Only the
+  // client-safe fields getConversionOptions itself already returns
+  // (accessible candidates' id/fullName/matched channels, plus
+  // restrictedMatchDetected) are ever passed to the client component.
+  const conversionOptions =
+    lead.status === 'QUALIFIED' ? await getConversionOptions(user, leadId) : null;
+
   return (
     <div>
       <Link href="/admin/leads">← Back to Leads</Link>
@@ -153,6 +164,14 @@ export default async function AdminLeadDetailPage({
       <LeadStatusBadge status={lead.status} />
 
       <StatusTransitionPanel leadId={leadId} currentStatus={lead.status} options={statusOptions} />
+
+      {conversionOptions ? (
+        <ConvertToClientPanel
+          leadId={leadId}
+          accessibleMatches={conversionOptions.accessibleMatches}
+          restrictedMatchDetected={conversionOptions.restrictedMatchDetected}
+        />
+      ) : null}
 
       <dl className={styles.detailFields}>
         <div className={styles.detailField}>

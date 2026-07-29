@@ -132,6 +132,21 @@ export const updateLeadStatusSchema = z
   .strict();
 export type UpdateLeadStatusInput = z.infer<typeof updateLeadStatusSchema>;
 
+// Lead-to-Client conversion contract (D-024 §3). `expectedStatus` is fixed
+// to the literal `"QUALIFIED"` — not the general `LeadStatus` enum
+// `updateLeadStatusSchema` uses above — because `QUALIFIED` is the only
+// status conversion is ever eligible from (D-024 §2); the schema itself
+// refuses any other claimed value rather than deferring that check to the
+// service layer. An omitted `clientId` requests creating a new Client; a
+// supplied `clientId` requests linking to an existing one (D-024 §3).
+export const convertLeadSchema = z
+  .object({
+    expectedStatus: z.literal('QUALIFIED'),
+    clientId: z.string().uuid('clientId must be a valid UUID').optional(),
+  })
+  .strict();
+export type ConvertLeadInput = z.infer<typeof convertLeadSchema>;
+
 // Status-history list query (D-023 §8): pagination only — no filters, no
 // search. Mirrors listLeadsQuerySchema's page/pageSize convention exactly.
 export const listLeadStatusHistoryQuerySchema = z.object({

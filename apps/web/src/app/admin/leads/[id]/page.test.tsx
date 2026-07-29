@@ -6,13 +6,15 @@ import '@testing-library/jest-dom/vitest';
 const { getCurrentUserMock } = vi.hoisted(() => ({ getCurrentUserMock: vi.fn() }));
 vi.mock('@/lib/auth/guards', () => ({ getCurrentUser: getCurrentUserMock }));
 
-const { getLeadByIdMock, getLeadStatusHistoryMock } = vi.hoisted(() => ({
+const { getLeadByIdMock, getLeadStatusHistoryMock, getConversionOptionsMock } = vi.hoisted(() => ({
   getLeadByIdMock: vi.fn(),
   getLeadStatusHistoryMock: vi.fn(),
+  getConversionOptionsMock: vi.fn(),
 }));
 vi.mock('@/features/leads/service', () => ({
   getLeadById: getLeadByIdMock,
   getLeadStatusHistory: getLeadStatusHistoryMock,
+  getConversionOptions: getConversionOptionsMock,
 }));
 
 const { redirectMock, routerRefreshMock } = vi.hoisted(() => ({
@@ -79,6 +81,10 @@ function searchParams(
 beforeEach(() => {
   vi.clearAllMocks();
   getLeadStatusHistoryMock.mockResolvedValue({ items: [], page: 1, pageSize: 20, total: 0 });
+  getConversionOptionsMock.mockResolvedValue({
+    accessibleMatches: [],
+    restrictedMatchDetected: false,
+  });
   // Stage 3 correction: `vi.resetAllMocks()` in `afterEach` below strips
   // every mock's implementation, including `redirectMock`'s throwing
   // behavior set at creation time — without restoring it here, only the
@@ -356,6 +362,72 @@ describe('AdminLeadDetailPage', () => {
         screen.getByText('No status changes are available for this lead.'),
       ).toBeInTheDocument();
       expect(screen.queryByLabelText('Change status to')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Stage F — ConvertToClientPanel wiring (D-024 §10)', () => {
+    it('calls getConversionOptions with the exact actor and Lead id for a QUALIFIED lead', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ status: 'QUALIFIED' }));
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(getConversionOptionsMock).toHaveBeenCalledWith(ADMIN_MANAGER, LEAD_ID);
+      expect(getConversionOptionsMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('wires the accessible conversion-option candidates into the panel', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ status: 'QUALIFIED' }));
+      getConversionOptionsMock.mockResolvedValue({
+        accessibleMatches: [{ id: 'client-1', fullName: 'Maria Santos', matchedOn: ['EMAIL'] }],
+        restrictedMatchDetected: false,
+      });
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(screen.getByLabelText('Maria Santos — matched on Email')).toBeInTheDocument();
+      expect(screen.queryByLabelText('Create a new Client')).not.toBeInTheDocument();
+    });
+
+    it('wires a restricted-only result into the panel without exposing any candidate metadata', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ status: 'QUALIFIED' }));
+      getConversionOptionsMock.mockResolvedValue({
+        accessibleMatches: [],
+        restrictedMatchDetected: true,
+      });
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(screen.getByText(/request Admin\/Manager assistance/)).toBeInTheDocument();
+      expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+      expect(screen.queryByText(/@/)).not.toBeInTheDocument();
+    });
+
+    it('never renders the panel or calls getConversionOptions for a non-QUALIFIED status (NEW)', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ status: 'NEW' }));
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(getConversionOptionsMock).not.toHaveBeenCalled();
+      expect(screen.queryByText('Convert to Client')).not.toBeInTheDocument();
+    });
+
+    it('never renders the panel or calls getConversionOptions for a CONVERTED_TO_CLIENT lead', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ status: 'CONVERTED_TO_CLIENT' }));
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(getConversionOptionsMock).not.toHaveBeenCalled();
+      expect(screen.queryByText('Convert to Client')).not.toBeInTheDocument();
     });
   });
 });

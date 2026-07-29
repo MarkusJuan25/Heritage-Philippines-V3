@@ -16,6 +16,8 @@ import * as assignmentRepository from '@/features/assignments/repository';
 import {
   LEAD_AUDIT_ACTIONS,
   LEAD_AUDIT_ENTITY_TYPE,
+  sanitizeClientCreatedSnapshot,
+  sanitizeLeadConversionSnapshot,
   sanitizeLeadCreatedSnapshot,
   sanitizeLeadStatusSnapshot,
   sanitizeLeadUpdateSnapshot,
@@ -30,6 +32,7 @@ import type {
   UpdateLeadFieldsInput,
 } from './repository';
 import type {
+  ConvertLeadInput,
   CreateLeadInput,
   ListLeadsQuery,
   ListLeadStatusHistoryQuery,
@@ -539,4 +542,336 @@ export async function getLeadStatusHistory(
     take: query.pageSize,
   });
   return { items, page: query.page, pageSize: query.pageSize, total };
+}
+
+// --- Lead-to-Client conversion (D-024) ---
+
+const CONVERSION_STALE_MESSAGE = 'This lead is not eligible for conversion. Refresh and try again.';
+const CONVERSION_CONFLICT_MESSAGE =
+  'This lead could not be converted because of a conflicting update. Please try again.';
+const CLIENT_MATCH_MESSAGE =
+  'A matching client already exists. Select an existing client to link instead of creating a new one.';
+const CLIENT_LINK_MESSAGE = 'The specified client is not available to link to this lead.';
+
+// CLIENT_CREATED's entityType (D-024 §8) — a plain literal, not
+// ASSIGNMENT_AUDIT_ENTITY_TYPE.CLIENT: that constant belongs to the
+// assignments feature's own audit vocabulary and is only reused below
+// alongside its matching ASSIGNMENT_AUDIT_ACTIONS.CLIENT_ASSIGNED action
+// (mirroring createLead's existing ASSIGNMENT_AUDIT_ENTITY_TYPE.LEAD reuse),
+// not for a LEAD_AUDIT_ACTIONS action that this module owns outright.
+const CLIENT_ENTITY_TYPE = 'Client';
+
+type ConversionAuditState = { clientId: string; clientCreated: boolean };
+
+// The exact, closed key set `sanitizeLeadConversionSnapshot` writes
+// (D-024 §7/§8) — parsing enforces this as a closed shape, not merely a
+// subset check, so a persisted afterState carrying any additional or
+// differently-named key is treated as untrustworthy, not silently accepted.
+const CONVERSION_AUDIT_KEYS = new Set(['status', 'clientId', 'clientCreated']);
+
+/**
+ * Defensively parses a `LEAD_CONVERTED_TO_CLIENT` AuditLog `afterState`
+ * (untyped JSON) back into the shape `sanitizeLeadConversionSnapshot`
+ * writes it as (D-024 §7). Returns `null` for anything that doesn't match
+ * that shape *exactly* — missing, malformed, or additional keys all fail —
+ * a replay never guesses `clientCreated` from a malformed or unexpected
+ * shape.
+ */
+function parseConversionAuditState(value: Prisma.JsonValue | null): ConversionAuditState | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== CONVERSION_AUDIT_KEYS.size ||
+    !keys.every((key) => CONVERSION_AUDIT_KEYS.has(key)) ||
+    record.status !== 'CONVERTED_TO_CLIENT' ||
+    typeof record.clientId !== 'string' ||
+    typeof record.clientCreated !== 'boolean'
+  ) {
+    return null;
+  }
+  return { clientId: record.clientId, clientCreated: record.clientCreated };
+}
+
+export type ConvertLeadResult = {
+  lead: LeadRecord;
+  client: repository.ClientSummary;
+  clientCreated: boolean;
+};
+
+/**
+ * Converts a QUALIFIED Lead to a Client (D-024). Mirrors
+ * `updateLeadStatus`'s two-tier authorization exactly: `canAccessLead`
+ * (and, only when `clientId` is supplied, `canAccessClient` for that
+ * specific id) gates access *before* the transaction opens, since neither
+ * function can run against a transaction client (D-024 §2); inside
+ * `runSerializableWithRetry`, the identical policy is rechecked via the
+ * transaction-aware `assignmentRepository.findActiveAssignmentForLead`/
+ * `findActiveAssignmentForClient` (D-024 §6). An unauthorized, missing, or
+ * unrelated `clientId` all collapse into the same `CLIENT_LINK_NOT_AVAILABLE`
+ * outcome (D-024 §3) so this endpoint can never be used to probe whether an
+ * arbitrary Client id exists.
+ */
+export async function convertLead(
+  actor: AuthenticatedUser,
+  id: string,
+  input: ConvertLeadInput,
+): Promise<ConvertLeadResult> {
+  const leadActor = assertLeadActor(actor);
+
+  const leadAccess = await canAccessLead(actor, id);
+  if (!leadAccess.allowed) {
+    throw notFoundOrForbidden(leadActor);
+  }
+
+  if (input.clientId) {
+    const clientAccess = await canAccessClient(actor, input.clientId);
+    if (!clientAccess.allowed) {
+      throw new LeadError('CLIENT_LINK_NOT_AVAILABLE', CLIENT_LINK_MESSAGE);
+    }
+  }
+
+  try {
+    return await runSerializableWithRetry(async (tx) => {
+      const found = await repository.findLeadById(tx, id);
+      if (!found) {
+        throw notFoundOrForbidden(leadActor);
+      }
+
+      // Reused both for the TRAVEL_CONSULTANT recheck below and, later, to
+      // decide whether a newly created Client inherits an assignment
+      // (D-024 §5) — one query serves both purposes.
+      const leadActiveAssignment = await assignmentRepository.findActiveAssignmentForLead(tx, id);
+      if (
+        leadActor.role === 'TRAVEL_CONSULTANT' &&
+        (!leadActiveAssignment || leadActiveAssignment.assignedStaffId !== leadActor.id)
+      ) {
+        throw notFoundOrForbidden(leadActor);
+      }
+
+      // Transaction-local Client-assignment recheck (D-024 §2/§6d): whenever
+      // a TRAVEL_CONSULTANT supplies clientId, this must run before the
+      // idempotent-replay branch below can return — a replay is not exempt
+      // from reauthorization, since the Client's own assignment can change
+      // independently of the Lead's (e.g. reassigned via
+      // PUT /api/clients/[id]/assignment after the original conversion).
+      // ADMIN_MANAGER remains unconditional; an omitted clientId needs no
+      // Client-assignment check at all. This result gates both the replay
+      // path and the ordinary link-existing path further below, so neither
+      // repeats this query.
+      if (input.clientId && leadActor.role === 'TRAVEL_CONSULTANT') {
+        const clientAssignment = await assignmentRepository.findActiveAssignmentForClient(
+          tx,
+          input.clientId,
+        );
+        if (!clientAssignment || clientAssignment.assignedStaffId !== leadActor.id) {
+          throw new LeadError('CLIENT_LINK_NOT_AVAILABLE', CLIENT_LINK_MESSAGE);
+        }
+      }
+
+      // Idempotent replay (D-024 §7) — runs before the expectedStatus/
+      // eligibility check below, mirroring updateLeadStatus's same-status
+      // no-op-runs-first precedent. Never a new write.
+      if (found.status === LeadStatus.CONVERTED_TO_CLIENT) {
+        if (!found.clientId || (input.clientId && input.clientId !== found.clientId)) {
+          throw new LeadError('LEAD_CONFLICT', CONVERSION_CONFLICT_MESSAGE);
+        }
+
+        const auditRow = await repository.findLeadConversionAudit(tx, id);
+        const auditState = parseConversionAuditState(auditRow?.afterState ?? null);
+        if (!auditState || auditState.clientId !== found.clientId) {
+          throw new LeadError('LEAD_CONFLICT', CONVERSION_CONFLICT_MESSAGE);
+        }
+
+        const clientSummary = await repository.findClientSummaryById(tx, found.clientId);
+        if (!clientSummary) {
+          throw new LeadError('LEAD_CONFLICT', CONVERSION_CONFLICT_MESSAGE);
+        }
+
+        return { lead: found, client: clientSummary, clientCreated: auditState.clientCreated };
+      }
+
+      if (found.status !== LeadStatus.QUALIFIED) {
+        throw new LeadError('LEAD_CONFLICT', CONVERSION_STALE_MESSAGE);
+      }
+
+      // Client duplicate/link validation (D-024 §3/§6d) — always reruns
+      // inside the transaction against the Lead's own current contact
+      // fields, never the pre-transaction check's stale snapshot.
+      const clientMatches = await repository.findDuplicateClientMatches(tx, {
+        normalizedEmail: found.normalizedEmail ?? undefined,
+        normalizedPhone: found.normalizedPhone ?? undefined,
+      });
+
+      let client: repository.ClientSummary;
+      let clientCreated: boolean;
+
+      if (!input.clientId) {
+        // Any match at all — accessible or restricted — blocks creation
+        // (D-024 §3): conversion never auto-selects among matches, and a
+        // TRAVEL_CONSULTANT cannot bypass a restricted match by creating a
+        // duplicate.
+        if (clientMatches.length > 0) {
+          throw new LeadError('CLIENT_MATCH_REQUIRES_LINK', CLIENT_MATCH_MESSAGE);
+        }
+
+        client = await repository.createClientFromLead(tx, {
+          id: randomUUID(),
+          fullName: found.fullName,
+          email: found.email,
+          phone: found.phone,
+          normalizedEmail: found.normalizedEmail,
+          normalizedPhone: found.normalizedPhone,
+        });
+        clientCreated = true;
+      } else {
+        // The TRAVEL_CONSULTANT Client-assignment authorization was already
+        // rechecked above, before the idempotent-replay branch — not
+        // repeated here.
+        const matched = clientMatches.find((match) => match.id === input.clientId);
+        if (!matched) {
+          throw new LeadError('CLIENT_LINK_NOT_AVAILABLE', CLIENT_LINK_MESSAGE);
+        }
+
+        // Linking never updates the existing Client's own fields (D-024
+        // §4) — the match's own fullName is the summary returned.
+        client = { id: matched.id, fullName: matched.fullName };
+        clientCreated = false;
+      }
+
+      // Assignment inheritance (D-024 §5): only on create-new, only when
+      // the Lead has an active assignee, and never ends or mutates the
+      // Lead's own assignment.
+      if (clientCreated && leadActiveAssignment) {
+        const assignment = await assignmentRepository.createAssignment(tx, {
+          id: randomUUID(),
+          assignedStaffId: leadActiveAssignment.assignedStaffId,
+          assignedByUserId: leadActor.id,
+          clientId: client.id,
+        });
+
+        await assignmentRepository.insertAuditLog(tx, {
+          actorId: leadActor.id,
+          action: ASSIGNMENT_AUDIT_ACTIONS.CLIENT_ASSIGNED,
+          entityType: ASSIGNMENT_AUDIT_ENTITY_TYPE.CLIENT,
+          entityId: client.id,
+          afterState: sanitizeAssignmentSnapshot(assignment),
+        });
+      }
+
+      const updatedLead = await repository.convertLeadWithHistory(tx, {
+        id,
+        clientId: client.id,
+        changedByUserId: leadActor.id,
+      });
+
+      if (clientCreated) {
+        await repository.insertAuditLog(tx, {
+          actorId: leadActor.id,
+          action: LEAD_AUDIT_ACTIONS.CLIENT_CREATED,
+          entityType: CLIENT_ENTITY_TYPE,
+          entityId: client.id,
+          afterState: sanitizeClientCreatedSnapshot({
+            sourceLeadId: id,
+            email: found.email,
+            phone: found.phone,
+          }),
+        });
+      }
+
+      await repository.insertAuditLog(tx, {
+        actorId: leadActor.id,
+        action: LEAD_AUDIT_ACTIONS.LEAD_CONVERTED_TO_CLIENT,
+        entityType: LEAD_AUDIT_ENTITY_TYPE,
+        entityId: id,
+        afterState: sanitizeLeadConversionSnapshot({ clientId: client.id, clientCreated }),
+      });
+
+      return { lead: updatedLead, client, clientCreated };
+    });
+  } catch (error) {
+    if (error instanceof LeadError) {
+      throw error;
+    }
+    if (isKnownConflict(error)) {
+      throw new LeadError('LEAD_CONFLICT', CONVERSION_CONFLICT_MESSAGE);
+    }
+    throw error;
+  }
+}
+
+export type AccessibleConversionCandidate = {
+  id: string;
+  fullName: string;
+  matchedOn: ('EMAIL' | 'PHONE')[];
+};
+
+export type ConversionOptions = {
+  accessibleMatches: AccessibleConversionCandidate[];
+  restrictedMatchDetected: boolean;
+};
+
+/**
+ * Read-only conversion-options read (D-024 §10), powering the Lead-detail
+ * conversion panel. Re-runs `convertLead`'s own eligibility (Section 2) and
+ * Client duplicate-matching (Section 3) logic in read-only form — never a
+ * transaction, never a write — always against the live `prisma` singleton,
+ * matching `getLeadById`'s own non-transactional-read precedent. Unlike
+ * `findDuplicateMatches` (used by `createLead`/`updateLead`), this checks
+ * only Client-type matches, never Lead-type ones: D-024 §3 re-runs *Client*
+ * duplicate detection exclusively, using the Lead's own current contact
+ * fields (never a resubmitted value). Returns only what Section 3 already
+ * authorizes exposing — each accessible candidate's `id`/`fullName`/matched
+ * channel(s) — collapsing every inaccessible match into a single
+ * `restrictedMatchDetected: true` flag that never reveals its id, name, or
+ * count, mirroring `findDuplicateMatches`'s existing visibility-shaping
+ * discipline. Throws `CONVERSION_NOT_ELIGIBLE` when the Lead's current
+ * status is not `QUALIFIED` (D-024 §9) — distinct from the mutation's own
+ * `LEAD_CONFLICT` concurrency-conflict code, since this is a plain read
+ * with no `expectedStatus` to be stale against.
+ */
+export async function getConversionOptions(
+  actor: AuthenticatedUser,
+  id: string,
+): Promise<ConversionOptions> {
+  const leadActor = assertLeadActor(actor);
+
+  const access = await canAccessLead(actor, id);
+  if (!access.allowed) {
+    throw notFoundOrForbidden(leadActor);
+  }
+
+  const found = await repository.findLeadById(prisma, id);
+  if (!found) {
+    throw notFoundOrForbidden(leadActor);
+  }
+
+  if (found.status !== LeadStatus.QUALIFIED) {
+    throw new LeadError('CONVERSION_NOT_ELIGIBLE', CONVERSION_STALE_MESSAGE);
+  }
+
+  const clientMatches = await repository.findDuplicateClientMatches(prisma, {
+    normalizedEmail: found.normalizedEmail ?? undefined,
+    normalizedPhone: found.normalizedPhone ?? undefined,
+  });
+
+  const accessibleMatches: AccessibleConversionCandidate[] = [];
+  let restrictedMatchDetected = false;
+
+  for (const match of clientMatches) {
+    const clientAccess = await canAccessClient(actor, match.id);
+    if (clientAccess.allowed) {
+      accessibleMatches.push({
+        id: match.id,
+        fullName: match.fullName,
+        matchedOn: match.matchedOn,
+      });
+    } else {
+      restrictedMatchDetected = true;
+    }
+  }
+
+  return { accessibleMatches, restrictedMatchDetected };
 }
