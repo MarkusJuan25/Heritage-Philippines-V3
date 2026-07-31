@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { normalizeEmail, normalizePhone } from './normalize';
+import { normalizeEmail, normalizePhone } from './contact-normalization';
 
 describe('normalizeEmail', () => {
   it('trims and lowercases', () => {

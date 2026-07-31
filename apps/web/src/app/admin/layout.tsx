@@ -3,9 +3,17 @@ import { redirect } from 'next/navigation';
 
 import { authorize } from '@/lib/auth/authorize';
 import { getCurrentUser } from '@/lib/auth/guards';
+import type { AppRole } from '@/lib/auth/roles';
 import { STAFF_ROLES } from '@/lib/auth/roles';
 
 import { SignOutButton } from '@/app/dashboard/sign-out-button';
+
+// D-025 §2's Client-management role boundary, applied to navigation
+// visibility itself: unlike the existing Leads link (shown to every staff
+// role, relying on that page's own Layer 3 check to deny an excluded role),
+// the Clients link must not even be exposed to a role D-025 never
+// authorizes for Client management.
+const CLIENT_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
 
 // Layer 2 of D-023 §2's defense-in-depth authorization: independently
 // resolves the real, database-backed authenticated user via the existing
@@ -68,6 +76,11 @@ export default async function AdminLayout({
             <li>
               <Link href="/admin/leads">Leads</Link>
             </li>
+            {CLIENT_MANAGEMENT_ROLES.includes(user.role) ? (
+              <li>
+                <Link href="/admin/clients">Clients</Link>
+              </li>
+            ) : null}
           </ul>
         </nav>
         <SignOutButton />

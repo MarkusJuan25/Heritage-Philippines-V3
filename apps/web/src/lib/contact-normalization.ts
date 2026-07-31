@@ -25,7 +25,7 @@ const NON_DIGIT_PATTERN = /\D/g;
  *
  * `"0917 123 4567"`, `"+63 917 123 4567"`, `"0063 917 123 4567"`, and
  * `"9171234567"` must all normalize to `"639171234567"` — see
- * normalize.test.ts for the exhaustive equivalence assertions.
+ * contact-normalization.test.ts for the exhaustive equivalence assertions.
  */
 export function normalizePhone(phone: string): string {
   const digitsOnly = phone.replace(NON_DIGIT_PATTERN, '');

@@ -8,9 +8,9 @@ import type { AppRole } from '@/lib/auth/roles';
 import { listLeadsQuerySchema } from '@/features/leads/schemas';
 import { listLeads } from '@/features/leads/service';
 
+import { Pagination } from '../_components/Pagination';
 import { LeadFilters } from './_components/LeadFilters';
 import { LeadTable } from './_components/LeadTable';
-import { Pagination } from './_components/Pagination';
 import styles from './leads.module.css';
 
 // Layer 3 of D-023 §2's defense-in-depth authorization: independently

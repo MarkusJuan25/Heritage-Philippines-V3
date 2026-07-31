@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { LeadStatus, Prisma } from '@/generated/prisma/client';
+import { normalizeEmail, normalizePhone } from '@/lib/contact-normalization';
 import { prisma } from '@/lib/db';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
@@ -23,7 +24,6 @@ import {
   sanitizeLeadUpdateSnapshot,
 } from './audit';
 import { LeadError } from './errors';
-import { normalizeEmail, normalizePhone } from './normalize';
 import * as repository from './repository';
 import type {
   LeadActor,

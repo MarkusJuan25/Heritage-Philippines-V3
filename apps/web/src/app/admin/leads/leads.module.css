@@ -109,19 +109,6 @@
   }
 }
 
-.pagination {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  margin-top: 1rem;
-  flex-wrap: wrap;
-}
-
-.pageInfo {
-  font-size: 0.9rem;
-  color: #555;
-}
-
 .emptyState,
 .errorState {
   padding: 1.5rem;

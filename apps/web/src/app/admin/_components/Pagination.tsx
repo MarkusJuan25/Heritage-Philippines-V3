@@ -1,6 +1,6 @@
 import Link from 'next/link';
 
-import styles from '../leads.module.css';
+import styles from './Pagination.module.css';
 
 export type PaginationProps = {
   page: number;
@@ -8,9 +8,10 @@ export type PaginationProps = {
   total: number;
   /** Builds the href for a given target page — the caller decides which
    * other query parameters (filters, etc.) to preserve, keeping this
-   * component reusable across the Lead list and a Lead's status history
-   * (D-023 §9: "List filters and pagination live in URL search
-   * parameters"). */
+   * component reusable across the Lead list, a Lead's status history, and
+   * the Client list (D-023 §9: "List filters and pagination live in URL
+   * search parameters"; D-025 §10: shared across Lead and Client list
+   * pages). */
   buildHref: (page: number) => string;
 };
 
