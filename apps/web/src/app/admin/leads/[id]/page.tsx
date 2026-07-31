@@ -10,9 +10,9 @@ import { leadIdParamSchema, listLeadStatusHistoryQuerySchema } from '@/features/
 import { getConversionOptions, getLeadById, getLeadStatusHistory } from '@/features/leads/service';
 import { getTransitionOutcome, isReasonRequired } from '@/features/leads/transitions';
 
+import { Pagination } from '../../_components/Pagination';
 import { LEAD_STATUS_VALUES } from '../_components/leadStatusLabels';
 import { LeadStatusBadge } from '../_components/LeadStatusBadge';
-import { Pagination } from '../_components/Pagination';
 import { StatusHistoryTimeline } from '../_components/StatusHistoryTimeline';
 import styles from '../leads.module.css';
 import { ConvertToClientPanel } from './_components/ConvertToClientPanel';

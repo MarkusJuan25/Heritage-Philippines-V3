@@ -1,0 +1,16 @@
+/* Styling for the shared admin Pagination component (D-025 §10). Relocated
+   from admin/leads/leads.module.css's identical .pagination/.pageInfo rules
+   — previously duplicated in admin/clients/clients.module.css too. */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.pageInfo {
+  font-size: 0.9rem;
+  color: #555;
+}

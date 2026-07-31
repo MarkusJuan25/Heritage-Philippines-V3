@@ -97,8 +97,8 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
   let convertLead: (typeof import('./service'))['convertLead'];
   let getConversionOptions: (typeof import('./service'))['getConversionOptions'];
   let LeadError: (typeof import('./errors'))['LeadError'];
-  let normalizeEmail: (typeof import('./normalize'))['normalizeEmail'];
-  let normalizePhone: (typeof import('./normalize'))['normalizePhone'];
+  let normalizeEmail: (typeof import('@/lib/contact-normalization'))['normalizeEmail'];
+  let normalizePhone: (typeof import('@/lib/contact-normalization'))['normalizePhone'];
 
   let adminActor: AuthenticatedUser;
   let tcActor: AuthenticatedUser;
@@ -147,7 +147,7 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
       getConversionOptions,
     } = await import('./service'));
     ({ LeadError } = await import('./errors'));
-    ({ normalizeEmail, normalizePhone } = await import('./normalize'));
+    ({ normalizeEmail, normalizePhone } = await import('@/lib/contact-normalization'));
 
     const rows = await prisma.$queryRaw<{ current_database: string }[]>`SELECT current_database()`;
     if (rows[0]?.current_database !== REQUIRED_TEST_DATABASE_NAME) {
