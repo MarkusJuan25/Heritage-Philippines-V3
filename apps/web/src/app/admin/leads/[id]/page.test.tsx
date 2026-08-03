@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
 
 const { getCurrentUserMock } = vi.hoisted(() => ({ getCurrentUserMock: vi.fn() }));
@@ -78,6 +79,16 @@ function searchParams(
   return Promise.resolve(values);
 }
 
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  } as Response;
+}
+
+let fetchMock: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
   vi.clearAllMocks();
   getLeadStatusHistoryMock.mockResolvedValue({ items: [], page: 1, pageSize: 20, total: 0 });
@@ -93,9 +104,24 @@ beforeEach(() => {
   redirectMock.mockImplementation((url: string) => {
     throw new Error(`REDIRECT:${url}`);
   });
+  // LeadAssignmentPanel (rendered by this page, D-026 §10) fetches the
+  // eligible Travel Consultant list on mount for an ADMIN_MANAGER actor —
+  // stubbed globally here, mirroring admin/clients/[id]/page.test.tsx's
+  // identical precedent, so every existing test unrelated to that panel's
+  // own behavior still renders deterministically, with a safe empty
+  // default a test can override. No other component rendered by this page
+  // (EditLeadForm, StatusTransitionPanel, ConvertToClientPanel) issues a
+  // `fetch` merely by rendering — only on a user-driven submit none of
+  // these tests perform — so this default cannot mask an unrelated
+  // request.
+  fetchMock = vi
+    .fn()
+    .mockResolvedValue(jsonResponse(200, { items: [], page: 1, pageSize: 100, total: 0 }));
+  vi.stubGlobal('fetch', fetchMock);
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.resetAllMocks();
 });
 
@@ -428,6 +454,145 @@ describe('AdminLeadDetailPage', () => {
 
       expect(getConversionOptionsMock).not.toHaveBeenCalled();
       expect(screen.queryByText('Convert to Client')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Stage 2/3 — LeadAssignmentPanel wiring (D-026 §2/§3/§10)', () => {
+    it('renders the interactive assignment panel for ADMIN_MANAGER, requesting the first eligible-consultant page', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ assignment: null }));
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          items: [{ id: 'tc-1', name: 'Maria Santos', email: 'maria@example.test' }],
+          page: 1,
+          pageSize: 100,
+          total: 1,
+        }),
+      );
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(screen.getByText('Assigned Consultant:')).toBeInTheDocument();
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Assign to' })).toBeInTheDocument(),
+      );
+      expect(screen.getByRole('button', { name: 'Assign' })).toBeInTheDocument();
+      // The static "Assigned Consultant" definition-list term is gone —
+      // only LeadAssignmentPanel's own "Assigned Consultant:" summary line
+      // remains.
+      const dtLabels = Array.from(document.querySelectorAll('dt')).map((dt) => dt.textContent);
+      expect(dtLabels).not.toContain('Assigned Consultant');
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/assignments/travel-consultants?page=1&pageSize=100',
+      );
+    });
+
+    it('renders only a read-only assignment summary for TRAVEL_CONSULTANT, with no mutation controls and no eligible-list fetch', async () => {
+      getCurrentUserMock.mockResolvedValue({ ...ADMIN_MANAGER, role: 'TRAVEL_CONSULTANT' });
+      getLeadByIdMock.mockResolvedValue(
+        lead({ assignment: { staffId: 'tc-1', staffName: 'Ana Reyes' } }),
+      );
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      expect(screen.getByText('Assigned Consultant:')).toBeInTheDocument();
+      expect(screen.getByText('Ana Reyes')).toBeInTheDocument();
+      // StatusTransitionPanel's own status-change `<select>` legitimately
+      // renders for TRAVEL_CONSULTANT too (status transitions are not
+      // Admin-only) — scoped here to the assignment panel's own control by
+      // accessible name, never a blanket "no combobox anywhere" check.
+      expect(screen.queryByRole('combobox', { name: 'Assign to' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Assign' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Reassign' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'End assignment' })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Reason for reassignment')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Reason for ending assignment')).not.toBeInTheDocument();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('passes the exact current assignment returned by getLeadById into LeadAssignmentPanel', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(
+        lead({ assignment: { staffId: 'tc-1', staffName: 'Ana Reyes' } }),
+      );
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      // An End Assignment control only renders when a current assignment
+      // exists, proving `currentAssignment` reached the panel unmodified —
+      // and the confirmed name is the exact one `getLeadById` returned.
+      expect(screen.getByText('Ana Reyes')).toBeInTheDocument();
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'End assignment' })).toBeInTheDocument(),
+      );
+    });
+
+    it('threads the resolved route Lead ID into the assignment mutation request', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(lead({ assignment: null }));
+      fetchMock.mockImplementation((url: string) => {
+        if (url.startsWith('/api/assignments/travel-consultants')) {
+          return Promise.resolve(
+            jsonResponse(200, {
+              items: [{ id: 'tc-1', name: 'Maria Santos', email: 'maria@example.test' }],
+              page: 1,
+              pageSize: 100,
+              total: 1,
+            }),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(200, {
+            assignment: {
+              id: 'assignment-1',
+              assignedStaffId: 'tc-1',
+              assignedByUserId: 'admin-1',
+              leadId: LEAD_ID,
+              clientId: null,
+              bookingId: null,
+              createdAt: '2026-07-23T00:00:00.000Z',
+              updatedAt: '2026-07-23T00:00:00.000Z',
+              endedAt: null,
+            },
+          }),
+        );
+      });
+      const user = userEvent.setup();
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      await waitFor(() => expect(screen.getByLabelText('Assign to')).toBeInTheDocument());
+      await user.selectOptions(screen.getByLabelText('Assign to'), 'tc-1');
+      await user.click(screen.getByRole('button', { name: 'Assign' }));
+
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          `/api/leads/${LEAD_ID}/assignment`,
+          expect.objectContaining({ method: 'PUT' }),
+        ),
+      );
+    });
+
+    it('keeps ADMIN_MANAGER assignment controls interactive for a CONVERTED_TO_CLIENT Lead (D-026 §3)', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getLeadByIdMock.mockResolvedValue(
+        lead({
+          status: 'CONVERTED_TO_CLIENT',
+          assignment: { staffId: 'tc-1', staffName: 'Ana Reyes' },
+        }),
+      );
+
+      const jsx = await AdminLeadDetailPage({ params: params(), searchParams: searchParams() });
+      render(jsx);
+
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'End assignment' })).toBeInTheDocument(),
+      );
+      expect(screen.getByRole('button', { name: 'End assignment' })).not.toBeDisabled();
     });
   });
 });
