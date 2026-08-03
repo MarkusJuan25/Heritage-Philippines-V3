@@ -17,6 +17,7 @@ import { StatusHistoryTimeline } from '../_components/StatusHistoryTimeline';
 import styles from '../leads.module.css';
 import { ConvertToClientPanel } from './_components/ConvertToClientPanel';
 import { EditLeadForm } from './_components/EditLeadForm';
+import { LeadAssignmentPanel } from './_components/LeadAssignmentPanel';
 import { StatusTransitionPanel } from './_components/StatusTransitionPanel';
 
 // Layer 3 of D-023 §2's defense-in-depth authorization — identical to
@@ -29,20 +30,22 @@ type PageSearchParams = Promise<{ [key: string]: string | string[] | undefined }
 
 /**
  * Lead detail (D-023 §4's `/admin/leads/[id]`): read-only summary fields,
- * status history, ordinary-field editing (`EditLeadForm`), and lifecycle
- * status-transition controls (`StatusTransitionPanel`). Assignment
- * management remains a separate, later stage — this page still has no
- * assignment-change controls. Calls `getLeadById` and
- * `getLeadStatusHistory` (application services, never repositories)
+ * status history, ordinary-field editing (`EditLeadForm`), lifecycle
+ * status-transition controls (`StatusTransitionPanel`), and Lead
+ * assignment management (`LeadAssignmentPanel`, D-026). Calls `getLeadById`
+ * and `getLeadStatusHistory` (application services, never repositories)
  * directly, per D-023 §9. `LEAD_NOT_FOUND`/`LEAD_FORBIDDEN` are handled
  * explicitly inline, preserving D-022 §8's anti-enumeration property
  * exactly as the service layer already shapes it — this page never adds
  * its own logic to distinguish "missing" from "inaccessible" beyond what
  * `getLeadById` itself returns. Any other error bubbles to this route
- * segment's `error.tsx` boundary. Both `EditLeadForm` and
- * `StatusTransitionPanel` call the existing, unchanged `PATCH
- * /api/leads/[id]` and `PUT /api/leads/[id]/status` routes directly from
- * the browser — this page performs no internal server-side HTTP fetch.
+ * segment's `error.tsx` boundary. `EditLeadForm`, `StatusTransitionPanel`,
+ * and `LeadAssignmentPanel` each call their own existing, unchanged API
+ * routes directly from the browser — this page performs no internal
+ * server-side HTTP fetch. `LeadAssignmentPanel` receives `lead.assignment`
+ * exactly as `getLeadById` returns it (D-026 §10) — never reconstructed or
+ * transformed here — and is never conditioned on `lead.status`, including
+ * `CONVERTED_TO_CLIENT` (D-026 §3, a deliberate, binding scope decision).
  */
 export default async function AdminLeadDetailPage({
   params,
@@ -175,10 +178,6 @@ export default async function AdminLeadDetailPage({
 
       <dl className={styles.detailFields}>
         <div className={styles.detailField}>
-          <dt>Assigned Consultant</dt>
-          <dd>{lead.assignment ? lead.assignment.staffName : 'Unassigned'}</dd>
-        </div>
-        <div className={styles.detailField}>
           <dt>Created</dt>
           <dd>
             <time dateTime={lead.createdAt.toISOString()}>
@@ -195,6 +194,8 @@ export default async function AdminLeadDetailPage({
           </dd>
         </div>
       </dl>
+
+      <LeadAssignmentPanel leadId={leadId} role={user.role} currentAssignment={lead.assignment} />
 
       <h2>Edit Lead</h2>
       <EditLeadForm
