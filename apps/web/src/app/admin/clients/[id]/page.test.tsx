@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 const { getCurrentUserMock } = vi.hoisted(() => ({ getCurrentUserMock: vi.fn() }));
@@ -70,6 +70,16 @@ function params(id = CLIENT_ID): Promise<{ id: string }> {
   return Promise.resolve({ id });
 }
 
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  } as Response;
+}
+
+let fetchMock: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
   vi.clearAllMocks();
   // `vi.resetAllMocks()` in `afterEach` below strips every mock's
@@ -80,9 +90,19 @@ beforeEach(() => {
   redirectMock.mockImplementation((url: string) => {
     throw new Error(`REDIRECT:${url}`);
   });
+  // ClientAssignmentPanel (rendered by this page) fetches the eligible
+  // Travel Consultant list on mount for an ADMIN_MANAGER actor — stubbed
+  // globally here so every existing test unrelated to that panel's own
+  // behavior still renders deterministically, with a safe empty default a
+  // test can override.
+  fetchMock = vi
+    .fn()
+    .mockResolvedValue(jsonResponse(200, { items: [], page: 1, pageSize: 100, total: 0 }));
+  vi.stubGlobal('fetch', fetchMock);
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.resetAllMocks();
 });
 
@@ -313,5 +333,69 @@ describe('AdminClientDetailPage', () => {
 
     expect(screen.queryByText('normalized-marker@example.com')).not.toBeInTheDocument();
     expect(screen.queryByText('+639170000000')).not.toBeInTheDocument();
+  });
+
+  describe('Stage F4 — ClientAssignmentPanel wiring (D-025 §2/§10)', () => {
+    it('renders the interactive assignment panel for ADMIN_MANAGER, with the eligible list loaded', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getClientByIdMock.mockResolvedValue(clientDetail({ assignment: null }));
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, {
+          items: [{ id: 'tc-1', name: 'Maria Santos', email: 'maria@example.test' }],
+          page: 1,
+          pageSize: 100,
+          total: 1,
+        }),
+      );
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.getByText('Assigned Consultant:')).toBeInTheDocument();
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Assign to' })).toBeInTheDocument(),
+      );
+      expect(screen.getByRole('button', { name: 'Assign' })).toBeInTheDocument();
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/assignments/travel-consultants?page=1&pageSize=100',
+      );
+    });
+
+    it('renders only a read-only assignment summary for TRAVEL_CONSULTANT, with no mutation controls and no eligible-list fetch', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getClientByIdMock.mockResolvedValue(
+        clientDetail({ assignment: { staffId: 'tc-1', staffName: 'Ana Reyes' } }),
+      );
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.getByText('Assigned Consultant:')).toBeInTheDocument();
+      expect(screen.getByText('Ana Reyes')).toBeInTheDocument();
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /assign/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /end assignment/i })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/reason/i)).not.toBeInTheDocument();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('passes the authoritative current assignment and the actor role into ClientAssignmentPanel', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getClientByIdMock.mockResolvedValue(
+        clientDetail({ assignment: { staffId: 'tc-1', staffName: 'Ana Reyes' } }),
+      );
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      // ADMIN_MANAGER's own role reaches the interactive branch (an End
+      // Assignment control only renders when a current assignment exists,
+      // proving `currentAssignment` reached the panel), and the confirmed
+      // name is the exact one `getClientById` returned.
+      expect(screen.getByText('Ana Reyes')).toBeInTheDocument();
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'End assignment' })).toBeInTheDocument(),
+      );
+    });
   });
 });

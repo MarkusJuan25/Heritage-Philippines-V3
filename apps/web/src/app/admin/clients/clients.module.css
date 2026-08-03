@@ -250,3 +250,14 @@
   font-style: italic;
   color: #555;
 }
+
+/* ClientAssignmentPanel (D-025 §2/§10). Mirrors
+   admin/leads/leads.module.css's identical .statusPanel wrapper exactly —
+   this feature keeps its own copy rather than sharing one cross-feature
+   class. */
+.assignmentPanel {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+}
