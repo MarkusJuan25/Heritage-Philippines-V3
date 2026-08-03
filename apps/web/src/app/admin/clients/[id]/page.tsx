@@ -10,6 +10,7 @@ import { clientIdParamSchema } from '@/features/clients/schemas';
 import { getClientById } from '@/features/clients/service';
 
 import styles from '../clients.module.css';
+import { ClientAssignmentPanel } from './_components/ClientAssignmentPanel';
 import { EditClientForm } from './_components/EditClientForm';
 
 // Layer 3 of the established defense-in-depth authorization pattern
@@ -22,10 +23,10 @@ const ALLOWED_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT']
 type PageParams = Promise<{ id: string }>;
 
 /**
- * Read-only Client detail (D-025 §4's `/admin/clients/[id]`, Stage F2). A
- * Server Component that authenticates the actor, validates the route `id`
- * through `clientIdParamSchema`, and calls the `getClientById` application
- * service directly — never a repository, never an internal fetch to `GET
+ * Client detail (D-025 §4/§10's `/admin/clients/[id]`). A Server Component
+ * that authenticates the actor, validates the route `id` through
+ * `clientIdParamSchema`, and calls the `getClientById` application service
+ * directly — never a repository, never an internal fetch to `GET
  * /api/clients/[id]`. `CLIENT_NOT_FOUND`/`CLIENT_FORBIDDEN` are handled
  * explicitly inline, preserving D-025 §7/§9's anti-enumeration property
  * exactly as the service layer already shapes it (both render the identical
@@ -35,15 +36,19 @@ type PageParams = Promise<{ id: string }>;
  * error boundary. `originatingLeads` is rendered exactly as `getClientById`
  * returns it — already ordered and actor-scoped by the service/repository
  * layer (D-025 §2/§4) — this page never re-queries, re-sorts, re-filters,
- * or reveals a hidden total. The current assignment and the Created/Last
- * updated timestamps remain read-only here; every editable field
- * (fullName, email, phone, address, nationality, dateOfBirth,
- * emergencyContact, notes) is rendered and edited by `EditClientForm`
- * instead (Stage F3, D-025 §5/§10), seeded from this same authoritative
- * `client` read — never omitted or collapsed with another field, and
- * `normalizedEmail`/`normalizedPhone` are never passed to it because
- * `ClientDetailRecord` does not carry them in the first place (D-025
- * §4/§9). Assignment controls remain out of scope for this stage.
+ * or reveals a hidden total. The Created/Last updated timestamps remain
+ * read-only here; every editable field (fullName, email, phone, address,
+ * nationality, dateOfBirth, emergencyContact, notes) is rendered and edited
+ * by `EditClientForm` instead (D-025 §5/§10), seeded from this same
+ * authoritative `client` read — never omitted or collapsed with another
+ * field, and `normalizedEmail`/`normalizedPhone` are never passed to it
+ * because `ClientDetailRecord` does not carry them in the first place
+ * (D-025 §4/§9). The current assignment is rendered and, for `ADMIN_MANAGER`
+ * only, managed by `ClientAssignmentPanel` (D-025 §2/§10), which receives
+ * the authenticated actor's own `role` and this same `client.assignment` as
+ * its authoritative starting state — a `TRAVEL_CONSULTANT` actor reaches
+ * that same component but it renders read-only for them, with no
+ * interactive control of any kind.
  */
 export default async function AdminClientDetailPage({ params }: { params: PageParams }) {
   const user = await getCurrentUser();
@@ -101,10 +106,6 @@ export default async function AdminClientDetailPage({ params }: { params: PagePa
 
       <dl className={styles.detailFields}>
         <div className={styles.detailField}>
-          <dt>Assigned Consultant</dt>
-          <dd>{client.assignment ? client.assignment.staffName : 'Unassigned'}</dd>
-        </div>
-        <div className={styles.detailField}>
           <dt>Created</dt>
           <dd>
             <time dateTime={client.createdAt.toISOString()}>
@@ -121,6 +122,12 @@ export default async function AdminClientDetailPage({ params }: { params: PagePa
           </dd>
         </div>
       </dl>
+
+      <ClientAssignmentPanel
+        clientId={clientId}
+        role={user.role}
+        currentAssignment={client.assignment}
+      />
 
       <h2>Edit Client</h2>
       <EditClientForm
