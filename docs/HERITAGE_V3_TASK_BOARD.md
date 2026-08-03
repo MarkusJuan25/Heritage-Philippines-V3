@@ -72,7 +72,7 @@ Tasks: confirm technical stack via an ADR (blueprint Section 16.2), environment 
 
 Tasks: dashboard overview, lead and inquiry management (with statuses, duplicate detection, and spam controls), client management, staff assignment, proposal / ROS authoring and versioning, recording externally received proposal responses per blueprint Section 9.1 (Accept, Decline, or Request Changes captured before the client portal exists in Phase 3, with response method, acting staff member, timestamp, and supporting evidence reference), booking management, activity logging.
 
-**Status:** Active since July 22, 2026. The Lead Management Core backend, Lead Management Admin UI, and explicit Lead-to-Client conversion are now implemented and verified per D-022, D-023, and D-024, including automated coverage across schema, audit, service, route, UI, and real-PostgreSQL integration tiers. Client management backend and UI, including the Client assignment-management UI and the wiring of `canAccessClient` into the new Client resource routes, are now implemented and verified per D-025, with the same automated coverage discipline. The Lead assignment-management UI, Proposal / ROS, Booking UI, and the admin-dashboard overview remain incomplete.
+**Status:** Active since July 22, 2026. The Lead Management Core backend, Lead Management Admin UI, and explicit Lead-to-Client conversion are now implemented and verified per D-022, D-023, and D-024, including automated coverage across schema, audit, service, route, UI, and real-PostgreSQL integration tiers. Client management backend and UI, including the Client assignment-management UI and the wiring of `canAccessClient` into the new Client resource routes, are now implemented and verified per D-025, with the same automated coverage discipline. The Lead Assignment Management UI is now implemented and verified per D-026, completing the combined Lead/Client staff-assignment-workflow checkpoint. Proposal / ROS, Booking UI, and the admin-dashboard overview remain incomplete.
 
 ### Checklist
 
@@ -83,7 +83,7 @@ Tasks: dashboard overview, lead and inquiry management (with statuses, duplicate
 - [x] Lead management admin UI
 - [x] Explicit Lead-to-Client conversion
 - [x] Client management backend and UI
-- [ ] Wire existing Lead/Client staff-assignment functionality (already implemented — `/api/leads/[id]/assignment`, `/api/clients/[id]/assignment`) into actual Lead/Client management workflows
+- [x] Wire existing Lead/Client staff-assignment functionality (already implemented — `/api/leads/[id]/assignment`, `/api/clients/[id]/assignment`) into actual Lead/Client management workflows
 - [x] Wire `canAccessLead`/`canAccessClient` (already implemented) into the new Lead/Client resource routes
 - [ ] Proposal / ROS authoring, versioning, and management UI
 - [ ] Recording externally received Accept/Decline/Request Changes responses (blueprint Section 9.1)
