@@ -1505,6 +1505,27 @@ model ProposalVersion {
 
   versionNumber Int
 
+  // The authored plain-text content of this version (D-027 §1). Nullable
+  // at the database level solely for safe-migration compatibility with any
+  // pre-existing row this repository's own code has never written — no
+  // application writer, service, route, UI, test, or seed script has ever
+  // existed for this column before this migration. This nullability is
+  // never permission for this checkpoint's own code to write a null or
+  // blank value: the Proposal service that will create and revise
+  // ProposalVersion rows is not implemented yet — a later stage of this
+  // checkpoint. Once implemented, it must require `content` to be present
+  // on every write it performs: a trimmed, non-blank, plain-text string of
+  // at most 20,000 characters. Until then, the database enforces only the
+  // non-blank half of that invariant, via migration
+  // `20260804013420_proposal_version_content`'s hand-added
+  // `proposal_version_content_nonblank` CHECK constraint (permits `NULL`,
+  // forbids an all-whitespace string); the 20,000-character maximum is
+  // application-layer validation only, never a database constraint.
+  // Always plain text — never interpreted as HTML or any other markup by
+  // any part of this checkpoint. Backfilling a legacy `NULL` row and adding
+  // a future `NOT NULL` constraint are both explicitly deferred.
+  content String?
+
   // The staff member who authored this specific version (Section 9: "A
   // Travel Consultant creates the initial ROS draft... each edit... creates
   // a new version"). `onDelete: Restrict`: never drop this attribution —
