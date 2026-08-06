@@ -1,0 +1,282 @@
+/* Shared styling for the Proposal / ROS list admin UI (D-027 Stage 7A). CSS
+   Modules, mirroring the established admin/clients/clients.module.css
+   precedent — no runtime CSS framework. Mobile-first: base rules target
+   narrow screens; wider layouts are progressively enhanced via the
+   min-width media query below (.claude/rules/frontend.md). */
+
+/* Visually hidden but still announced by assistive tech — used for the
+   table caption when a visible heading already labels the same content
+   (.claude/rules/frontend.md's accessible-names requirement). */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* List-page header: title only (D-027 §8 — no "Create Proposal" action
+   exists on this page). */
+.pageHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+/* Proposal list: stacked cards on narrow screens, a real table from tablet
+   width up (frontend.md's "Every dashboard and portal screen must be
+   usable on a phone" + "Paginate or virtualize long lists"). */
+.proposalCards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.proposalCard {
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.proposalCardRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* Labelled value pairs (Created/Proposal) inside a mobile card — a
+   semantic dl/dt/dd structure so each value's meaning is visible and
+   accessible without relying on column position alone (the desktop
+   table's scope="col" headers provide that for its own layout). */
+.proposalCardDetails {
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.proposalCardDetailRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.proposalCardDetailRow dt {
+  font-weight: 600;
+  margin: 0;
+}
+
+.proposalCardDetailRow dd {
+  margin: 0;
+  text-align: right;
+}
+
+.proposalTable {
+  display: none;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.proposalTable th,
+.proposalTable td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #e0e0e0;
+  vertical-align: top;
+}
+
+@media (min-width: 48rem) {
+  .proposalCards {
+    display: none;
+  }
+
+  .proposalTable {
+    display: table;
+  }
+}
+
+.emptyState,
+.errorState {
+  padding: 1.5rem;
+  border: 1px dashed #c0c0c0;
+  border-radius: 0.5rem;
+  text-align: center;
+}
+
+.errorState {
+  border-color: #c0392b;
+  color: #922b21;
+}
+
+/* Proposal detail (D-027 Stage 7B's /admin/proposals/[id]). Mirrors
+   admin/clients/clients.module.css's identical .detailFields/.detailField
+   structure — each feature keeps its own copy rather than sharing one
+   cross-feature module. Reused both for the top-level Proposal/Client
+   summary and, nested, for each version's own Created/Created-by pair. */
+.detailFields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+@media (min-width: 40rem) {
+  .detailFields {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.detailField dt {
+  font-size: 0.8rem;
+  color: #666;
+  margin: 0;
+}
+
+.detailField dd {
+  margin: 0.15rem 0 0;
+  font-size: 1rem;
+}
+
+/* Version history (D-027 §8): a vertical, mobile-first card list — no
+   table/card breakpoint switch is needed here, unlike the list page's
+   ProposalTable, since a single Proposal's version history is inherently a
+   short vertical sequence rather than a large tabular dataset. */
+.versionList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.versionItem {
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.versionHeader {
+  margin: 0 0 0.5rem;
+}
+
+.versionBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+/* Lifecycle state (Draft/Published/Superseded) and response state (No
+   response/Accepted/Declined/Changes requested) are two separate badges,
+   never collapsed into one combined label (D-027 §8). */
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid #999;
+  font-size: 0.8rem;
+}
+
+/* Plain-text content only — `white-space: pre-wrap` preserves the author's
+   line breaks without interpreting any HTML/Markdown. Never set via
+   `dangerouslySetInnerHTML`. */
+.versionContent {
+  white-space: pre-wrap;
+  margin: 0;
+  padding: 0.75rem;
+  background: #f7f7f7;
+  border-radius: 0.375rem;
+}
+
+/* Revision-creation panel (D-027 Stage 7D's CreateProposalRevisionPanel).
+   Genuinely new classes — no form-styling classes existed anywhere in this
+   file before this stage (Stage 7A/7B added only list/detail read-only
+   classes). Mirrors admin/clients/clients.module.css's identical
+   .assignmentPanel/.clientForm/.formAlert/.formSuccessAlert/.fieldError/
+   .formActions structure — each feature keeps its own copy rather than
+   sharing one cross-feature module. */
+.revisionPanel {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+}
+
+.revisionForm {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 32rem;
+}
+
+.revisionForm textarea {
+  font: inherit;
+  resize: vertical;
+}
+
+.formField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.formAlert {
+  padding: 0.75rem 1rem;
+  border: 1px solid #c0392b;
+  border-radius: 0.5rem;
+  color: #922b21;
+}
+
+.formSuccessAlert {
+  padding: 0.75rem 1rem;
+  border: 1px solid #1a7a3a;
+  border-radius: 0.5rem;
+  color: #1a7a3a;
+}
+
+.fieldError {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #c0392b;
+}
+
+.formActions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Per-version publish action (D-027 Stage 7E's
+   PublishProposalVersionButton), rendered inline inside each eligible
+   draft's .versionItem. Reuses .formAlert/.formSuccessAlert/.formActions
+   above as-is; this is the one genuinely new rule — bottom spacing so the
+   form doesn't sit flush against the version's Created/Created-by .dl that
+   follows it. */
+.publishAction {
+  margin-bottom: 0.75rem;
+}
+
+/* Per-version external-response-recording action (D-027 Stage 7F's
+   RecordProposalResponsePanel), rendered inline inside the current
+   client-visible version's .versionItem. Reuses .revisionForm/.formField/
+   .formAlert/.formSuccessAlert/.fieldError/.formActions above as-is — this
+   is the one genuinely new rule, mirroring .publishAction's identical
+   bottom-spacing purpose for this different per-version action. */
+.responseAction {
+  margin-bottom: 0.75rem;
+}

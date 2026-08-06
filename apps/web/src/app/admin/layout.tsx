@@ -15,6 +15,13 @@ import { SignOutButton } from '@/app/dashboard/sign-out-button';
 // authorizes for Client management.
 const CLIENT_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
 
+// D-027 §8's Proposal navigation visibility rule: "the same
+// ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'] role set already used for the
+// existing 'Clients' link" — kept as this feature's own copy rather than
+// reusing CLIENT_MANAGEMENT_ROLES, matching this codebase's established
+// per-feature-constant discipline.
+const PROPOSAL_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
+
 // Layer 2 of D-023 §2's defense-in-depth authorization: independently
 // resolves the real, database-backed authenticated user via the existing
 // getCurrentUser() guard — never trusting proxy.ts's cookie-presence-only
@@ -79,6 +86,11 @@ export default async function AdminLayout({
             {CLIENT_MANAGEMENT_ROLES.includes(user.role) ? (
               <li>
                 <Link href="/admin/clients">Clients</Link>
+              </li>
+            ) : null}
+            {PROPOSAL_MANAGEMENT_ROLES.includes(user.role) ? (
+              <li>
+                <Link href="/admin/proposals">Proposals</Link>
               </li>
             ) : null}
           </ul>
