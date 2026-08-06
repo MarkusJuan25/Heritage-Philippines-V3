@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
 
 const { getCurrentUserMock } = vi.hoisted(() => ({ getCurrentUserMock: vi.fn() }));
@@ -9,19 +10,23 @@ vi.mock('@/lib/auth/guards', () => ({ getCurrentUser: getCurrentUserMock }));
 const { getClientByIdMock } = vi.hoisted(() => ({ getClientByIdMock: vi.fn() }));
 vi.mock('@/features/clients/service', () => ({ getClientById: getClientByIdMock }));
 
-const { redirectMock, routerRefreshMock } = vi.hoisted(() => ({
+const { redirectMock, routerPushMock, routerRefreshMock } = vi.hoisted(() => ({
   redirectMock: vi.fn((url: string) => {
     throw new Error(`REDIRECT:${url}`);
   }),
+  routerPushMock: vi.fn(),
   routerRefreshMock: vi.fn(),
 }));
 // EditClientForm (rendered by this page) calls useRouter().refresh() on its
-// own client-side mutations — this page itself never calls it, but the
-// whole `next/navigation` module is replaced here, so both exports must be
-// provided (mirrors admin/leads/[id]/page.test.tsx's identical discipline).
+// own client-side mutations, and CreateProposalPanel (Stage 7C, rendered
+// for TRAVEL_CONSULTANT only) additionally calls useRouter().push() on a
+// successful submission — this page itself calls neither, but the whole
+// `next/navigation` module is replaced here, so every export any rendered
+// child component needs must be provided (mirrors
+// admin/leads/[id]/page.test.tsx's identical discipline).
 vi.mock('next/navigation', () => ({
   redirect: redirectMock,
-  useRouter: () => ({ refresh: routerRefreshMock }),
+  useRouter: () => ({ push: routerPushMock, refresh: routerRefreshMock }),
 }));
 
 // The real ClientError class — not mocked — so this page's own
@@ -396,6 +401,122 @@ describe('AdminClientDetailPage', () => {
       await waitFor(() =>
         expect(screen.getByRole('button', { name: 'End assignment' })).toBeInTheDocument(),
       );
+    });
+  });
+
+  describe('CreateProposalPanel wiring (D-027 §8, Stage 7C)', () => {
+    it('renders the Create Proposal / ROS panel for an authorized TRAVEL_CONSULTANT, wired to the resolved Client id', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getClientByIdMock.mockResolvedValue(clientDetail());
+      fetchMock.mockResolvedValue(
+        jsonResponse(201, { proposal: { id: 'proposal-1', clientId: CLIENT_ID }, version: {} }),
+      );
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.getByRole('heading', { name: 'Proposal / ROS' })).toBeInTheDocument();
+      const textarea = screen.getByLabelText('Proposal content');
+      fireEvent.change(textarea, { target: { value: 'Day 1: Arrival.' } });
+      await userEvent.setup().click(screen.getByRole('button', { name: 'Create Proposal / ROS' }));
+
+      // Proves the exact resolved Client id (this page's own already-
+      // validated `clientId`, never a user-entered value) is what the panel
+      // actually submits — not merely that the panel is present.
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith('/api/proposals', expect.anything()),
+      );
+      const call = fetchMock.mock.calls.find(([url]) => url === '/api/proposals');
+      const [, init] = call as [string, RequestInit];
+      const body = JSON.parse(init.body as string);
+      expect(body.clientId).toBe(CLIENT_ID);
+    });
+
+    it('does not render any Create Proposal form or button for ADMIN_MANAGER', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getClientByIdMock.mockResolvedValue(clientDetail());
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.queryByRole('heading', { name: 'Proposal / ROS' })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Proposal content')).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: 'Create Proposal / ROS' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it.each(['FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR', 'CLIENT'])(
+      'does not render the Create Proposal panel for excluded role %s',
+      async (role) => {
+        getCurrentUserMock.mockResolvedValue({ ...ADMIN_MANAGER, role });
+
+        const jsx = await AdminClientDetailPage({ params: params() });
+        render(jsx);
+
+        expect(screen.queryByRole('heading', { name: 'Proposal / ROS' })).not.toBeInTheDocument();
+        expect(screen.queryByLabelText('Proposal content')).not.toBeInTheDocument();
+      },
+    );
+
+    it('does not render the panel for a malformed Client id (not-found state)', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+
+      const jsx = await AdminClientDetailPage({ params: params('not-a-uuid') });
+      render(jsx);
+
+      expect(screen.queryByRole('heading', { name: 'Proposal / ROS' })).not.toBeInTheDocument();
+      expect(getClientByIdMock).not.toHaveBeenCalled();
+    });
+
+    it('does not render the panel when the Client is not found or forbidden', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getClientByIdMock.mockRejectedValue(
+        new ClientError('CLIENT_FORBIDDEN', 'You do not have access to this client.'),
+      );
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.queryByRole('heading', { name: 'Proposal / ROS' })).not.toBeInTheDocument();
+    });
+
+    it('does not render the panel and rethrows on an unexpected getClientById failure', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getClientByIdMock.mockRejectedValue(new Error('unexpected failure'));
+
+      await expect(AdminClientDetailPage({ params: params() })).rejects.toThrow(
+        'unexpected failure',
+      );
+    });
+
+    it('renders no revision-creation, publish, Accept, Decline, or Request Changes control anywhere on the page', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getClientByIdMock.mockResolvedValue(clientDetail());
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.queryByRole('button', { name: /publish/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /revision/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^accept$/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^decline$/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /request changes/i })).not.toBeInTheDocument();
+    });
+
+    it('never links to /admin/proposals/new and never renders a Client search/picker input', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getClientByIdMock.mockResolvedValue(clientDetail());
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      const links = screen.getAllByRole('link');
+      expect(links.every((link) => link.getAttribute('href') !== '/admin/proposals/new')).toBe(
+        true,
+      );
+      expect(screen.queryByRole('link', { name: /new proposal/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     });
   });
 });

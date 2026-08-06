@@ -11,6 +11,7 @@ import { getClientById } from '@/features/clients/service';
 
 import styles from '../clients.module.css';
 import { ClientAssignmentPanel } from './_components/ClientAssignmentPanel';
+import { CreateProposalPanel } from './_components/CreateProposalPanel';
 import { EditClientForm } from './_components/EditClientForm';
 
 // Layer 3 of the established defense-in-depth authorization pattern
@@ -48,7 +49,12 @@ type PageParams = Promise<{ id: string }>;
  * the authenticated actor's own `role` and this same `client.assignment` as
  * its authoritative starting state — a `TRAVEL_CONSULTANT` actor reaches
  * that same component but it renders read-only for them, with no
- * interactive control of any kind.
+ * interactive control of any kind. For a `TRAVEL_CONSULTANT` only,
+ * `CreateProposalPanel` (D-027 §8's sole first-Proposal creation entry
+ * point, Stage 7C) is additionally rendered, receiving this page's own
+ * already-validated `clientId` — never a Client search/picker of any kind.
+ * `ADMIN_MANAGER` never sees this panel at all (D-027 §3: Admin/Manager may
+ * not create a Proposal).
  */
 export default async function AdminClientDetailPage({ params }: { params: PageParams }) {
   const user = await getCurrentUser();
@@ -163,6 +169,8 @@ export default async function AdminClientDetailPage({ params }: { params: PagePa
           ))}
         </ul>
       )}
+
+      {user.role === 'TRAVEL_CONSULTANT' ? <CreateProposalPanel clientId={clientId} /> : null}
     </div>
   );
 }

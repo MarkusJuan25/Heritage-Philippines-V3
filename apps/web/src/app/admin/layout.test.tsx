@@ -87,4 +87,31 @@ describe('AdminLayout', () => {
       expect(screen.queryByRole('link', { name: 'Clients' })).not.toBeInTheDocument();
     },
   );
+
+  it.each(['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'])(
+    'renders a Proposals navigation link to /admin/proposals for role %s (D-027 §8)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.getByRole('link', { name: 'Proposals' })).toHaveAttribute(
+        'href',
+        '/admin/proposals',
+      );
+    },
+  );
+
+  it.each(['FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR'])(
+    'never renders a Proposals navigation link for excluded staff role %s (D-027 §8)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.queryByRole('link', { name: 'Proposals' })).not.toBeInTheDocument();
+    },
+  );
 });
