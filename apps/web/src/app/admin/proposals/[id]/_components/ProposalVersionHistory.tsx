@@ -1,6 +1,8 @@
+import { ProposalResponseType } from '@/generated/prisma/client';
 import type { ProposalDetailRecord } from '@/features/proposals/repository';
 
 import styles from '../../proposals.module.css';
+import { CreateBookingButton } from './CreateBookingButton';
 import { PublishProposalVersionButton } from './PublishProposalVersionButton';
 import { RecordProposalResponsePanel } from './RecordProposalResponsePanel';
 
@@ -76,6 +78,31 @@ function isEligibleForResponse(version: ProposalVersionEntry): boolean {
 }
 
 /**
+ * D-028 §6, Stage 2E: a version is eligible for the Create Booking action
+ * exactly when it carries an externally recorded response whose canonical
+ * `responseType` is `ProposalResponseType.ACCEPT` — the enum value itself,
+ * never `responseLabel`'s display-string comparison above (a deliberately
+ * separate predicate, matching `features/bookings/repository.ts`'s own
+ * `hasAcceptedAcceptance` eligibility check, `found.acceptance?.responseType
+ * === 'ACCEPT'`). No no-response, DECLINE, or REQUEST_CHANGES version is
+ * ever eligible.
+ *
+ * D-028 §6's second condition — "accessible to the current authorized
+ * actor under that page's own existing authorization" — requires no
+ * further check or prop here: `ProposalVersionHistory` is only ever
+ * rendered by `admin/proposals/[id]/page.tsx` after that page's own Layer 3
+ * `getProposalById` read has already succeeded for this exact actor and
+ * Proposal, so every version this function evaluates already belongs to an
+ * accessible Proposal by construction — the same invariant `canPublish`/
+ * `canRecordResponse` above rely on implicitly. No separate eligibility
+ * fetch is performed; `POST /api/bookings` remains the authoritative check
+ * at submission time.
+ */
+function isEligibleForCreateBooking(version: ProposalVersionEntry): boolean {
+  return version.acceptance?.responseType === ProposalResponseType.ACCEPT;
+}
+
+/**
  * Renders a Proposal's complete version history (D-027 §8) in exactly the
  * order supplied — this component never sorts or filters `versions` itself.
  * `features/proposals/repository.ts`'s `findProposalByIdForActor` already
@@ -117,6 +144,16 @@ function isEligibleForResponse(version: ProposalVersionEntry): boolean {
  * to an individual panel. Unlike publishing, response recording is never
  * gated to `TRAVEL_CONSULTANT` alone (D-027 §3's Section 9.1 capability is
  * shared by both roles).
+ *
+ * As of Stage 2E, a `CreateBookingButton` (D-028 §6) is additionally
+ * rendered per version for which `isEligibleForCreateBooking` above returns
+ * true — gated on the version's own `acceptance.responseType` alone, no
+ * `canX` prop from the caller, since eligibility's second condition (actor
+ * authorization) is already structurally guaranteed by this component only
+ * ever being rendered inside the page's own Layer 3-gated success path.
+ * Both `ADMIN_MANAGER` and `TRAVEL_CONSULTANT` see the identical control
+ * for an accepted version — Booking creation is not restricted to one role
+ * the way publishing is (D-028 §2).
  */
 export function ProposalVersionHistory({
   versions,
@@ -179,6 +216,9 @@ export function ProposalVersionHistory({
                   versionId={version.id}
                   versionNumber={version.versionNumber}
                 />
+              ) : null}
+              {isEligibleForCreateBooking(version) ? (
+                <CreateBookingButton proposalVersionId={version.id} />
               ) : null}
               <dl className={styles.detailFields}>
                 <div className={styles.detailField}>

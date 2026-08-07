@@ -22,6 +22,13 @@ const CLIENT_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CO
 // per-feature-constant discipline.
 const PROPOSAL_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
 
+// D-028 §3's Booking navigation visibility rule: the same
+// ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'] role set as Clients/Proposals,
+// kept as this feature's own dedicated constant rather than reusing either
+// of the above, matching this codebase's established per-feature-constant
+// discipline.
+const BOOKING_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
+
 // Layer 2 of D-023 §2's defense-in-depth authorization: independently
 // resolves the real, database-backed authenticated user via the existing
 // getCurrentUser() guard — never trusting proxy.ts's cookie-presence-only
@@ -91,6 +98,11 @@ export default async function AdminLayout({
             {PROPOSAL_MANAGEMENT_ROLES.includes(user.role) ? (
               <li>
                 <Link href="/admin/proposals">Proposals</Link>
+              </li>
+            ) : null}
+            {BOOKING_MANAGEMENT_ROLES.includes(user.role) ? (
+              <li>
+                <Link href="/admin/bookings">Bookings</Link>
               </li>
             ) : null}
           </ul>

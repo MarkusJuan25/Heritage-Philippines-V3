@@ -114,4 +114,31 @@ describe('AdminLayout', () => {
       expect(screen.queryByRole('link', { name: 'Proposals' })).not.toBeInTheDocument();
     },
   );
+
+  it.each(['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'])(
+    'renders a Bookings navigation link to /admin/bookings for role %s (D-028 §3)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.getByRole('link', { name: 'Bookings' })).toHaveAttribute(
+        'href',
+        '/admin/bookings',
+      );
+    },
+  );
+
+  it.each(['FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR'])(
+    'never renders a Bookings navigation link for excluded staff role %s (D-028 §3)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.queryByRole('link', { name: 'Bookings' })).not.toBeInTheDocument();
+    },
+  );
 });

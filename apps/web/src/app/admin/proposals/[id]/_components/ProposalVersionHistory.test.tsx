@@ -842,4 +842,165 @@ describe('ProposalVersionHistory', () => {
       expect(screen.getByText('Response: No response')).toBeInTheDocument();
     });
   });
+
+  describe('Create Booking action (D-028 §6, Stage 2E)', () => {
+    function acceptedAcceptance(
+      overrides: Partial<NonNullable<ProposalVersionEntry['acceptance']>> = {},
+    ) {
+      return {
+        id: 'acc-1',
+        proposalVersionId: 'v1',
+        responseType: 'ACCEPT' as const,
+        respondedAt: new Date('2026-08-02T00:00:00Z'),
+        recordedByStaffUserId: 'tc-1',
+        responseMethod: 'Phone',
+        evidenceReference: 'call-log-123',
+        createdAt: new Date('2026-08-02T00:00:00Z'),
+        ...overrides,
+      };
+    }
+
+    it('renders the Create Booking action for a version with an ACCEPT response', () => {
+      render(
+        <ProposalVersionHistory
+          versions={[version({ id: 'v1', versionNumber: 1, acceptance: acceptedAcceptance() })]}
+          canPublish={false}
+          canRecordResponse={false}
+        />,
+      );
+
+      expect(screen.getByRole('button', { name: 'Create Booking' })).toBeInTheDocument();
+    });
+
+    it('renders no Create Booking action for a version with no recorded response', () => {
+      render(
+        <ProposalVersionHistory
+          versions={[version({ id: 'v1', versionNumber: 1, acceptance: null })]}
+          canPublish={false}
+          canRecordResponse={false}
+        />,
+      );
+
+      expect(screen.queryByRole('button', { name: 'Create Booking' })).not.toBeInTheDocument();
+    });
+
+    it.each(['DECLINE', 'REQUEST_CHANGES'] as const)(
+      'renders no Create Booking action for a %s response',
+      (responseType) => {
+        render(
+          <ProposalVersionHistory
+            versions={[
+              version({
+                id: 'v1',
+                versionNumber: 1,
+                acceptance: acceptedAcceptance({ responseType }),
+              }),
+            ]}
+            canPublish={false}
+            canRecordResponse={false}
+          />,
+        );
+
+        expect(screen.queryByRole('button', { name: 'Create Booking' })).not.toBeInTheDocument();
+      },
+    );
+
+    it('renders the action independent of canPublish/canRecordResponse — both roles reach this page', () => {
+      render(
+        <ProposalVersionHistory
+          versions={[version({ id: 'v1', versionNumber: 1, acceptance: acceptedAcceptance() })]}
+          canPublish={false}
+          canRecordResponse={false}
+        />,
+      );
+      expect(screen.getByRole('button', { name: 'Create Booking' })).toBeInTheDocument();
+    });
+
+    it('renders a Create Booking action only for the accepted version among multiple versions', () => {
+      render(
+        <ProposalVersionHistory
+          versions={[
+            version({ id: 'v2', versionNumber: 2, acceptance: null }),
+            version({
+              id: 'v1',
+              versionNumber: 1,
+              clientVisibleAt: new Date('2026-08-01T00:00:00Z'),
+              acceptance: acceptedAcceptance({ proposalVersionId: 'v1' }),
+            }),
+          ]}
+          canPublish={false}
+          canRecordResponse={false}
+        />,
+      );
+
+      expect(screen.getAllByRole('button', { name: 'Create Booking' })).toHaveLength(1);
+      const versionOneItem = screen.getByRole('heading', { name: 'Version 1' }).closest('li');
+      expect(versionOneItem).not.toBeNull();
+      expect(
+        within(versionOneItem as HTMLElement).getByRole('button', { name: 'Create Booking' }),
+      ).toBeInTheDocument();
+      const versionTwoItem = screen.getByRole('heading', { name: 'Version 2' }).closest('li');
+      expect(versionTwoItem).not.toBeNull();
+      expect(
+        within(versionTwoItem as HTMLElement).queryByRole('button', { name: 'Create Booking' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('renders exactly one Create Booking action for one accepted version, not duplicated', () => {
+      render(
+        <ProposalVersionHistory
+          versions={[version({ id: 'v1', versionNumber: 1, acceptance: acceptedAcceptance() })]}
+          canPublish={false}
+          canRecordResponse={false}
+        />,
+      );
+
+      expect(screen.getAllByRole('button', { name: 'Create Booking' })).toHaveLength(1);
+    });
+
+    it("submits with this version's own id, not any other version's, as proposalVersionId", async () => {
+      fetchMock.mockResolvedValue(
+        jsonResponse(201, { booking: { id: 'booking-1', proposalVersionId: 'v1' } }),
+      );
+      render(
+        <ProposalVersionHistory
+          versions={[
+            version({ id: 'v2', versionNumber: 2, acceptance: null }),
+            version({
+              id: 'v1',
+              versionNumber: 1,
+              clientVisibleAt: new Date('2026-08-01T00:00:00Z'),
+              acceptance: acceptedAcceptance({ proposalVersionId: 'v1' }),
+            }),
+          ]}
+          canPublish={false}
+          canRecordResponse={false}
+        />,
+      );
+
+      await userEvent.setup().click(screen.getByRole('button', { name: 'Create Booking' }));
+
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith('/api/bookings', expect.anything()),
+      );
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ proposalVersionId: 'v1' });
+    });
+
+    it('renders no Proposal picker, Client picker, standalone creation link, or invented Booking form', () => {
+      render(
+        <ProposalVersionHistory
+          versions={[version({ id: 'v1', versionNumber: 1, acceptance: acceptedAcceptance() })]}
+          canPublish={false}
+          canRecordResponse={false}
+        />,
+      );
+
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /booking/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    });
+  });
 });

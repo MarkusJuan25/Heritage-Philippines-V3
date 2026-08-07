@@ -280,3 +280,13 @@
 .responseAction {
   margin-bottom: 0.75rem;
 }
+
+/* Per-version Create Booking action (D-028 Stage 2E's CreateBookingButton),
+   rendered inline inside an accepted version's .versionItem. Reuses
+   .formAlert/.formSuccessAlert/.formActions above as-is — this is the one
+   genuinely new rule, mirroring .publishAction's/.responseAction's
+   identical bottom-spacing purpose for this different per-version
+   action. */
+.createBookingAction {
+  margin-bottom: 0.75rem;
+}
