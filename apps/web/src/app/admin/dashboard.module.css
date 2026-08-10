@@ -1,0 +1,97 @@
+/* Admin Dashboard Overview (D-029 Stage 2B's /admin/page.tsx). CSS
+   Modules, mirroring the established admin/bookings/bookings.module.css /
+   admin/proposals/proposals.module.css / admin/clients/clients.module.css
+   precedent — no runtime CSS framework, no shared cross-feature module.
+   Mobile-first: base rules already suit narrow screens (a single stacked
+   column); the two-column grid below is a progressive enhancement for
+   wider viewports (.claude/rules/frontend.md). */
+
+.heading {
+  margin: 0 0 1.5rem;
+}
+
+.sections {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+}
+
+@media (min-width: 48rem) {
+  .sections {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.section {
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.section h2 {
+  margin: 0 0 0.75rem;
+}
+
+/* The metric definition list — label (dt) above value (dd), the value
+   given visual weight since it is this section's headline number. */
+.metric {
+  margin: 0 0 1rem;
+}
+
+.metric dt {
+  font-size: 0.8rem;
+  color: #666;
+  margin: 0;
+}
+
+.metric dd {
+  margin: 0.15rem 0 0;
+  font-size: 1.75rem;
+  font-weight: 600;
+}
+
+.recentHeading {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+}
+
+.recentList {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.recentItem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.recentItem:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.recentItemMeta {
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.emptyState {
+  padding: 0.75rem;
+  border: 1px dashed #c0c0c0;
+  border-radius: 0.5rem;
+  color: #666;
+  margin: 0 0 1rem;
+}
+
+.viewAllLink {
+  display: inline-block;
+  font-size: 0.9rem;
+}

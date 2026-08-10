@@ -8,6 +8,13 @@ import { STAFF_ROLES } from '@/lib/auth/roles';
 
 import { SignOutButton } from '@/app/dashboard/sign-out-button';
 
+// D-029 §2/§3's Dashboard navigation visibility rule: the same
+// ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'] role set as Clients/Proposals/
+// Bookings, kept as this feature's own dedicated constant rather than
+// reusing any of the below, matching this codebase's established
+// per-feature-constant discipline.
+const DASHBOARD_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
+
 // D-025 §2's Client-management role boundary, applied to navigation
 // visibility itself: unlike the existing Leads link (shown to every staff
 // role, relying on that page's own Layer 3 check to deny an excluded role),
@@ -87,6 +94,11 @@ export default async function AdminLayout({
               padding: 0,
             }}
           >
+            {DASHBOARD_ROLES.includes(user.role) ? (
+              <li>
+                <Link href="/admin">Dashboard</Link>
+              </li>
+            ) : null}
             <li>
               <Link href="/admin/leads">Leads</Link>
             </li>
