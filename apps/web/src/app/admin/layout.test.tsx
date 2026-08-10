@@ -141,4 +141,39 @@ describe('AdminLayout', () => {
       expect(screen.queryByRole('link', { name: 'Bookings' })).not.toBeInTheDocument();
     },
   );
+
+  it.each(['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'])(
+    'renders a Dashboard navigation link to /admin for role %s (D-029 §2/§3)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('href', '/admin');
+    },
+  );
+
+  it.each(['FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR', 'CLIENT'])(
+    'never renders a Dashboard navigation link for excluded staff role %s (D-029 §2/§3)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.queryByRole('link', { name: 'Dashboard' })).not.toBeInTheDocument();
+    },
+  );
+
+  it('renders Dashboard as the first navigation item, before Leads (D-029 §2)', async () => {
+    getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role: 'ADMIN_MANAGER' });
+
+    const jsx = await AdminLayout({ children: <div /> });
+    const { container } = render(jsx);
+
+    const navLinks = container.querySelectorAll('nav a');
+    expect(navLinks[0]).toHaveTextContent('Dashboard');
+    expect(navLinks[1]).toHaveTextContent('Leads');
+  });
 });
