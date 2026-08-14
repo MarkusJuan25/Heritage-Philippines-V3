@@ -15,7 +15,8 @@
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:integration": "vitest run --no-file-parallelism src/features/assignments/service.integration.test.ts src/features/bookings/service.integration.test.ts src/features/clients/service.integration.test.ts src/features/leads/service.integration.test.ts src/features/proposals/service.integration.test.ts src/features/staff/service.integration.test.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.8.0",

@@ -725,6 +725,83 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
       ).toBe(0);
     });
 
+    // D-032 §5 (F-Lead): `convertLead` calls the global `canAccessLead`
+    // check before its transaction ever opens, and `canAccessLead`'s own
+    // mechanism for a TRAVEL_CONSULTANT actor (an active-StaffAssignment
+    // lookup) returns an identical denial whether the target Lead is
+    // genuinely nonexistent or merely exists-but-unassigned — there is no
+    // distinct mocked branch that could prove this specific distinction
+    // (the mocked `canAccessLead`-denial test above already proves
+    // convertLead's own service-layer mapping from that denial to
+    // LEAD_FORBIDDEN). Only a real database, where the two underlying facts
+    // genuinely differ, can prove it — hence this test lives here, not in
+    // service.test.ts.
+    it('rejects a TRAVEL_CONSULTANT converting a genuinely nonexistent Lead id with the identical LEAD_FORBIDDEN result the inaccessible-Lead case above already proves, writing nothing', async () => {
+      const nonexistentLeadId = randomUUID();
+
+      await expect(
+        convertLead(tcActor, nonexistentLeadId, { expectedStatus: 'QUALIFIED' }),
+      ).rejects.toMatchObject({ code: 'LEAD_FORBIDDEN' });
+
+      expect(await prisma!.lead.findUnique({ where: { id: nonexistentLeadId } })).toBeNull();
+      expect(
+        await prisma!.auditLog.count({
+          where: { entityType: 'Lead', entityId: nonexistentLeadId },
+        }),
+      ).toBe(0);
+    });
+
+    it('rejects an ADMIN_MANAGER supplying a genuinely nonexistent clientId with CLIENT_LINK_NOT_AVAILABLE, producing no conversion-related write', async () => {
+      const qualified = await createQualifiedLead(adminActor, {
+        fullName: 'Nonexistent Client Target Lead',
+        source: 'Walk-in',
+        email: `convert-nonexistent-client-${randomUUID()}@example.com`,
+      });
+      const nonexistentClientId = randomUUID();
+
+      // Captured immediately before the rejected attempt, not hardcoded —
+      // this Lead's actual history count at this point is an implementation
+      // detail of createQualifiedLead (currently 2: creation + QUALIFIED
+      // transition), not a fact this test should assume or restate.
+      const historyCountBefore = await prisma!.leadStatusHistory.count({
+        where: { leadId: qualified.id },
+      });
+
+      await expect(
+        convertLead(adminActor, qualified.id, {
+          expectedStatus: 'QUALIFIED',
+          clientId: nonexistentClientId,
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_LINK_NOT_AVAILABLE' });
+
+      const leadRow = await prisma!.lead.findUnique({ where: { id: qualified.id } });
+      expect(leadRow?.status).toBe('QUALIFIED');
+      expect(leadRow?.clientId).toBeNull();
+      expect(await prisma!.leadStatusHistory.count({ where: { leadId: qualified.id } })).toBe(
+        historyCountBefore,
+      );
+      expect(
+        await prisma!.auditLog.count({
+          where: { entityType: 'Lead', entityId: qualified.id, action: 'LEAD_CONVERTED_TO_CLIENT' },
+        }),
+      ).toBe(0);
+
+      // No CLIENT_CREATED audit row attributes a newly created Client back
+      // to this specific Lead — checked by content, not by a Client id we
+      // don't have (none was ever created).
+      const clientCreatedAudits = await prisma!.auditLog.findMany({
+        where: { entityType: 'Client', action: 'CLIENT_CREATED' },
+      });
+      expect(
+        clientCreatedAudits.some(
+          (row) =>
+            row.afterState !== null &&
+            typeof row.afterState === 'object' &&
+            (row.afterState as { sourceLeadId?: string }).sourceLeadId === qualified.id,
+        ),
+      ).toBe(false);
+    });
+
     it('rejects a TRAVEL_CONSULTANT link-existing request with CLIENT_LINK_NOT_AVAILABLE when they lack the required active Client assignment, leaving state unchanged', async () => {
       const sharedEmail = `convert-tc-link-denied-${randomUUID()}@example.com`;
       const seedClient = await createSeedClient({
