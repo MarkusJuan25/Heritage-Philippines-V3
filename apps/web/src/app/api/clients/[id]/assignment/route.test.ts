@@ -62,6 +62,22 @@ describe('PUT /api/clients/[id]/assignment', () => {
     expect(serviceMocks.setClientAssignment).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'SYSTEM_ADMINISTRATOR',
+    'TRAVEL_CONSULTANT',
+    'CLIENT',
+    'FINANCE_ACCOUNTING',
+    'VISA_DOCUMENTATION',
+  ])(
+    'returns 403 for a non-ADMIN_MANAGER caller (%s), never calling the service (D-031 F-04)',
+    async (role) => {
+      getSessionMock.mockResolvedValue({ user: { ...ADMIN_MANAGER, role } });
+      const response = await PUT(putRequest({ assignedStaffId: STAFF_ID }), context());
+      expect(response.status).toBe(403);
+      expect(serviceMocks.setClientAssignment).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns 200 and forwards user/id/body to setClientAssignment', async () => {
     getSessionMock.mockResolvedValue({ user: ADMIN_MANAGER });
     const assignment = { id: 'assignment-1', assignedStaffId: STAFF_ID };
@@ -95,6 +111,22 @@ describe('PUT /api/clients/[id]/assignment', () => {
 });
 
 describe('DELETE /api/clients/[id]/assignment', () => {
+  it.each([
+    'SYSTEM_ADMINISTRATOR',
+    'TRAVEL_CONSULTANT',
+    'CLIENT',
+    'FINANCE_ACCOUNTING',
+    'VISA_DOCUMENTATION',
+  ])(
+    'returns 403 for a non-ADMIN_MANAGER caller (%s), never calling the service (D-031 F-04)',
+    async (role) => {
+      getSessionMock.mockResolvedValue({ user: { ...ADMIN_MANAGER, role } });
+      const response = await DELETE(deleteRequest({ reason: 'No longer engaged' }), context());
+      expect(response.status).toBe(403);
+      expect(serviceMocks.endClientAssignment).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns 400 when reason is missing', async () => {
     getSessionMock.mockResolvedValue({ user: ADMIN_MANAGER });
     const response = await DELETE(deleteRequest({}), context());

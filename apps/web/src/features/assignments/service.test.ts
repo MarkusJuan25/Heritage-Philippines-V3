@@ -91,6 +91,95 @@ beforeEach(() => {
   repositoryMocks.findBookingById.mockResolvedValue({ id: BOOKING_ID });
 });
 
+describe('assignment-mutation role gating (D-031 F-02)', () => {
+  const REJECTED_ROLES = [
+    'SYSTEM_ADMINISTRATOR',
+    'TRAVEL_CONSULTANT',
+    'CLIENT',
+    'FINANCE_ACCOUNTING',
+    'VISA_DOCUMENTATION',
+  ];
+
+  it.each(REJECTED_ROLES)(
+    'setLeadAssignment rejects role %s with ROLE_NOT_PERMITTED, before any repository access',
+    async (role) => {
+      const actor = { ...ACTOR, role: role as AuthenticatedUser['role'] };
+
+      await expect(setLeadAssignment(actor, LEAD_ID, STAFF_ID)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+        status: 403,
+      });
+      expect(repositoryMocks.findLeadById).not.toHaveBeenCalled();
+      expect(transactionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(REJECTED_ROLES)(
+    'setClientAssignment rejects role %s with ROLE_NOT_PERMITTED, before any repository access',
+    async (role) => {
+      const actor = { ...ACTOR, role: role as AuthenticatedUser['role'] };
+
+      await expect(setClientAssignment(actor, CLIENT_ID, STAFF_ID)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+        status: 403,
+      });
+      expect(repositoryMocks.findClientById).not.toHaveBeenCalled();
+      expect(transactionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(REJECTED_ROLES)(
+    'setBookingAssignment rejects role %s with ROLE_NOT_PERMITTED, before any repository access',
+    async (role) => {
+      const actor = { ...ACTOR, role: role as AuthenticatedUser['role'] };
+
+      await expect(setBookingAssignment(actor, BOOKING_ID, STAFF_ID)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+        status: 403,
+      });
+      expect(repositoryMocks.findBookingById).not.toHaveBeenCalled();
+      expect(transactionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(REJECTED_ROLES)(
+    'endLeadAssignment rejects role %s with ROLE_NOT_PERMITTED, before any repository access',
+    async (role) => {
+      const actor = { ...ACTOR, role: role as AuthenticatedUser['role'] };
+
+      await expect(endLeadAssignment(actor, LEAD_ID, 'A reason')).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+        status: 403,
+      });
+      expect(repositoryMocks.findLeadById).not.toHaveBeenCalled();
+      expect(transactionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(REJECTED_ROLES)(
+    'endClientAssignment rejects role %s with ROLE_NOT_PERMITTED, before any repository access',
+    async (role) => {
+      const actor = { ...ACTOR, role: role as AuthenticatedUser['role'] };
+
+      await expect(endClientAssignment(actor, CLIENT_ID, 'A reason')).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+        status: 403,
+      });
+      expect(repositoryMocks.findClientById).not.toHaveBeenCalled();
+      expect(transactionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('carries a mutation-specific message, never the eligible-consultant-read message', async () => {
+    const actor = { ...ACTOR, role: 'TRAVEL_CONSULTANT' as AuthenticatedUser['role'] };
+
+    await expect(setLeadAssignment(actor, LEAD_ID, STAFF_ID)).rejects.toMatchObject({
+      code: 'ROLE_NOT_PERMITTED',
+      message: expect.not.stringContaining('eligible Travel Consultants'),
+    });
+  });
+});
+
 describe('setLeadAssignment', () => {
   it('throws LEAD_NOT_FOUND when the lead does not exist, without checking the assignee', async () => {
     repositoryMocks.findLeadById.mockResolvedValue(null);

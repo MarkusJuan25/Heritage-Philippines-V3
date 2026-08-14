@@ -32,6 +32,7 @@ const assignmentRepositoryMocks = vi.hoisted(() => ({
 }));
 vi.mock('@/features/assignments/repository', () => assignmentRepositoryMocks);
 
+import { Prisma } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -120,6 +121,14 @@ function assignmentRecord(
     endedAt: null,
     ...overrides,
   };
+}
+
+// D-031 F-01 — mirrors features/leads/service.test.ts's identical helper.
+function conflictError(code: 'P2034' | 'P2002' | 'P2004'): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError('Simulated database conflict', {
+    code,
+    clientVersion: '7.8.0',
+  });
 }
 
 beforeEach(() => {
@@ -360,6 +369,49 @@ describe('updateClient', () => {
       });
 
       expect(assignmentRepositoryMocks.findActiveAssignmentForClient).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('D-031 F-01: transaction-local recheck and retry behavior', () => {
+    it("returns CLIENT_FORBIDDEN when a fresh retry's transaction-local recheck observes the assignment lost after an initial P2034 conflict, without retrying the forbidden result", async () => {
+      assignmentRepositoryMocks.findActiveAssignmentForClient.mockResolvedValue(null);
+
+      let attempt = 0;
+      transactionMock.mockImplementation(async (fn: (tx: unknown) => unknown) => {
+        attempt += 1;
+        if (attempt === 1) {
+          throw conflictError('P2034');
+        }
+        return fn(TX_CLIENT);
+      });
+
+      await expect(
+        updateClient(TRAVEL_CONSULTANT, 'client-1', {
+          fullName: 'Should never persist',
+          expectedUpdatedAt: VALID_EXPECTED_UPDATED_AT,
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_FORBIDDEN' });
+
+      expect(transactionMock).toHaveBeenCalledTimes(2);
+      expect(repositoryMocks.updateClientFieldsIfUnstale).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('maps a serialization conflict that survives every retry to CLIENT_CONFLICT, never a raw Prisma error', async () => {
+      transactionMock.mockImplementation(async () => {
+        throw conflictError('P2034');
+      });
+
+      await expect(
+        updateClient(ADMIN_MANAGER, 'client-1', {
+          fullName: 'Should never persist',
+          expectedUpdatedAt: VALID_EXPECTED_UPDATED_AT,
+        }),
+      ).rejects.toMatchObject({ code: 'CLIENT_CONFLICT' });
+
+      expect(transactionMock).toHaveBeenCalledTimes(3);
+      expect(repositoryMocks.updateClientFieldsIfUnstale).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
     });
   });
 

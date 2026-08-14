@@ -309,6 +309,19 @@ export type UpdateLeadResult = { lead: LeadRecord } & Partial<DuplicateMatchResu
  * partial request alone. Duplicate detection reruns only when `email` or
  * `phone` is present in the patch (Stage B2 §6), using the final combined
  * normalized values and excluding this Lead's own id.
+ *
+ * The write itself runs inside `runSerializableWithRetry` (D-031 F-01), not
+ * a plain transaction: for a `TRAVEL_CONSULTANT` actor, the active Lead
+ * assignment is rechecked transaction-locally, as the first operation
+ * inside every attempt (including every retry, since the whole callback
+ * re-runs fresh each attempt) — closing the race window in which the
+ * assignment changes after the pre-transaction `canAccessLead` check above
+ * but before this write commits. A retry whose own recheck observes the
+ * assignment lost or reassigned throws the existing `LEAD_FORBIDDEN`; a
+ * `P2034` conflict that survives every bounded attempt is caught below and
+ * mapped to the existing `LEAD_CONFLICT`, mirroring `updateLeadStatus`'s and
+ * `convertLead`'s identical `isKnownConflict` pattern — never a forbidden
+ * result, and never a raw Prisma error. `ADMIN_MANAGER` performs no recheck.
  */
 export async function updateLead(
   actor: AuthenticatedUser,
@@ -389,25 +402,47 @@ export async function updateLead(
     return { lead: existing, ...duplicates };
   }
 
-  const updated = await prisma.$transaction(async (tx) => {
-    const result = await repository.updateLeadFields(tx, { id, ...data });
+  try {
+    const updated = await runSerializableWithRetry(async (tx) => {
+      // D-031 F-01: transaction-local recheck, the first operation inside
+      // every attempt (including every retry, since `fn` re-runs fresh each
+      // time — lib/serializable-transaction.ts). ADMIN_MANAGER performs no
+      // recheck, remaining unconditionally authorized once existence was
+      // already confirmed above.
+      if (leadActor.role === 'TRAVEL_CONSULTANT') {
+        const activeAssignment = await assignmentRepository.findActiveAssignmentForLead(tx, id);
+        if (!activeAssignment || activeAssignment.assignedStaffId !== leadActor.id) {
+          throw notFoundOrForbidden(leadActor);
+        }
+      }
 
-    await repository.insertAuditLog(tx, {
-      actorId: leadActor.id,
-      action: LEAD_AUDIT_ACTIONS.LEAD_UPDATED,
-      entityType: LEAD_AUDIT_ENTITY_TYPE,
-      entityId: id,
-      afterState: sanitizeLeadUpdateSnapshot({
-        changedFields,
-        hasEmail: Boolean(finalEmail),
-        hasPhone: Boolean(finalPhone),
-      }),
+      const result = await repository.updateLeadFields(tx, { id, ...data });
+
+      await repository.insertAuditLog(tx, {
+        actorId: leadActor.id,
+        action: LEAD_AUDIT_ACTIONS.LEAD_UPDATED,
+        entityType: LEAD_AUDIT_ENTITY_TYPE,
+        entityId: id,
+        afterState: sanitizeLeadUpdateSnapshot({
+          changedFields,
+          hasEmail: Boolean(finalEmail),
+          hasPhone: Boolean(finalPhone),
+        }),
+      });
+
+      return result;
     });
 
-    return result;
-  });
-
-  return { lead: updated, ...duplicates };
+    return { lead: updated, ...duplicates };
+  } catch (error) {
+    if (error instanceof LeadError) {
+      throw error;
+    }
+    if (isKnownConflict(error)) {
+      throw new LeadError('LEAD_CONFLICT', CONFLICT_MESSAGE);
+    }
+    throw error;
+  }
 }
 
 const STALE_STATUS_MESSAGE =
@@ -417,16 +452,23 @@ const CONFLICT_MESSAGE =
 
 /**
  * Transitions a Lead's status (D-022 §6/§7). Execution order, matching
- * Stage B2 §8 exactly: (1) authorize via `canAccessLead`; (2) read current
- * status inside the transaction; (3) same-status is an idempotent no-op,
- * checked *before* `expectedStatus`, so a stale `expectedStatus` still
- * succeeds if the Lead already reflects the desired outcome; (4) otherwise
- * a mismatched `expectedStatus` is LEAD_CONFLICT; (5) the transition itself
- * is validated against transitions.ts (DEFERRED -> CONVERSION_ENDPOINT_
- * REQUIRED, REJECTED -> INVALID_STATUS_TRANSITION); (6) a required-but-
- * missing reason is REASON_REQUIRED; (7) only then is the real transition
- * performed, atomically, inside `runSerializableWithRetry` — mirroring
- * features/bookings/service.ts's `updateBookingStatus` (D-014) exactly.
+ * Stage B2 §8 exactly: (1) authorize via `canAccessLead`; (2) for a
+ * `TRAVEL_CONSULTANT` actor, a transaction-local recheck of the active Lead
+ * assignment (D-031 F-01), as the first operation inside every attempt; (3)
+ * read current status inside the transaction; (4) same-status is an
+ * idempotent no-op, checked *before* `expectedStatus`, so a stale
+ * `expectedStatus` still succeeds if the Lead already reflects the desired
+ * outcome; (5) otherwise a mismatched `expectedStatus` is LEAD_CONFLICT; (6)
+ * the transition itself is validated against transitions.ts (DEFERRED ->
+ * CONVERSION_ENDPOINT_REQUIRED, REJECTED -> INVALID_STATUS_TRANSITION); (7)
+ * a required-but-missing reason is REASON_REQUIRED; (8) only then is the
+ * real transition performed, atomically, inside `runSerializableWithRetry` —
+ * mirroring features/bookings/service.ts's `updateBookingStatus` (D-014)
+ * exactly. A retry whose own recheck (step 2) observes the assignment lost
+ * or reassigned throws the existing `LEAD_FORBIDDEN`; a `P2034` conflict
+ * that survives every bounded attempt is caught below and mapped to the
+ * existing `LEAD_CONFLICT` via the same `isKnownConflict` branch this
+ * function already used for `expectedStatus` collisions.
  */
 export async function updateLeadStatus(
   actor: AuthenticatedUser,
@@ -442,6 +484,19 @@ export async function updateLeadStatus(
 
   try {
     return await runSerializableWithRetry(async (tx) => {
+      // D-031 F-01: transaction-local recheck, the first operation inside
+      // every attempt — identical mechanism and rationale to `updateLead`'s
+      // own recheck above. `updateLeadStatus` already runs under
+      // `runSerializableWithRetry` and already maps an exhausted `P2034` to
+      // `LEAD_CONFLICT` via the existing catch block below; this recheck is
+      // the only piece that was missing.
+      if (leadActor.role === 'TRAVEL_CONSULTANT') {
+        const activeAssignment = await assignmentRepository.findActiveAssignmentForLead(tx, id);
+        if (!activeAssignment || activeAssignment.assignedStaffId !== leadActor.id) {
+          throw notFoundOrForbidden(leadActor);
+        }
+      }
+
       const found = await repository.findLeadById(tx, id);
       if (!found) {
         throw notFoundOrForbidden(leadActor);

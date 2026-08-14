@@ -543,6 +543,54 @@ describe('updateLead', () => {
     });
     expect(repositoryMocks.findLeadById).not.toHaveBeenCalled();
   });
+
+  describe('D-031 F-01: transaction-local recheck and retry behavior', () => {
+    it("returns LEAD_FORBIDDEN when a fresh retry's transaction-local recheck observes the assignment lost after an initial P2034 conflict, without retrying the forbidden result", async () => {
+      repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(null);
+
+      let attempt = 0;
+      transactionMock.mockImplementation(async (fn: (tx: unknown) => unknown) => {
+        attempt += 1;
+        if (attempt === 1) {
+          throw conflictError('P2034');
+        }
+        return fn(TX_CLIENT);
+      });
+
+      await expect(
+        updateLead(TRAVEL_CONSULTANT, 'lead-1', { notes: 'Should never persist' }),
+      ).rejects.toMatchObject({ code: 'LEAD_FORBIDDEN' });
+
+      expect(transactionMock).toHaveBeenCalledTimes(2);
+      expect(repositoryMocks.updateLeadFields).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('maps a serialization conflict that survives every retry to LEAD_CONFLICT, never a raw Prisma error', async () => {
+      repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
+      transactionMock.mockImplementation(async () => {
+        throw conflictError('P2034');
+      });
+
+      await expect(
+        updateLead(ADMIN_MANAGER, 'lead-1', { notes: 'Should never persist' }),
+      ).rejects.toMatchObject({ code: 'LEAD_CONFLICT' });
+
+      expect(transactionMock).toHaveBeenCalledTimes(3);
+      expect(repositoryMocks.updateLeadFields).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('never performs the transaction-local recheck for ADMIN_MANAGER', async () => {
+      repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
+      repositoryMocks.updateLeadFields.mockResolvedValue(leadRecord({ notes: 'Updated' }));
+
+      await updateLead(ADMIN_MANAGER, 'lead-1', { notes: 'Updated' });
+
+      expect(assignmentRepositoryMocks.findActiveAssignmentForLead).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('updateLeadStatus', () => {
@@ -670,6 +718,65 @@ describe('updateLeadStatus', () => {
       }),
     ).rejects.toMatchObject({ code: 'LEAD_FORBIDDEN' });
     expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  describe('D-031 F-01: transaction-local recheck and retry behavior', () => {
+    it("returns LEAD_FORBIDDEN when a fresh retry's transaction-local recheck observes the assignment lost after an initial P2034 conflict, without retrying the forbidden result", async () => {
+      repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
+      assignmentRepositoryMocks.findActiveAssignmentForLead.mockResolvedValue(null);
+
+      let attempt = 0;
+      transactionMock.mockImplementation(async (fn: (tx: unknown) => unknown) => {
+        attempt += 1;
+        if (attempt === 1) {
+          throw conflictError('P2034');
+        }
+        return fn(TX_CLIENT);
+      });
+
+      await expect(
+        updateLeadStatus(TRAVEL_CONSULTANT, 'lead-1', {
+          expectedStatus: 'NEW',
+          newStatus: 'CONTACTED',
+        }),
+      ).rejects.toMatchObject({ code: 'LEAD_FORBIDDEN' });
+
+      expect(transactionMock).toHaveBeenCalledTimes(2);
+      expect(repositoryMocks.updateLeadStatusWithHistory).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('maps a serialization conflict that survives every retry to LEAD_CONFLICT, never a raw Prisma error', async () => {
+      repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
+      transactionMock.mockImplementation(async () => {
+        throw conflictError('P2034');
+      });
+
+      await expect(
+        updateLeadStatus(ADMIN_MANAGER, 'lead-1', {
+          expectedStatus: 'NEW',
+          newStatus: 'CONTACTED',
+        }),
+      ).rejects.toMatchObject({ code: 'LEAD_CONFLICT' });
+
+      expect(transactionMock).toHaveBeenCalledTimes(3);
+      expect(repositoryMocks.updateLeadStatusWithHistory).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('never performs the transaction-local recheck for ADMIN_MANAGER', async () => {
+      repositoryMocks.findLeadById.mockResolvedValue(leadRecord({ status: 'NEW' }));
+      repositoryMocks.updateLeadStatusWithHistory.mockResolvedValue(
+        leadRecord({ status: 'CONTACTED' }),
+      );
+
+      await updateLeadStatus(ADMIN_MANAGER, 'lead-1', {
+        expectedStatus: 'NEW',
+        newStatus: 'CONTACTED',
+      });
+
+      expect(assignmentRepositoryMocks.findActiveAssignmentForLead).not.toHaveBeenCalled();
+    });
   });
 });
 

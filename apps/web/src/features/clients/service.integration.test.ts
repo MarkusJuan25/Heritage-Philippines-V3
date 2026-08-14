@@ -102,6 +102,10 @@ describe.skipIf(!hasTestDatabaseUrl)('clients service integration (real database
   let createLead: (typeof import('@/features/leads/service'))['createLead'];
   let updateLeadStatus: (typeof import('@/features/leads/service'))['updateLeadStatus'];
   let convertLead: (typeof import('@/features/leads/service'))['convertLead'];
+  // D-031 F-01: the real, unmodified assignments service, used only to
+  // perform a genuine concurrent ADMIN_MANAGER reassignment — never mocked,
+  // never a modification of features/assignments/service.integration.test.ts.
+  let setClientAssignment: (typeof import('@/features/assignments/service'))['setClientAssignment'];
 
   let adminActor: AuthenticatedUser;
   let tcActor: AuthenticatedUser;
@@ -137,6 +141,7 @@ describe.skipIf(!hasTestDatabaseUrl)('clients service integration (real database
     ({ ClientError } = await import('./errors'));
     ({ normalizeEmail, normalizePhone } = await import('@/lib/contact-normalization'));
     ({ createLead, updateLeadStatus, convertLead } = await import('@/features/leads/service'));
+    ({ setClientAssignment } = await import('@/features/assignments/service'));
 
     const rows = await prisma.$queryRaw<{ current_database: string }[]>`SELECT current_database()`;
     if (rows[0]?.current_database !== REQUIRED_TEST_DATABASE_NAME) {
@@ -1052,5 +1057,130 @@ describe.skipIf(!hasTestDatabaseUrl)('clients service integration (real database
       });
       expect(auditCountAfter).toBe(auditCountBefore);
     });
+  });
+
+  describe('D-031 F-01: real-PostgreSQL transaction-local recheck race', () => {
+    type PrismaTransactionMethod = NonNullable<typeof prisma>['$transaction'];
+
+    /**
+     * A narrow, test-only interception of the real `prisma.$transaction`
+     * method — never a mock of any query result or authorization outcome —
+     * mirroring features/proposals/service.integration.test.ts's own
+     * established `prisma.$transaction`-wrapping technique, applied at one
+     * additional level of precision this specific race requires. On the
+     * transaction's first attempt only (a later retry attempt, e.g. after a
+     * genuine PostgreSQL serialization conflict, passes straight through
+     * unintercepted), it wraps the fresh transaction-scoped client's own
+     * `staffAssignment.findFirst` — the exact Prisma call
+     * `findActiveAssignmentForClient` (features/assignments/repository.ts)
+     * makes — so that once that one real query has genuinely resolved
+     * against the database (the transaction-local recheck has actually
+     * succeeded), execution pauses, mid-transaction, before the caller's own
+     * business write, until `release()` is called. Every other real query
+     * the real callback performs — including the eventual write — proceeds
+     * completely unmodified once released.
+     */
+    function createRecheckPauseGate(db: NonNullable<typeof prisma>) {
+      let intercepted = false;
+      let signalRecheckDone!: () => void;
+      const recheckDone = new Promise<void>((resolve) => {
+        signalRecheckDone = resolve;
+      });
+      let releaseGate!: () => void;
+      const gateReleased = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+
+      function wrap(original: PrismaTransactionMethod): PrismaTransactionMethod {
+        return (async (...args: Parameters<PrismaTransactionMethod>) => {
+          if (intercepted) {
+            return Reflect.apply(original as (...callArgs: unknown[]) => unknown, db, args);
+          }
+          intercepted = true;
+          const [fn, options] = args as unknown as [
+            (tx: unknown) => Promise<unknown>,
+            Record<string, unknown> | undefined,
+          ];
+          const wrappedFn = async (tx: unknown) => {
+            const staffAssignmentModel = (
+              tx as {
+                staffAssignment: { findFirst: (...findArgs: unknown[]) => Promise<unknown> };
+              }
+            ).staffAssignment;
+            const originalFindFirst = staffAssignmentModel.findFirst.bind(staffAssignmentModel);
+            staffAssignmentModel.findFirst = async (...findArgs: unknown[]) => {
+              const result = await originalFindFirst(...findArgs);
+              signalRecheckDone();
+              await gateReleased;
+              return result;
+            };
+            return fn(tx);
+          };
+          return Reflect.apply(original as (...callArgs: unknown[]) => unknown, db, [
+            wrappedFn,
+            options,
+          ]);
+        }) as PrismaTransactionMethod;
+      }
+
+      return { wrap, recheckDone, release: () => releaseGate() };
+    }
+
+    it("proves PostgreSQL detects a genuine serialization conflict when an ADMIN_MANAGER reassignment commits between updateClient's transaction-local recheck and its business write, resolving to a fresh retry whose own recheck observes the lost assignment and returns the controlled CLIENT_FORBIDDEN result — never a silent success, never a raw database error", async () => {
+      const client = await createClientFixture({
+        fullName: 'Real Race Client',
+        email: `real-race-${randomUUID()}@example.com`,
+      });
+      await createActiveClientAssignment(client.id, tcActor.id, adminActor.id);
+
+      const db = prisma!;
+      const originalTransaction = db.$transaction;
+      const gate = createRecheckPauseGate(db);
+      db.$transaction = gate.wrap(originalTransaction) as typeof db.$transaction;
+
+      try {
+        const updatePromise = updateClient(tcActor, client.id, {
+          fullName: 'Should never persist',
+          expectedUpdatedAt: client.updatedAt.toISOString(),
+        });
+
+        await gate.recheckDone;
+
+        // Real, concurrent ADMIN_MANAGER reassignment — commits fully
+        // before the paused mutation resumes.
+        await setClientAssignment(
+          adminActor,
+          client.id,
+          otherTcActor.id,
+          'D-031 real-concurrency test reassignment',
+        );
+
+        gate.release();
+
+        await expect(updatePromise).rejects.toMatchObject({ code: 'CLIENT_FORBIDDEN' });
+      } finally {
+        db.$transaction = originalTransaction;
+      }
+
+      const row = await prisma!.client.findUnique({ where: { id: client.id } });
+      expect(row?.fullName).toBe('Real Race Client');
+
+      const rejectedAuditCount = await prisma!.auditLog.count({
+        where: { entityType: 'Client', entityId: client.id, action: 'CLIENT_UPDATED' },
+      });
+      expect(rejectedAuditCount).toBe(0);
+
+      // The Admin's own, separate, legitimate reassignment correctly
+      // audits — expected, and never to be confused with an audit row for
+      // the rejected business mutation above.
+      const reassignmentAuditCount = await prisma!.auditLog.count({
+        where: {
+          entityType: 'Client',
+          entityId: client.id,
+          action: 'CLIENT_ASSIGNMENT_REPLACED',
+        },
+      });
+      expect(reassignmentAuditCount).toBe(1);
+    }, 20000);
   });
 });

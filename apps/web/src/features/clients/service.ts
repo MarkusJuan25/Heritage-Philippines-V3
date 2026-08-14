@@ -1,6 +1,7 @@
-import type { LeadStatus } from '@/generated/prisma/client';
+import { Prisma, type LeadStatus } from '@/generated/prisma/client';
 import { normalizeEmail, normalizePhone } from '@/lib/contact-normalization';
 import { prisma } from '@/lib/db';
+import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import { canAccessClient, canAccessLead } from '@/features/assignments/authorization';
@@ -50,6 +51,21 @@ function notFoundOrForbidden(clientActor: ClientActor): ClientError {
   return clientActor.role === 'ADMIN_MANAGER'
     ? new ClientError('CLIENT_NOT_FOUND', 'Client not found.')
     : new ClientError('CLIENT_FORBIDDEN', 'You do not have access to this client.');
+}
+
+// P2034: a SERIALIZABLE conflict that survived every retry in
+// runSerializableWithRetry (D-031 F-01 — updateClient's own transaction was
+// previously a plain, non-retrying prisma.$transaction, so this conflict
+// code was never reachable here before). P2002/P2004: a database-level
+// uniqueness/CHECK conflict this service did not anticipate — a
+// defense-in-depth backstop, mirroring features/leads/service.ts's and
+// features/bookings/service.ts's identical `isKnownConflict`/
+// `isOtherKnownConflict` precedent.
+function isKnownConflict(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    (error.code === 'P2034' || error.code === 'P2002' || error.code === 'P2004')
+  );
 }
 
 // D-025 §6's exact, closed duplicate-match shape — deliberately this
@@ -223,17 +239,30 @@ const CONTACT_INVARIANT_MESSAGE = 'A client must retain at least one of email or
  * transaction-local-recheck precedent) — closing the race window between
  * the pre-transaction check and the actual write. `ADMIN_MANAGER` performs
  * no such recheck, remaining unconditionally authorized once the Client's
- * existence is confirmed.
+ * existence is confirmed. D-031 F-01 extends this same recheck's protection
+ * to a second race window — an assignment change landing after the recheck
+ * succeeds but before this transaction's own write commits — by moving the
+ * whole transaction under SERIALIZABLE isolation (see below).
  *
- * The mutation runs inside a **plain** `prisma.$transaction`, never
- * `runSerializableWithRetry`: the staleness comparison is embedded directly
- * in `repository.updateClientFieldsIfUnstale`'s atomic update predicate
- * (`WHERE id AND updatedAt`), so no elevated isolation level or retry loop
- * is needed for that check to be race-safe — mirroring
- * features/leads/service.ts's `updateLead` (an ordinary-field edit, the
- * correct analogue here), not `updateLeadStatus`/`convertLead` (genuine
- * multi-branch lifecycle transitions, the only callers that actually need
- * `runSerializableWithRetry`).
+ * The mutation runs inside `runSerializableWithRetry` (D-031 F-01): the
+ * transaction-local `TRAVEL_CONSULTANT` assignment recheck above must be
+ * re-evaluated fresh on every attempt (the whole callback re-runs fresh
+ * each attempt — lib/serializable-transaction.ts) so that a concurrent
+ * Admin/Manager reassignment landing after that recheck succeeds but before
+ * this transaction's own write commits is detected as a genuine PostgreSQL
+ * serialization conflict, not silently missed — SERIALIZABLE isolation is
+ * what makes that detection possible, which a plain transaction cannot
+ * provide. The Client row's own `expectedUpdatedAt` staleness comparison
+ * remains additionally embedded in
+ * `repository.updateClientFieldsIfUnstale`'s atomic update predicate
+ * (`WHERE id AND updatedAt`), unchanged — that check never depended on the
+ * elevated isolation level, and running under it does not weaken it. A
+ * retry whose own recheck observes the assignment lost or reassigned throws
+ * the existing `CLIENT_FORBIDDEN`; a `P2034` conflict that survives every
+ * bounded attempt is caught below and mapped to the existing
+ * `CLIENT_CONFLICT`, mirroring features/leads/service.ts's
+ * `updateLeadStatus`/`convertLead` `isKnownConflict` pattern exactly — never
+ * a forbidden result, and never a raw Prisma error.
  *
  * Computes the patch's *final combined* email/phone state — the existing
  * value for any field absent from the patch, the patch's own value
@@ -279,148 +308,158 @@ export async function updateClient(
 
   const expectedUpdatedAt = new Date(input.expectedUpdatedAt);
 
-  return prisma.$transaction(async (tx) => {
-    if (clientActor.role === 'TRAVEL_CONSULTANT') {
-      const activeAssignment = await assignmentRepository.findActiveAssignmentForClient(tx, id);
-      if (!activeAssignment || activeAssignment.assignedStaffId !== clientActor.id) {
+  try {
+    return await runSerializableWithRetry(async (tx) => {
+      if (clientActor.role === 'TRAVEL_CONSULTANT') {
+        const activeAssignment = await assignmentRepository.findActiveAssignmentForClient(tx, id);
+        if (!activeAssignment || activeAssignment.assignedStaffId !== clientActor.id) {
+          throw notFoundOrForbidden(clientActor);
+        }
+      }
+
+      const existing = await repository.findClientById(tx, id);
+      if (!existing) {
         throw notFoundOrForbidden(clientActor);
       }
-    }
 
-    const existing = await repository.findClientById(tx, id);
-    if (!existing) {
-      throw notFoundOrForbidden(clientActor);
-    }
+      if (existing.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+        throw new ClientError('CLIENT_CONFLICT', CONFLICT_MESSAGE);
+      }
 
-    if (existing.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+      const emailProvided = Object.hasOwn(input, 'email');
+      const phoneProvided = Object.hasOwn(input, 'phone');
+
+      const finalEmail = emailProvided ? (input.email ?? null) : existing.email;
+      const finalPhone = phoneProvided ? (input.phone ?? null) : existing.phone;
+
+      if (!finalEmail && !finalPhone) {
+        throw new ClientError('VALIDATION_ERROR', CONTACT_INVARIANT_MESSAGE);
+      }
+
+      const changedFields: string[] = [];
+      const data: Omit<UpdateClientFieldsInput, 'id' | 'expectedUpdatedAt'> = {};
+
+      if (Object.hasOwn(input, 'fullName') && input.fullName !== existing.fullName) {
+        data.fullName = input.fullName;
+        changedFields.push('fullName');
+      }
+
+      let normalizedEmail = existing.normalizedEmail;
+      if (emailProvided && finalEmail !== existing.email) {
+        data.email = finalEmail;
+        normalizedEmail = finalEmail ? normalizeEmail(finalEmail) : null;
+        data.normalizedEmail = normalizedEmail;
+        changedFields.push('email');
+      }
+
+      let normalizedPhone = existing.normalizedPhone;
+      if (phoneProvided && finalPhone !== existing.phone) {
+        data.phone = finalPhone;
+        normalizedPhone = finalPhone ? normalizePhone(finalPhone) : null;
+        data.normalizedPhone = normalizedPhone;
+        changedFields.push('phone');
+      }
+
+      if (Object.hasOwn(input, 'address') && (input.address ?? null) !== existing.address) {
+        data.address = input.address ?? null;
+        changedFields.push('address');
+      }
+      if (
+        Object.hasOwn(input, 'nationality') &&
+        (input.nationality ?? null) !== existing.nationality
+      ) {
+        data.nationality = input.nationality ?? null;
+        changedFields.push('nationality');
+      }
+      // `input.dateOfBirth !== undefined` is a defensive second condition,
+      // alongside `Object.hasOwn`: after schemas.ts's Stage C correction,
+      // `dateOfBirth` is a genuinely optional key whose transform only ever
+      // produces `Date | null` — but should a caller-constructed input ever
+      // carry the key with an explicit `undefined` value, that must still be
+      // treated as "not provided," never as a clear. Only `null` is an
+      // explicit clear after schema parsing.
+      if (
+        Object.hasOwn(input, 'dateOfBirth') &&
+        input.dateOfBirth !== undefined &&
+        (input.dateOfBirth?.getTime() ?? null) !== (existing.dateOfBirth?.getTime() ?? null)
+      ) {
+        data.dateOfBirth = input.dateOfBirth ?? null;
+        changedFields.push('dateOfBirth');
+      }
+      if (
+        Object.hasOwn(input, 'emergencyContact') &&
+        (input.emergencyContact ?? null) !== existing.emergencyContact
+      ) {
+        data.emergencyContact = input.emergencyContact ?? null;
+        changedFields.push('emergencyContact');
+      }
+      if (Object.hasOwn(input, 'notes') && (input.notes ?? null) !== existing.notes) {
+        data.notes = input.notes ?? null;
+        changedFields.push('notes');
+      }
+
+      const contactProvided = emailProvided || phoneProvided;
+      const duplicates: DuplicateMatchResult | undefined = contactProvided
+        ? await findDuplicateMatchesForClient(actor, {
+            normalizedEmail: normalizedEmail ?? undefined,
+            normalizedPhone: normalizedPhone ?? undefined,
+            excludeClientId: id,
+          })
+        : undefined;
+
+      if (changedFields.length === 0) {
+        const currentDetail = await repository.findClientByIdForRead(tx, id, clientActor);
+        if (!currentDetail) {
+          throw notFoundOrForbidden(clientActor);
+        }
+        return { client: currentDetail, ...duplicates };
+      }
+
+      const { count } = await repository.updateClientFieldsIfUnstale(tx, {
+        id,
+        expectedUpdatedAt,
+        ...data,
+      });
+
+      if (count === 0) {
+        const stillExists = await repository.findClientById(tx, id);
+        if (!stillExists) {
+          throw notFoundOrForbidden(clientActor);
+        }
+        throw new ClientError('CLIENT_CONFLICT', CONFLICT_MESSAGE);
+      }
+
+      // Re-read the authoritative persisted result *before* auditing (D-025
+      // §7's required order) — the audit entry is only ever written once we
+      // know, from a real read, that the Client this entry describes still
+      // exists and is readable; it is never written speculatively ahead of
+      // that confirmation.
+      const updatedDetail = await repository.findClientByIdForRead(tx, id, clientActor);
+      if (!updatedDetail) {
+        throw notFoundOrForbidden(clientActor);
+      }
+
+      await repository.insertAuditLog(tx, {
+        actorId: clientActor.id,
+        action: CLIENT_AUDIT_ACTIONS.CLIENT_UPDATED,
+        entityType: CLIENT_AUDIT_ENTITY_TYPE,
+        entityId: id,
+        afterState: sanitizeClientUpdateSnapshot({
+          changedFields,
+          hasEmail: Boolean(finalEmail),
+          hasPhone: Boolean(finalPhone),
+        }),
+      });
+
+      return { client: updatedDetail, ...duplicates };
+    });
+  } catch (error) {
+    if (error instanceof ClientError) {
+      throw error;
+    }
+    if (isKnownConflict(error)) {
       throw new ClientError('CLIENT_CONFLICT', CONFLICT_MESSAGE);
     }
-
-    const emailProvided = Object.hasOwn(input, 'email');
-    const phoneProvided = Object.hasOwn(input, 'phone');
-
-    const finalEmail = emailProvided ? (input.email ?? null) : existing.email;
-    const finalPhone = phoneProvided ? (input.phone ?? null) : existing.phone;
-
-    if (!finalEmail && !finalPhone) {
-      throw new ClientError('VALIDATION_ERROR', CONTACT_INVARIANT_MESSAGE);
-    }
-
-    const changedFields: string[] = [];
-    const data: Omit<UpdateClientFieldsInput, 'id' | 'expectedUpdatedAt'> = {};
-
-    if (Object.hasOwn(input, 'fullName') && input.fullName !== existing.fullName) {
-      data.fullName = input.fullName;
-      changedFields.push('fullName');
-    }
-
-    let normalizedEmail = existing.normalizedEmail;
-    if (emailProvided && finalEmail !== existing.email) {
-      data.email = finalEmail;
-      normalizedEmail = finalEmail ? normalizeEmail(finalEmail) : null;
-      data.normalizedEmail = normalizedEmail;
-      changedFields.push('email');
-    }
-
-    let normalizedPhone = existing.normalizedPhone;
-    if (phoneProvided && finalPhone !== existing.phone) {
-      data.phone = finalPhone;
-      normalizedPhone = finalPhone ? normalizePhone(finalPhone) : null;
-      data.normalizedPhone = normalizedPhone;
-      changedFields.push('phone');
-    }
-
-    if (Object.hasOwn(input, 'address') && (input.address ?? null) !== existing.address) {
-      data.address = input.address ?? null;
-      changedFields.push('address');
-    }
-    if (
-      Object.hasOwn(input, 'nationality') &&
-      (input.nationality ?? null) !== existing.nationality
-    ) {
-      data.nationality = input.nationality ?? null;
-      changedFields.push('nationality');
-    }
-    // `input.dateOfBirth !== undefined` is a defensive second condition,
-    // alongside `Object.hasOwn`: after schemas.ts's Stage C correction,
-    // `dateOfBirth` is a genuinely optional key whose transform only ever
-    // produces `Date | null` — but should a caller-constructed input ever
-    // carry the key with an explicit `undefined` value, that must still be
-    // treated as "not provided," never as a clear. Only `null` is an
-    // explicit clear after schema parsing.
-    if (
-      Object.hasOwn(input, 'dateOfBirth') &&
-      input.dateOfBirth !== undefined &&
-      (input.dateOfBirth?.getTime() ?? null) !== (existing.dateOfBirth?.getTime() ?? null)
-    ) {
-      data.dateOfBirth = input.dateOfBirth ?? null;
-      changedFields.push('dateOfBirth');
-    }
-    if (
-      Object.hasOwn(input, 'emergencyContact') &&
-      (input.emergencyContact ?? null) !== existing.emergencyContact
-    ) {
-      data.emergencyContact = input.emergencyContact ?? null;
-      changedFields.push('emergencyContact');
-    }
-    if (Object.hasOwn(input, 'notes') && (input.notes ?? null) !== existing.notes) {
-      data.notes = input.notes ?? null;
-      changedFields.push('notes');
-    }
-
-    const contactProvided = emailProvided || phoneProvided;
-    const duplicates: DuplicateMatchResult | undefined = contactProvided
-      ? await findDuplicateMatchesForClient(actor, {
-          normalizedEmail: normalizedEmail ?? undefined,
-          normalizedPhone: normalizedPhone ?? undefined,
-          excludeClientId: id,
-        })
-      : undefined;
-
-    if (changedFields.length === 0) {
-      const currentDetail = await repository.findClientByIdForRead(tx, id, clientActor);
-      if (!currentDetail) {
-        throw notFoundOrForbidden(clientActor);
-      }
-      return { client: currentDetail, ...duplicates };
-    }
-
-    const { count } = await repository.updateClientFieldsIfUnstale(tx, {
-      id,
-      expectedUpdatedAt,
-      ...data,
-    });
-
-    if (count === 0) {
-      const stillExists = await repository.findClientById(tx, id);
-      if (!stillExists) {
-        throw notFoundOrForbidden(clientActor);
-      }
-      throw new ClientError('CLIENT_CONFLICT', CONFLICT_MESSAGE);
-    }
-
-    // Re-read the authoritative persisted result *before* auditing (D-025
-    // §7's required order) — the audit entry is only ever written once we
-    // know, from a real read, that the Client this entry describes still
-    // exists and is readable; it is never written speculatively ahead of
-    // that confirmation.
-    const updatedDetail = await repository.findClientByIdForRead(tx, id, clientActor);
-    if (!updatedDetail) {
-      throw notFoundOrForbidden(clientActor);
-    }
-
-    await repository.insertAuditLog(tx, {
-      actorId: clientActor.id,
-      action: CLIENT_AUDIT_ACTIONS.CLIENT_UPDATED,
-      entityType: CLIENT_AUDIT_ENTITY_TYPE,
-      entityId: id,
-      afterState: sanitizeClientUpdateSnapshot({
-        changedFields,
-        hasEmail: Boolean(finalEmail),
-        hasPhone: Boolean(finalPhone),
-      }),
-    });
-
-    return { client: updatedDetail, ...duplicates };
-  });
+    throw error;
+  }
 }
