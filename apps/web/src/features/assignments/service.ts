@@ -177,6 +177,29 @@ function targetFields(
 }
 
 /**
+ * Defense-in-depth service-boundary authorization for every assignment
+ * mutation (D-031 F-02), mirroring features/leads/service.ts's
+ * `assertLeadActor` and features/clients/service.ts's `assertClientActor`
+ * exactly: every current caller (the five public wrappers below) is already
+ * gated by an `withRole(['ADMIN_MANAGER'])` route guard, but — unlike every
+ * other Lead/Client/Proposal/Booking mutation in this codebase — this
+ * service layer previously performed no independent re-check of its own.
+ * Deliberately a separate function from `assertAssignmentActor` further
+ * below, which guards only the unrelated `listEligibleTravelConsultants`
+ * read and carries that read's own, differently-worded message — reusing it
+ * here would misdescribe a mutation rejection as a read-permission
+ * rejection.
+ */
+function assertAssignmentMutationActor(actor: AuthenticatedUser): void {
+  if (actor.role !== 'ADMIN_MANAGER') {
+    throw new AssignmentError(
+      'ROLE_NOT_PERMITTED',
+      'This role is not permitted to modify this assignment.',
+    );
+  }
+}
+
+/**
  * Sets or replaces the active Travel Consultant assignment for a Lead or
  * Client (blueprint Section 6.4). Validates the target and assignee, ends
  * any existing active assignment, creates the replacement, and writes the
@@ -202,6 +225,8 @@ async function setAssignment(
   assignedStaffId: string,
   reason: string | undefined,
 ): Promise<AssignmentRecord> {
+  assertAssignmentMutationActor(actor);
+
   return runAssignmentTransaction(async (tx) => {
     const target = await findTarget(tx, kind, targetId);
     if (!target) {
@@ -263,6 +288,8 @@ async function endAssignment(
   targetId: string,
   reason: string,
 ): Promise<AssignmentRecord | null> {
+  assertAssignmentMutationActor(actor);
+
   return runAssignmentTransaction(async (tx) => {
     const target = await findTarget(tx, kind, targetId);
     if (!target) {
