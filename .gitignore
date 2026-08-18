@@ -28,6 +28,8 @@ apps/web/src/generated/
 .env.local
 .env.*.local
 
+apps/web/test-results/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
