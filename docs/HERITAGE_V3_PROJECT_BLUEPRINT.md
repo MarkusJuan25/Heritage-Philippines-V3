@@ -348,11 +348,13 @@ Invitations are issued for converted Clients (Section 6.7). In the canonical jou
 | --- | --- |
 | Not Invited | No invitation has been created for this client yet. |
 | Invitation Prepared | An invitation has been generated but not yet sent. |
-| Invitation Sent | The invitation has been delivered to the client. |
+| Invitation Sent | The invitation has been dispatched to the client through the selected delivery channel — an audited manual send or, once configured, automated transactional email. This status alone does not confirm the message reached the client's mailbox; see the delivery-evidence contract below. |
 | Invitation Opened | The client has opened the invitation link. |
 | Account Activated | The client has completed account setup and can log in. |
 | Invitation Expired | The invitation's validity window has passed unused. |
 | Invitation Revoked | Staff has manually invalidated the invitation. |
+
+The exact evidence proving an invitation reached its intended recipient — the recorded delivery channel, the frozen destination address it was sent to, and, for automated email, the provider's own acceptance/delivery signal — is defined in `docs/HERITAGE_V3_DECISIONS_LOG.md` D-034, not implied by the "Sent" status name alone. "Sent" and "delivered" are deliberately distinct claims: this platform never represents provider acceptance of a send request as confirmed recipient delivery.
 
 ### 7.2 Invitation Rules
 
@@ -366,6 +368,8 @@ Invitations are issued for converted Clients (Section 6.7). In the canonical jou
 - Admin / Manager, and the Travel Consultant assigned to the client, may prepare, send, resend, and revoke portal invitations.
 - Resend and revoke actions are audited with the acting staff account, timestamp, and (for revocation) a reason, consistent with Section 14.9.
 - No other role issues or revokes invitations.
+
+**Delivery provider (D-034):** Automated invitation delivery uses Resend as the selected transactional-email provider, sending from an intended Heritage Philippines sending-domain address. The exact sender address, DNS/domain verification, and provider secrets remain an operational prerequisite before automated sending is enabled in any environment — see `docs/HERITAGE_V3_DECISIONS_LOG.md` D-034. An audited manual-email fallback — an authorized staff member generating the activation link and personally sending it, with the channel, frozen destination address, confirming staff actor, and confirmation timestamp recorded — remains available independently and is a supported path, not a workaround.
 
 ---
 
@@ -797,7 +801,7 @@ The names "Heritage Homecoming Philippines" and "HHP" appeared in revision notes
 
 The following items are recognized as unresolved and should be settled before or during the phases that depend on them:
 
-- Exact invitation expiration duration (Section 7.2).
+- **Invitation expiration duration** — resolved: seven calendar days from token issuance (Section 7.2; `docs/HERITAGE_V3_DECISIONS_LOG.md`, D-034). No longer an open decision.
 - Exact lead archive/retention duration and any eventual deletion policy (Section 6.5).
 - Whether public self-service portal signup will be introduced in a later phase, beyond invitation-only onboarding (Section 7).
 - Whether a dedicated Content Manager role should be introduced if website-content workload grows beyond what Admin / Manager can reasonably cover (Section 4.7).
@@ -809,5 +813,6 @@ The following items are recognized as unresolved and should be settled before or
 - **Retention periods** for documents, activity logs, audit logs, and other personal data — unresolved pending the privacy/compliance review below. No final retention or deletion durations have been set.
 - **Philippine privacy/compliance posture** — applicability of the Data Privacy Act of 2012 and related obligations, consent requirements, breach-response planning, and the retention policy above. Requires stakeholder/legal review before Phase 6 (Security and Production Hardening).
 - **Refund documentation type** — whether a refund produces a refund reference, credit note, or equivalent record (Section 11.5); an open implementation detail until management selects the document type.
+- **Transactional email provider** — Resend is the selected automated transactional-email provider for portal invitations (`docs/HERITAGE_V3_DECISIONS_LOG.md` D-034); no longer wholly undecided. The exact sender address, DNS/domain verification, Resend account, and provider secrets remain an operational prerequisite before automated sending is enabled in any environment. An audited manual-email fallback remains available independently of that prerequisite.
 
 ---
