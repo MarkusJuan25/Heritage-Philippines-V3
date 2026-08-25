@@ -536,8 +536,18 @@ enum Role {
 // only a direct, trusted, server-side write (e.g. the seed script, or a
 // future authorized staff-management feature) may change it.
 model User {
-  id            String   @id
-  name          String
+  id   String @id
+  name String
+
+  // Also carries a database-enforced case-insensitive unique invariant
+  // (docs/HERITAGE_V3_DECISIONS_LOG.md D-034 Section 8): a hand-written
+  // functional unique index on lower(email), applied in the same
+  // checkpoint 2 migration set as the PortalInvitation delivery-evidence
+  // changes below. Prisma's schema language cannot express a functional
+  // index, so it is not declared here — mirrors this schema's existing
+  // precedent (e.g. ProposalVersion's partial unique index) of
+  // hand-written constraints beyond what this file can represent. The
+  // plain `@unique` below is preserved unchanged per D-034 Section 8.
   email         String   @unique
   emailVerified Boolean  @default(false)
   image         String?
@@ -644,6 +654,12 @@ model User {
   // Notification model doc comment near AuditLog below for the full
   // field-by-field rationale.
   notificationsReceived Notification[] @relation("NotificationRecipient")
+
+  // Checkpoint 2 of the Client Portal Ownership Foundation
+  // (docs/HERITAGE_V3_DECISIONS_LOG.md D-034 Sections 2(c), 9, 10). Every
+  // PortalInvitation this staff member explicitly confirmed as manually
+  // sent — see PortalInvitation.deliveryConfirmedByStaff.
+  portalInvitationDeliveryConfirmations PortalInvitation[] @relation("PortalInvitationDeliveryConfirmedBy")
 
   @@map("user")
 }
@@ -1252,6 +1268,35 @@ enum PortalInvitationStatus {
   INVITATION_REVOKED
 }
 
+// Checkpoint 2 of the Client Portal Ownership Foundation
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-034 Sections 2, 10, 13). Schema
+// only — no repository/service/route/UI/adapter code exists yet. The
+// channel of a PortalInvitation's most recent send attempt; see
+// PortalInvitation.deliveryMethod.
+enum PortalInvitationDeliveryMethod {
+  AUTOMATED_EMAIL
+  MANUAL_EMAIL
+}
+
+// The eight delivery-evidence states D-034 Section 10 requires this
+// schema to distinguish. Provider acceptance (AUTOMATED_ACCEPTED) is
+// never itself confirmed recipient delivery — see
+// PortalInvitation.deliveryState for the full per-value contract, which
+// this enum alone cannot express; which of providerMessageId /
+// sendOperationId / deliveryConfirmedAt / deliveryConfirmedByStaffId
+// each value requires is enforced by hand-written CHECK constraints in
+// this checkpoint's migration.
+enum PortalInvitationDeliveryState {
+  NOT_ATTEMPTED
+  AUTOMATED_ACCEPTED
+  MANUALLY_CONFIRMED
+  PROVIDER_DELIVERED
+  PROVIDER_FAILED
+  PROVIDER_BOUNCED
+  PROVIDER_COMPLAINED
+  PROVIDER_SUPPRESSED
+}
+
 // The portal/profile extension for a Client (blueprint Section 14.1),
 // created only once — at the moment a PortalInvitation is successfully
 // redeemed and the linked User account is activated ("created at account
@@ -1341,16 +1386,30 @@ model ClientProfile {
 // implemented by the future invitation service, not modeled or performed
 // here.
 //
-// `expiresAt` stores only the expiration timestamp; this schema does not
-// invent or default an invitation validity duration — blueprint Section
-// 16.2 explicitly leaves the exact expiration duration an open decision.
+// `expiresAt` stores only the expiration timestamp. Invitation validity
+// is exactly seven calendar days from the token's own issuance
+// (D-034 Section 4; blueprint Section 16.2, resolved — no longer an open
+// decision). Effective expiry is always computed from this column
+// directly, regardless of the persisted `status` value.
+//
+// Checkpoint 2 (D-034 Sections 6, 7, 10, 13) makes `tokenHash`/
+// `expiresAt`/`destinationEmail` nullable together: null only while the
+// invitation is genuinely `INVITATION_PREPARED` with no token ever
+// generated, or a revoked-but-never-sent `INVITATION_REVOKED` row;
+// required together for every other status. Enforced by hand-written
+// CHECK constraints in this checkpoint's migration, since Prisma's
+// schema language cannot express them. The previously considered
+// discarded-placeholder-token design (generate-then-discard at prepare
+// time) is explicitly rejected by D-034 Section 13.
 //
 // This is schema only: single-use redemption, expiration processing,
 // resend, activation, and every status transition are enforced
 // transactionally by the future invitation/activation service, not by
-// this schema. Resend and revocation AuditLog entries (blueprint Section
-// 7.3: actor, timestamp, and — for revocation — a reason) are likewise
-// written by that future service, not here.
+// this schema — the CHECK constraints below enforce only data-shape
+// invariants, never a lifecycle transition. Resend and revocation
+// AuditLog entries (blueprint Section 7.3: actor, timestamp, and — for
+// revocation — a reason) are likewise written by that future service,
+// not here.
 model PortalInvitation {
   id String @id
 
@@ -1359,9 +1418,49 @@ model PortalInvitation {
 
   status PortalInvitationStatus @default(INVITATION_PREPARED)
 
-  tokenHash String @unique
+  tokenHash String? @unique
 
-  expiresAt DateTime
+  expiresAt DateTime?
+
+  // The invitation's destination email, normalized and frozen at the
+  // moment its token is generated (D-034 Sections 6, 7) — a later
+  // Client.email change never alters an already-issued invitation.
+  // Nullable under the exact same conditions as tokenHash/expiresAt, and
+  // always non-null together with them (same CHECK constraint).
+  destinationEmail String?
+
+  // The channel of the most recent send attempt (D-034 Sections 2, 10).
+  // Null exactly when deliveryState is NOT_ATTEMPTED — enforced by a
+  // hand-written CHECK constraint in this checkpoint's migration.
+  deliveryMethod PortalInvitationDeliveryMethod?
+
+  // Current delivery-evidence state (D-034 Section 10); see
+  // PortalInvitationDeliveryState. Defaults to NOT_ATTEMPTED, not
+  // nullable — every row has a meaningful value here, unlike the
+  // genuinely-absent-or-present fields above.
+  deliveryState PortalInvitationDeliveryState @default(NOT_ATTEMPTED)
+
+  // Stable identifier for one send *operation* (D-034 Sections 4, 10),
+  // used to reconcile a retried first-send request without either
+  // double-sending or silently rotating the token — applies to both the
+  // automated and the audited-manual channel alike. Unique; null only
+  // while deliveryState is NOT_ATTEMPTED.
+  sendOperationId String? @unique
+
+  // The automated provider's own message identifier, present only once
+  // Resend has positively responded (D-034 Section 10) — never populated
+  // for the manual channel. Provider acceptance is never itself
+  // represented as confirmed recipient delivery.
+  providerMessageId String?
+
+  // Manual-channel confirmation evidence (D-034 Sections 2(c), 9, 10):
+  // populated only when an authorized staff member takes the explicit,
+  // separate action confirming a manually-sent invitation was actually
+  // sent. Present only together, and only while deliveryState is
+  // MANUALLY_CONFIRMED.
+  deliveryConfirmedAt       DateTime?
+  deliveryConfirmedByStaffId String?
+  deliveryConfirmedByStaff   User?   @relation("PortalInvitationDeliveryConfirmedBy", fields: [deliveryConfirmedByStaffId], references: [id], onDelete: Restrict)
 
   sentAt      DateTime?
   openedAt    DateTime?

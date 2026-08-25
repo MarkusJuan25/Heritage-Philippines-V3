@@ -1,0 +1,28 @@
+-- User Email Case-Insensitive Uniqueness (docs/HERITAGE_V3_DECISIONS_LOG.md
+-- D-034 Section 8). Hand-authored: no schema.prisma diff exists for a
+-- functional index, so this migration was written directly rather than
+-- generated via `prisma migrate dev`/`prisma migrate diff`.
+--
+-- Adds a database-enforced case-insensitive unique invariant on
+-- "user"."email" as a functional index on lower(email), alongside — not
+-- replacing — the existing plain unique index (user_email_key), which
+-- D-034 Section 8 requires be preserved unchanged.
+--
+-- A read-only, case-variant-duplicate preflight query was run immediately
+-- before this migration was authored and again immediately before it was
+-- applied, against both heritage_v3_dev and heritage_v3_test: zero
+-- duplicate groups found in either, both times. Per D-034 Section 8, had
+-- any duplicate been found, this migration would not have been created or
+-- applied — no account is ever silently merged, renamed, or deleted to
+-- accommodate this constraint.
+--
+-- This index does not itself make any application query case-insensitive
+-- — it only prevents two rows from co-existing that differ solely by
+-- case. Existing sign-in behavior already performs its own case-folding
+-- at the application layer (better-auth's internal adapter lowercases
+-- both the read-side lookup and its own write paths); this index closes
+-- the concurrent-creation race that an application-level check alone
+-- cannot (D-034 Section 8).
+
+-- CreateIndex
+CREATE UNIQUE INDEX "user_email_lower_key" ON "user" (lower(email));
