@@ -5,7 +5,7 @@
 - Project: Heritage Philippines V3
 - Status: Active — Phase 1 environment-configuration standard
 - Phase: Phase 1 — Project Foundation
-- Last updated: July 22, 2026
+- Last updated: August 24, 2026
 - Authority: This document implements `docs/adr/ADR-001-technology-stack.md` and `.claude/rules/validation-deployment.md`. It does not override the blueprint, task board, or ADR — where this guide and any of those documents conflict, the higher-authority document governs and the conflict should be flagged rather than silently resolved.
 - Companion documents: `docs/HERITAGE_V3_PROJECT_BLUEPRINT.md` (Sections 2.1, 4.1, 10.3, 12.2, 12.3, 14.9, 15.5), `docs/HERITAGE_V3_TASK_BOARD.md` (Phase 1 and Phase 6), `docs/adr/ADR-001-technology-stack.md`, `.claude/rules/database-security.md`, `.claude/rules/backend.md`, `.claude/rules/validation-deployment.md`, `README.md`.
 
@@ -32,10 +32,10 @@ Everything here applies to the single V3 Next.js modular-monolith application (a
 As of this document:
 
 - **`DATABASE_URL`, `BETTER_AUTH_SECRET`, and `BETTER_AUTH_URL` are now required, server-only environment variables**, documented in `apps/web/.env.example`. Authentication (Better Auth, database-backed sessions, role guards) and PostgreSQL/Prisma integration are implemented — this is no longer a bare scaffold.
-- **The database schema currently has 12 locally applied migrations** (`apps/web/prisma/migrations/`), applied to the local `heritage_v3_dev` and/or disposable `heritage_v3_test` databases only. **Staging and production migration application remain unverified and are not claimed** — no migration has been confirmed applied to either environment.
+- **The database schema currently has 16 locally applied migrations** (`apps/web/prisma/migrations/`), applied to the local `heritage_v3_dev` and/or disposable `heritage_v3_test` databases only. **Staging and production migration application remain unverified and are not claimed** — no migration has been confirmed applied to either environment.
 - **GitHub Actions CI exists and runs the repository quality gate** (`.github/workflows/ci.yml`): formatting, lint, type check, tests, and build, on every pull request and push to `main`. It does not deploy anywhere and does not touch a real database.
 - **A provider-neutral deployment-pipeline skeleton now exists** (`.github/workflows/deploy-reusable.yml`, `deploy-staging.yml`, `deploy-production.yml`) — see Section 12 for what it does and, more importantly, does not yet do. **No real staging or production deployment target is configured**, and none of these workflows can currently deploy, migrate, or verify a deployed environment; each unimplemented step fails closed by design.
-- **Email and private object storage remain unimplemented.** Sections 10–11 below describe planned boundaries for each, not implemented behavior.
+- **Email sending and private object storage remain unimplemented.** Portal-invitation email now has a selected provider (Resend, D-034 Section 2(b)) and an optional, undocumented-value environment-variable foundation (Section 10 below) — no adapter, sending code, or webhook handler exists yet. Private object storage has no provider selection yet. Sections 10–11 below describe planned boundaries for each, not implemented behavior.
 - **`GET /api/health` remains a liveness-only check** (`apps/web/src/app/api/health/route.ts`), returning service name, status, and timestamp. It does not verify database, storage, or email connectivity.
 - `NODE_ENV` is managed entirely by Next.js tooling (`next dev`, `next build`, `next start`) and is not set or read manually anywhere in this codebase.
 
@@ -152,13 +152,14 @@ Authentication implementation and library selection are separate, not-yet-starte
 
 ## 10. Transactional-Email Boundaries
 
-Outbound transactional email (portal invitations, payment reminders, message notifications) is a later Phase 3/4 item (ADR-001: "first needed for portal invitations in Phase 3; extended... in Phase 4"). Boundaries for when it's implemented:
+Outbound transactional email (portal invitations, payment reminders, message notifications) is a later Phase 3/4 item (ADR-001: "first needed for portal invitations in Phase 3; extended... in Phase 4"). **Resend is the selected automated transactional-email provider for portal invitations** (`docs/HERITAGE_V3_DECISIONS_LOG.md` D-034 Section 2(b)), with an audited manual-email fallback that works independently of automated-send readiness (D-034 Section 2(c)). No Resend adapter, sending code, or webhook handler exists yet — Stage 2 (D-034 Section 15) adds only the optional, undocumented-value environment-variable foundation below; provider selection is no longer an open decision, but sending capability remains unimplemented. Boundaries for when it's implemented:
 
 - Email provider API keys are server-only secrets, one set per environment, never shared between staging and production.
 - Local and staging must run in a sandbox/test mode or send only to an explicit allowlist of test recipients — neither may ever send real notifications to real client addresses.
 - Email is outbound notification only for the MVP (blueprint Section 10.3; ADR-001); it is not a system of record for conversations, so no environment configuration in this area should be designed to receive or parse inbound mail.
 - Sensitive content (documents, full payment details, full private conversation contents) must never be placed in an email body or attachment (blueprint Section 12.3; ADR-001) — this is an application-logic rule that email environment configuration must not be used to work around (e.g., no "just email the file" fallback modes, even in non-production environments).
-- Provider selection remains deferred (ADR-001); the eventual adapter should be confined to the email feature's own module (per `.claude/rules/architecture.md`'s feature-ownership rule) so a future provider swap touches one boundary, not call sites scattered across the codebase.
+- The eventual Resend adapter should be confined to the invitation feature's own module (per `.claude/rules/architecture.md`'s feature-ownership rule) so a future provider swap touches one boundary, not call sites scattered across the codebase. Integration uses Resend's Node.js/Next.js API-key path, not the Vercel Marketplace integration, since the deployment target remains Hostinger (ADR-001).
+- **Portal-invitation email variables** (`apps/web/src/lib/env.ts`, `apps/web/.env.example`; all optional, no real value ever documented here): `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM`, `EMAIL_REPLY_TO`, and the explicit fail-closed switch `EMAIL_DELIVERY_ENABLED` (default `"false"`). Automated delivery remains operationally disabled until a Resend account exists, DNS control is confirmed, the Heritage Philippines sending domain is verified, the exact sender address is approved, and these secrets are configured through the real deployment environment (D-034 Section 12) — none of that is claimed or performed by this document or by Stage 2.
 
 ## 11. Private-Object-Storage Boundaries
 

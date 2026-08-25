@@ -34,6 +34,22 @@ const serverEnvSchema = z.object({
   BETTER_AUTH_URL: z
     .string()
     .url('BETTER_AUTH_URL must be a valid URL, e.g. http://localhost:3000'),
+
+  // Portal invitation email delivery foundations
+  // (docs/HERITAGE_V3_DECISIONS_LOG.md D-034 Section 12). All optional —
+  // automated delivery remains disabled until every D-034 Section 12
+  // prerequisite (Resend account, DNS, domain verification, sender
+  // approval, deployment-environment secrets) is genuinely met; the
+  // audited manual-email channel works without any of these. No default
+  // or real value is ever set here or in .env.example.
+  RESEND_API_KEY: z.string().min(1).optional(),
+  RESEND_WEBHOOK_SECRET: z.string().min(1).optional(),
+  EMAIL_FROM: z.string().min(1).optional(),
+  EMAIL_REPLY_TO: z.string().min(1).optional(),
+  // Explicit fail-closed switch, independent of whether the variables
+  // above happen to be set — automated sending must never be inferred
+  // solely from RESEND_API_KEY's presence (D-034 Section 12).
+  EMAIL_DELIVERY_ENABLED: z.enum(['true', 'false']).default('false'),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
