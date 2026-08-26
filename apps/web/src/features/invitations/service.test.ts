@@ -435,9 +435,82 @@ describe('resendInvitation', () => {
       { sendOperationId: current.sendOperationId, updatedAt: current.updatedAt },
       expect.anything(),
     );
+    // Stage 4 correction: resend/reissue always writes its RESENT audit
+    // entry, regardless of channel — unlike the first `sendInvitation`,
+    // which only audits the AUTOMATED_EMAIL channel. This assertion was
+    // missing from this test prior to that fix, even though the test's
+    // own name already claimed to prove it.
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+      TX_CLIENT,
+      expect.objectContaining({ actorId: ADMIN.id, action: 'PORTAL_INVITATION_RESENT' }),
+    );
     // The plain, unconditional writer is never used for a concurrency-
     // checked resend — only the atomic conditional variant.
     expect(repositoryMocks.recordSendReservation).not.toHaveBeenCalled();
+  });
+
+  it('allows reissuing a REVOKED invitation back to INVITATION_SENT (Stage 4 correction: D-034 §3 authorizes this transition)', async () => {
+    const current = invitation({
+      status: 'INVITATION_REVOKED',
+      revokedAt: new Date('2026-02-01T00:00:00Z'),
+    });
+    repositoryMocks.findInvitationByClientId.mockResolvedValue(current);
+    repositoryMocks.findClientEmailById.mockResolvedValue({ email: 'client@example.test' });
+    const reissued = invitation({ status: 'INVITATION_SENT', revokedAt: null });
+    repositoryMocks.recordSendReservationIfUnstale.mockResolvedValue(reissued);
+
+    const result = await resendInvitation(
+      ADMIN,
+      CLIENT_ID,
+      { deliveryMethod: 'MANUAL_EMAIL', idempotencyKey },
+      concurrencyFor(current),
+    );
+
+    expect(result.invitation).toEqual(reissued);
+    expect(repositoryMocks.recordSendReservationIfUnstale).toHaveBeenCalledWith(
+      TX_CLIENT,
+      'invitation-1',
+      { sendOperationId: current.sendOperationId, updatedAt: current.updatedAt },
+      expect.anything(),
+    );
+    // The audit entry's beforeState/afterState captures the REVOKED ->
+    // SENT transition — this is the only record of that fact this
+    // mutation itself produces; the historical PORTAL_INVITATION_REVOKED
+    // entry from the earlier revoke remains a separate, untouched row
+    // (proven at the real-database level in service.integration.test.ts,
+    // where both rows can actually be queried back).
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, {
+      actorId: ADMIN.id,
+      action: 'PORTAL_INVITATION_RESENT',
+      entityType: 'PortalInvitation',
+      entityId: 'invitation-1',
+      beforeState: expect.objectContaining({ status: 'INVITATION_REVOKED' }),
+      afterState: expect.objectContaining({ status: 'INVITATION_SENT' }),
+    });
+  });
+
+  it('still rejects a stale precondition when reissuing from REVOKED (concurrency protection applies to every allowed source status)', async () => {
+    const stale = invitation({
+      status: 'INVITATION_REVOKED',
+      revokedAt: new Date('2026-02-01T00:00:00Z'),
+      updatedAt: new Date('2026-02-01T00:00:00Z'),
+    });
+    const current = invitation({
+      status: 'INVITATION_REVOKED',
+      revokedAt: new Date('2026-02-01T00:00:00Z'),
+      updatedAt: new Date('2026-02-02T00:00:00Z'),
+    });
+    repositoryMocks.findInvitationByClientId.mockResolvedValue(current);
+
+    await expect(
+      resendInvitation(
+        ADMIN,
+        CLIENT_ID,
+        { deliveryMethod: 'MANUAL_EMAIL', idempotencyKey },
+        concurrencyFor(stale),
+      ),
+    ).rejects.toMatchObject({ code: 'INVITATION_SEND_OPERATION_STALE' });
+    expect(repositoryMocks.recordSendReservationIfUnstale).not.toHaveBeenCalled();
   });
 
   it('writes PORTAL_INVITATION_RESENT (not SENT_AUTOMATED) for an automated reissue', async () => {

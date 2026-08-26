@@ -261,3 +261,34 @@
   border: 1px solid #d0d0d0;
   border-radius: 0.5rem;
 }
+
+/* PortalInvitationPanel (D-034 Stage 4; D-035; D-036). .invitationPanel
+   mirrors .assignmentPanel's own wrapper exactly — this feature keeps its
+   own copy rather than sharing one cross-feature class, per this file's
+   established per-panel-class convention. .manualLinkBox is this panel's
+   own addition: a visually distinct box for the one-time
+   manualInvitationUrl display, using an emphasis border (not color alone —
+   the accompanying copy already states in text that the link is one-time
+   and lost-on-refresh) to draw attention to its sensitivity without
+   relying on hue to carry that meaning. */
+.invitationPanel {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+}
+
+.manualLinkBox {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 2px solid #1a7a3a;
+  border-radius: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.manualLinkBox input[type='text'] {
+  font: inherit;
+  width: 100%;
+}

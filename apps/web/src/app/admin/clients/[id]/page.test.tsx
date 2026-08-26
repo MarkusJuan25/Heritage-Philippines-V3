@@ -10,6 +10,11 @@ vi.mock('@/lib/auth/guards', () => ({ getCurrentUser: getCurrentUserMock }));
 const { getClientByIdMock } = vi.hoisted(() => ({ getClientByIdMock: vi.fn() }));
 vi.mock('@/features/clients/service', () => ({ getClientById: getClientByIdMock }));
 
+const { getInvitationForClientMock } = vi.hoisted(() => ({ getInvitationForClientMock: vi.fn() }));
+vi.mock('@/features/invitations/service', () => ({
+  getInvitationForClient: getInvitationForClientMock,
+}));
+
 const { redirectMock, routerPushMock, routerRefreshMock } = vi.hoisted(() => ({
   redirectMock: vi.fn((url: string) => {
     throw new Error(`REDIRECT:${url}`);
@@ -104,6 +109,10 @@ beforeEach(() => {
     .fn()
     .mockResolvedValue(jsonResponse(200, { items: [], page: 1, pageSize: 100, total: 0 }));
   vi.stubGlobal('fetch', fetchMock);
+  // PortalInvitationPanel (rendered by this page for every allowed role)
+  // — "Not Invited" (no row) by default, so every existing test unrelated
+  // to this panel's own behavior still renders deterministically.
+  getInvitationForClientMock.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -517,6 +526,94 @@ describe('AdminClientDetailPage', () => {
       );
       expect(screen.queryByRole('link', { name: /new proposal/i })).not.toBeInTheDocument();
       expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('PortalInvitationPanel wiring (D-034 Stage 4; D-035; D-036)', () => {
+    function invitationRecord(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'invitation-1',
+        clientId: CLIENT_ID,
+        status: 'INVITATION_PREPARED',
+        tokenHash: 'a'.repeat(64),
+        expiresAt: null,
+        destinationEmail: null,
+        deliveryMethod: null,
+        deliveryState: 'NOT_ATTEMPTED',
+        sendOperationId: null,
+        providerMessageId: null,
+        deliveryConfirmedAt: null,
+        deliveryConfirmedByStaffId: null,
+        sentAt: null,
+        openedAt: null,
+        activatedAt: null,
+        revokedAt: null,
+        createdAt: new Date('2026-08-01T00:00:00Z'),
+        updatedAt: new Date('2026-08-01T00:00:00Z'),
+        ...overrides,
+      };
+    }
+
+    it('renders "Not Invited" with a Prepare Invitation control when no invitation exists', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getClientByIdMock.mockResolvedValue(clientDetail());
+      getInvitationForClientMock.mockResolvedValue(null);
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.getByRole('heading', { name: 'Portal Invitation' })).toBeInTheDocument();
+      expect(screen.getByText('Not Invited')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Prepare Invitation' })).toBeInTheDocument();
+    });
+
+    it('renders the current status for an existing invitation, identically for ADMIN_MANAGER and TRAVEL_CONSULTANT', async () => {
+      getClientByIdMock.mockResolvedValue(clientDetail());
+      getInvitationForClientMock.mockResolvedValue(
+        invitationRecord({ status: 'INVITATION_SENT', destinationEmail: 'client@example.test' }),
+      );
+
+      for (const actor of [ADMIN_MANAGER, TRAVEL_CONSULTANT]) {
+        getCurrentUserMock.mockResolvedValue(actor);
+        const jsx = await AdminClientDetailPage({ params: params() });
+        render(jsx);
+        expect(screen.getAllByText('Invitation Sent').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('client@example.test').length).toBeGreaterThan(0);
+      }
+    });
+
+    it('never renders tokenHash anywhere, even though the mocked service result carries it', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getClientByIdMock.mockResolvedValue(clientDetail());
+      const record = invitationRecord({ status: 'INVITATION_SENT' });
+      getInvitationForClientMock.mockResolvedValue(record);
+
+      const jsx = await AdminClientDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.queryByText(record.tokenHash)).not.toBeInTheDocument();
+      expect(document.body.innerHTML).not.toContain(record.tokenHash);
+    });
+
+    it('calls getInvitationForClient with the exact actor and Client id', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getClientByIdMock.mockResolvedValue(clientDetail());
+      getInvitationForClientMock.mockResolvedValue(null);
+
+      await AdminClientDetailPage({ params: params() });
+
+      expect(getInvitationForClientMock).toHaveBeenCalledWith(ADMIN_MANAGER, CLIENT_ID);
+      expect(getInvitationForClientMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not render the panel for a malformed Client id (not-found state)', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+
+      const jsx = await AdminClientDetailPage({ params: params('not-a-uuid') });
+      render(jsx);
+
+      expect(screen.queryByRole('heading', { name: 'Portal Invitation' })).not.toBeInTheDocument();
+      expect(getInvitationForClientMock).not.toHaveBeenCalled();
     });
   });
 });

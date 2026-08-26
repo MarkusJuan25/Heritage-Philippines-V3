@@ -163,6 +163,21 @@ async function reserveSendOperation(
   allowedStatuses: readonly PortalInvitationStatus[],
   auditAction: string,
   concurrency?: ResendConcurrencyPrecondition,
+  // Stage 4 correction: `sendInvitation` (the first send) only audits the
+  // AUTOMATED_EMAIL channel — a manual first "send" is merely link
+  // generation with nothing yet attested (D-034 §9's rationale for
+  // omitting an audit entry there is unchanged and untouched by this
+  // fix). `resendInvitation` is different: D-034 §9 names ONE audit
+  // action, PORTAL_INVITATION_RESENT, for "resend and reissue... since
+  // both rotate the token identically" — with no stated channel
+  // exception. Rotating the token is itself the audited event for
+  // resend/reissue, regardless of which channel is subsequently chosen,
+  // so `resendInvitation` passes `alwaysAudit: true` to always write its
+  // RESENT entry — a real, pre-existing gap this codebase's own
+  // real-database integration test (added alongside the Stage 4
+  // REVOKED-reissue correction) caught: a manual reissue previously wrote
+  // no audit entry at all.
+  alwaysAudit = false,
 ): Promise<ReservationOutcome> {
   const access = await canAccessClient(actor, clientId);
   if (!access.allowed) throw notFoundOrForbidden(actor);
@@ -280,7 +295,7 @@ async function reserveSendOperation(
       updated = await repository.recordSendReservation(tx, invitation.id, reservationInput);
     }
 
-    if (input.deliveryMethod === 'AUTOMATED_EMAIL') {
+    if (input.deliveryMethod === 'AUTOMATED_EMAIL' || alwaysAudit) {
       await repository.insertAuditLog(tx, {
         actorId: actor.id,
         action: auditAction,
@@ -379,13 +394,28 @@ export async function sendInvitation(
 
 /**
  * Explicit resend/reissue (D-034 Sections 4, 9) — always rotates the
- * token; shares one audit action (RESENT) for both the plain-resend and
- * reissue-after-expiry cases. `concurrency` is required (Stage 3
- * Correction and Security Review Pass 1 §3): the caller must supply the
- * `sendOperationId`/`updatedAt` it last observed via `GET
- * /api/clients/[id]/invitation`, so a delayed retry of a superseded
- * resend can never silently rotate the token again or clobber a newer
- * resend's delivery evidence.
+ * token; shares one audit action (RESENT) for the plain-resend,
+ * reissue-after-expiry, and reissue-after-revoke cases alike.
+ * `concurrency` is required (Stage 3 Correction and Security Review Pass
+ * 1 §3): the caller must supply the `sendOperationId`/`updatedAt` it last
+ * observed via `GET /api/clients/[id]/invitation`, so a delayed retry of
+ * a superseded resend can never silently rotate the token again or
+ * clobber a newer resend's delivery evidence — this precondition applies
+ * identically regardless of which of the four source statuses below the
+ * invitation started from.
+ *
+ * `INVITATION_REVOKED` (Stage 4 correction): D-034 Section 3's state
+ * machine explicitly authorizes `INVITATION_EXPIRED | INVITATION_REVOKED
+ * → INVITATION_SENT` (reissue), but the original Stage 3 implementation
+ * only ever allowed `SENT`/`OPENED`/`EXPIRED` — a revoked invitation was
+ * permanently terminal in the deployed API, contradicting the accepted
+ * contract. Reissuing from `INVITATION_REVOKED` shares this exact same
+ * code path — the same optimistic-concurrency precondition, the same
+ * atomic token/expiry rotation, and the same unconditional
+ * delivery-evidence reset (`repository.ts`'s `sendReservationData`,
+ * which now also clears the stale `revokedAt` this specific source status
+ * would otherwise leave behind) — `prepareInvitation`'s own, separate
+ * duplicate-row protection is untouched by this change.
  */
 export async function resendInvitation(
   actor: AuthenticatedUser,
@@ -397,9 +427,10 @@ export async function resendInvitation(
     actor,
     clientId,
     input,
-    ['INVITATION_SENT', 'INVITATION_OPENED', 'INVITATION_EXPIRED'],
+    ['INVITATION_SENT', 'INVITATION_OPENED', 'INVITATION_EXPIRED', 'INVITATION_REVOKED'],
     INVITATION_AUDIT_ACTIONS.RESENT,
     concurrency,
+    true,
   );
 
   if (outcome.kind === 'already-reserved') {
