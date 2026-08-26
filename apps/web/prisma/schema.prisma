@@ -1278,16 +1278,30 @@ enum PortalInvitationDeliveryMethod {
   MANUAL_EMAIL
 }
 
-// The eight delivery-evidence states D-034 Section 10 requires this
-// schema to distinguish. Provider acceptance (AUTOMATED_ACCEPTED) is
-// never itself confirmed recipient delivery — see
-// PortalInvitation.deliveryState for the full per-value contract, which
-// this enum alone cannot express; which of providerMessageId /
-// sendOperationId / deliveryConfirmedAt / deliveryConfirmedByStaffId
-// each value requires is enforced by hand-written CHECK constraints in
-// this checkpoint's migration.
+// The nine delivery-evidence states D-034 Section 10 requires this
+// schema to distinguish (Stage 3 implementation authorization added the
+// ninth, AUTOMATED_UNCONFIRMED, migrations 20260826090000/90001).
+// Provider acceptance (AUTOMATED_ACCEPTED) is never itself confirmed
+// recipient delivery — see PortalInvitation.deliveryState for the full
+// per-value contract, which this enum alone cannot express; which of
+// providerMessageId / sendOperationId / deliveryConfirmedAt /
+// deliveryConfirmedByStaffId each value requires is enforced by
+// hand-written CHECK constraints (this checkpoint's migration, plus
+// migration 20260826090001 for AUTOMATED_UNCONFIRMED).
 enum PortalInvitationDeliveryState {
   NOT_ATTEMPTED
+  // An automated send operation was reserved/attempted, but provider
+  // acceptance has not yet been confirmed — a transport interruption or
+  // timeout whose actual provider outcome is unknown (D-034 Stage 3
+  // Section 3 correction). Never conflated with PROVIDER_FAILED (a
+  // definite provider rejection) or any accepted/delivered state.
+  // Requires deliveryMethod = AUTOMATED_EMAIL and a non-null
+  // sendOperationId (both via existing, unmodified CHECK constraints);
+  // permits providerMessageId to remain null — the invitation service
+  // transitions a row out of this state once a provider message id is
+  // learned (an email.sent or reconciling email.delivery_delayed
+  // webhook), never leaving both true at rest by design.
+  AUTOMATED_UNCONFIRMED
   AUTOMATED_ACCEPTED
   MANUALLY_CONFIRMED
   PROVIDER_DELIVERED
@@ -1450,8 +1464,13 @@ model PortalInvitation {
   // The automated provider's own message identifier, present only once
   // Resend has positively responded (D-034 Section 10) — never populated
   // for the manual channel. Provider acceptance is never itself
-  // represented as confirmed recipient delivery.
-  providerMessageId String?
+  // represented as confirmed recipient delivery. `@unique` (Stage 3
+  // implementation authorization, migration 20260826090001) so a
+  // provider webhook event can be correlated back to exactly one
+  // invitation via a `findUnique`-safe lookup; PostgreSQL unique indexes
+  // already treat multiple NULLs as mutually distinct, so this adds no
+  // constraint across not-yet-sent rows.
+  providerMessageId String? @unique
 
   // Manual-channel confirmation evidence (D-034 Sections 2(c), 9, 10):
   // populated only when an authorized staff member takes the explicit,

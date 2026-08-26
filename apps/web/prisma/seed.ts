@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { hashPassword } from 'better-auth/crypto';
 
 import { prisma } from '../src/lib/db';
+import { normalizeEmail } from '../src/lib/contact-normalization';
 import { getServerEnv } from '../src/lib/env';
 import { ROLES, type AppRole } from '../src/lib/auth/roles';
 
@@ -59,9 +60,15 @@ type SeedUser = {
 
 // One seed account per blueprint-approved role (blueprint Section 4), so
 // every role's login and role-guard behavior can be exercised locally.
+// `normalizeEmail` here is defense-in-depth (D-034 Stage 3 Section 8;
+// PR #60's follow-up gate) — this literal template is already lowercase
+// by construction, but routing it through the same shared normalization
+// every other trusted User.email write path uses keeps this file correct
+// even if that literal ever changes, rather than relying on incidental
+// lowercase-by-construction.
 const SEED_USERS: SeedUser[] = ROLES.map((role) => ({
   role,
-  email: `${role.toLowerCase().replace(/_/g, '.')}@example.test`,
+  email: normalizeEmail(`${role.toLowerCase().replace(/_/g, '.')}@example.test`),
   name: `${role} (seed)`,
 }));
 
