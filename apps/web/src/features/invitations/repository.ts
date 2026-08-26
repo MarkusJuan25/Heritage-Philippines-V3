@@ -180,6 +180,18 @@ function sendReservationData(input: SendReservationInput) {
     providerMessageId: null,
     deliveryConfirmedAt: null,
     deliveryConfirmedByStaffId: null,
+    // Stage 4's corrected reissue-from-REVOKED transition
+    // (D-034 §3: "INVITATION_EXPIRED | INVITATION_REVOKED →
+    // INVITATION_SENT (authorized reissue, in place, same row)"):
+    // `recordRevocation` sets `revokedAt` but never clears it on its own —
+    // a row can only ever legitimately carry a non-null `revokedAt` while
+    // `status = INVITATION_REVOKED`, and this reservation is about to move
+    // `status` away from that value (to INVITATION_SENT), so the stale
+    // revocation timestamp is cleared here, unconditionally, in the same
+    // atomic write. The historical `PORTAL_INVITATION_REVOKED` AuditLog
+    // entry is untouched — audit rows are append-only and this clears only
+    // the CURRENT row's own field, never a past record of what happened.
+    revokedAt: null,
     ...(input.automated
       ? {
           deliveryMethod: 'AUTOMATED_EMAIL' as const,

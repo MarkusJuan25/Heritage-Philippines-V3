@@ -17,7 +17,8 @@ export const runtime = 'nodejs';
 type RouteParams = { id: string };
 
 // Explicit resend/reissue (D-034 Sections 4, 9) — from INVITATION_SENT,
-// INVITATION_OPENED, or INVITATION_EXPIRED; always rotates the token.
+// INVITATION_OPENED, INVITATION_EXPIRED, or INVITATION_REVOKED (D-034
+// Stage 4 correction); always rotates the token.
 // Requires a fresh `Idempotency-Key` header UUID for this new deliberate
 // action (D-034 Stage 3 Section 5) — never the same key used for an
 // earlier send/resend. Also requires `expectedCurrentSendOperationId` and

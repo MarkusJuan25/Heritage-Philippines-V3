@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -23,13 +23,27 @@ import type { AuthenticatedUser } from '@/lib/auth/guards';
 //
 // AUTOMATED DELIVERY: `EMAIL_DELIVERY_ENABLED` is deliberately left unset
 // (defaults to 'false') for this entire file — this test never sends a
-// real email or calls the real Resend API. It only proves that requesting
-// an AUTOMATED_EMAIL send while delivery is disabled is correctly
-// rejected before any provider call would ever be attempted.
+// real email or calls the real Resend API, and never sets a real
+// RESEND_API_KEY/webhook secret anywhere. `./resend-adapter` is mocked at
+// the module boundary (below) precisely so the one Stage 4 test requiring
+// a successful automated send ("revoked → automated reissue") can prove
+// the full real-database pipeline reaches that exact boundary correctly,
+// without ever making a real HTTP call to Resend — `isAutomatedDeliveryEnabled`
+// defaults this mock to `false` (matching the real module's real,
+// unconfigured behavior) so every *other* test in this file keeps
+// exercising the genuine fail-closed guard, not a permissive mock.
 //
 // SKIP/FAIL SEMANTICS: identical to features/staff/service.integration.test.ts
 // — skipped entirely when TEST_DATABASE_URL is unset; a loud failure (never
 // a silent skip) if it is set but fails validation.
+
+const resendAdapterMocks = vi.hoisted(() => ({
+  isAutomatedDeliveryEnabled: vi.fn(() => false),
+  sendInvitationEmail: vi.fn(),
+  verifyResendWebhook: vi.fn(),
+  buildActivationUrl: vi.fn((rawToken: string) => `http://localhost:3000/activate/${rawToken}`),
+}));
+vi.mock('./resend-adapter', () => resendAdapterMocks);
 
 const REQUIRED_TEST_DATABASE_NAME = 'heritage_v3_test';
 const ALLOWED_TEST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
@@ -175,6 +189,20 @@ describe.skipIf(!hasTestDatabaseUrl)('portal invitation service (real database)'
     });
     createdAssignmentIds.push(id);
   }
+
+  // Resets the module-level resend-adapter mock back to its safe,
+  // fail-closed default before every test — only the one test that
+  // deliberately exercises the mocked provider boundary overrides
+  // `isAutomatedDeliveryEnabled`/`sendInvitationEmail` for itself, and
+  // this guarantees that override can never leak into any other test in
+  // this file.
+  beforeEach(() => {
+    resendAdapterMocks.isAutomatedDeliveryEnabled.mockReset().mockReturnValue(false);
+    resendAdapterMocks.sendInvitationEmail.mockReset();
+    resendAdapterMocks.buildActivationUrl
+      .mockReset()
+      .mockImplementation((rawToken: string) => `http://localhost:3000/activate/${rawToken}`);
+  });
 
   it('runs the full prepare -> send (manual) -> confirm -> revoke lifecycle against the real schema', async () => {
     const clientId = await createClient();
@@ -495,5 +523,187 @@ describe.skipIf(!hasTestDatabaseUrl)('portal invitation service (real database)'
       staleMessageId,
     );
     expect(staleCorrelation).toBeNull();
+  });
+
+  // --- Stage 4 correction: reissuing a REVOKED invitation (D-034 §3) ---
+
+  /** Prepare -> send (manual) -> revoke, returning the resulting REVOKED row. */
+  async function prepareSendAndRevoke(
+    actor: AuthenticatedUser,
+    clientId: string,
+  ): Promise<NonNullable<Awaited<ReturnType<typeof service.getInvitationForClient>>>> {
+    await service.prepareInvitation(actor, clientId);
+    await service.sendInvitation(actor, clientId, {
+      deliveryMethod: 'MANUAL_EMAIL',
+      idempotencyKey: randomUUID(),
+    });
+    const revoked = await service.revokeInvitation(actor, clientId, 'no longer proceeding');
+    expect(revoked.status).toBe('INVITATION_REVOKED');
+    expect(revoked.revokedAt).not.toBeNull();
+    // Revoke already clears the token triple (Stage 2/3, unchanged) — the
+    // "old token" this reissue later invalidates is the one that existed
+    // before this revoke, which is already gone by construction.
+    expect(revoked.tokenHash).toBeNull();
+    return revoked;
+  }
+
+  it('reissues a REVOKED invitation via MANUAL_EMAIL: rotates the token, clears the stale revokedAt, and preserves the historical REVOKED AuditLog entry', async () => {
+    const clientId = await createClient();
+    const revoked = await prepareSendAndRevoke(adminActor, clientId);
+
+    const reissued = await service.resendInvitation(
+      adminActor,
+      clientId,
+      { deliveryMethod: 'MANUAL_EMAIL', idempotencyKey: randomUUID() },
+      {
+        expectedCurrentSendOperationId: revoked.sendOperationId,
+        expectedUpdatedAt: revoked.updatedAt,
+      },
+    );
+
+    expect(reissued.invitation.status).toBe('INVITATION_SENT');
+    // Revocation metadata is cleared on the CURRENT row now that it is
+    // active again — the row can no longer legitimately claim both
+    // `status: INVITATION_SENT` and a non-null `revokedAt`.
+    expect(reissued.invitation.revokedAt).toBeNull();
+    // A genuinely new token was rotated in (revoke had nulled the old one).
+    expect(reissued.invitation.tokenHash).not.toBeNull();
+    expect(reissued.invitation.expiresAt).not.toBeNull();
+    expect(reissued.manualInvitationUrl).toMatch(/^https?:\/\/.+\/activate\/.+/);
+
+    // The historical PORTAL_INVITATION_REVOKED entry is untouched —
+    // AuditLog is append-only — and a new PORTAL_INVITATION_RESENT entry
+    // now follows it, both attributed to the same acting staff member.
+    // (prepareSendAndRevoke's manual "send" is never confirmed, so it
+    // writes no audit entry of its own — see confirm-manual-sent's own
+    // doc comment — leaving exactly these three: PREPARED, REVOKED, then
+    // this test's own RESENT.)
+    const auditActions = await prisma.auditLog.findMany({
+      where: { entityType: 'PortalInvitation', entityId: reissued.invitation.id },
+      orderBy: { createdAt: 'asc' },
+      select: { action: true, actorId: true },
+    });
+    expect(auditActions.map((row) => row.action)).toEqual([
+      'PORTAL_INVITATION_PREPARED',
+      'PORTAL_INVITATION_REVOKED',
+      'PORTAL_INVITATION_RESENT',
+    ]);
+    expect(auditActions.every((row) => row.actorId === adminActor.id)).toBe(true);
+  });
+
+  it('reissues a REVOKED invitation via AUTOMATED_EMAIL through the mocked provider adapter boundary', async () => {
+    const clientId = await createClient();
+    const revoked = await prepareSendAndRevoke(adminActor, clientId);
+
+    resendAdapterMocks.isAutomatedDeliveryEnabled.mockReturnValue(true);
+    const providerMessageId = `msg_${randomUUID()}`;
+    resendAdapterMocks.sendInvitationEmail.mockResolvedValue({
+      outcome: 'accepted',
+      messageId: providerMessageId,
+    });
+
+    const client = await prisma.client.findUnique({
+      where: { id: clientId },
+      select: { email: true },
+    });
+
+    const reissued = await service.resendInvitation(
+      adminActor,
+      clientId,
+      { deliveryMethod: 'AUTOMATED_EMAIL', idempotencyKey: randomUUID() },
+      {
+        expectedCurrentSendOperationId: revoked.sendOperationId,
+        expectedUpdatedAt: revoked.updatedAt,
+      },
+    );
+
+    expect(reissued.delivery).toBe('AUTOMATED_ACCEPTED');
+    expect(reissued.invitation.status).toBe('INVITATION_SENT');
+    expect(reissued.invitation.deliveryState).toBe('AUTOMATED_ACCEPTED');
+    expect(reissued.invitation.deliveryMethod).toBe('AUTOMATED_EMAIL');
+    expect(reissued.invitation.providerMessageId).toBe(providerMessageId);
+    expect(reissued.invitation.revokedAt).toBeNull();
+    expect(reissued.invitation.tokenHash).not.toBeNull();
+    // manualInvitationUrl is never present on the automated channel.
+    expect(reissued.manualInvitationUrl).toBeUndefined();
+
+    // The real service pipeline reached the provider adapter boundary with
+    // the correct destination/operation identifiers — proven by asserting
+    // the mock's own call, not merely that the DB ended up in the right
+    // state (which a bypassed call could also produce by coincidence).
+    expect(resendAdapterMocks.sendInvitationEmail).toHaveBeenCalledTimes(1);
+    const [sendArgs, sendOptions] = resendAdapterMocks.sendInvitationEmail.mock.calls[0]!;
+    expect(sendArgs).toMatchObject({
+      to: client?.email,
+      sendOperationId: reissued.invitation.sendOperationId,
+    });
+    expect(sendOptions).toEqual({
+      idempotencyKey: `portal-invitation/${reissued.invitation.sendOperationId}`,
+    });
+  });
+
+  it('rejects a stale precondition when reissuing from REVOKED, performing no mutation (real atomic WHERE-clause proof)', async () => {
+    const clientId = await createClient();
+    const revoked = await prepareSendAndRevoke(adminActor, clientId);
+    const staleReissuePrecondition = {
+      expectedCurrentSendOperationId: revoked.sendOperationId,
+      expectedUpdatedAt: revoked.updatedAt,
+    };
+
+    // A genuine reissue succeeds first, moving the row on.
+    const firstReissue = await service.resendInvitation(
+      adminActor,
+      clientId,
+      { deliveryMethod: 'MANUAL_EMAIL', idempotencyKey: randomUUID() },
+      staleReissuePrecondition,
+    );
+    expect(firstReissue.invitation.status).toBe('INVITATION_SENT');
+
+    // A delayed retry still carrying the REVOKED-era precondition must be
+    // rejected — the row is no longer REVOKED, so this is now stale —
+    // and must mutate nothing.
+    await expect(
+      service.resendInvitation(
+        adminActor,
+        clientId,
+        { deliveryMethod: 'MANUAL_EMAIL', idempotencyKey: randomUUID() },
+        staleReissuePrecondition,
+      ),
+    ).rejects.toMatchObject({ code: 'INVITATION_SEND_OPERATION_STALE' });
+
+    const finalState = await service.getInvitationForClient(adminActor, clientId);
+    expect(finalState?.tokenHash).toBe(firstReissue.invitation.tokenHash);
+    expect(finalState?.updatedAt.getTime()).toBe(firstReissue.invitation.updatedAt.getTime());
+  });
+
+  it('rejects an unassigned TRAVEL_CONSULTANT reissuing a REVOKED invitation, and allows the assigned one', async () => {
+    const clientId = await createClient();
+    const revoked = await prepareSendAndRevoke(adminActor, clientId);
+    const precondition = {
+      expectedCurrentSendOperationId: revoked.sendOperationId,
+      expectedUpdatedAt: revoked.updatedAt,
+    };
+
+    await expect(
+      service.resendInvitation(
+        unassignedConsultantActor,
+        clientId,
+        { deliveryMethod: 'MANUAL_EMAIL', idempotencyKey: randomUUID() },
+        precondition,
+      ),
+    ).rejects.toMatchObject({ code: 'CLIENT_FORBIDDEN' });
+
+    // Confirms the rejected attempt truly mutated nothing.
+    const stillRevoked = await service.getInvitationForClient(adminActor, clientId);
+    expect(stillRevoked?.status).toBe('INVITATION_REVOKED');
+
+    await assignConsultant(clientId, consultantActor.id);
+    const reissued = await service.resendInvitation(
+      consultantActor,
+      clientId,
+      { deliveryMethod: 'MANUAL_EMAIL', idempotencyKey: randomUUID() },
+      precondition,
+    );
+    expect(reissued.invitation.status).toBe('INVITATION_SENT');
   });
 });
