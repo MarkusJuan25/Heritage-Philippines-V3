@@ -1,0 +1,24 @@
+-- Add AUTOMATED_UNCONFIRMED delivery state (D-034 Stage 3 implementation
+-- authorization, Section 3 correction): an automated send operation was
+-- reserved/attempted, but provider acceptance has not yet been confirmed —
+-- an honest "unknown" outcome (transport interruption or timeout where the
+-- provider's actual response is unknown), never conflated with
+-- PROVIDER_FAILED (a definite provider rejection) or any accepted/
+-- delivered state.
+--
+-- This value is added in its own migration, split from the CHECK-
+-- constraint and index changes that reference it (next migration), because
+-- PostgreSQL forbids using a newly added enum value inside the same
+-- transaction that adds it: "unsafe use of new value ... New enum values
+-- must be committed before they can be used." Since `prisma migrate
+-- deploy` applies each migration file as a single transaction, referencing
+-- the literal 'AUTOMATED_UNCONFIRMED' in a CHECK constraint within this
+-- same file would fail at apply time. Splitting into two purely additive
+-- migrations is the standard, documented workaround — the authorized
+-- change is one logical unit implemented as two files, not a scope change.
+--
+-- Positioned immediately before AUTOMATED_ACCEPTED (an unconfirmed send
+-- logically precedes a confirmed one) purely for readability; PostgreSQL
+-- enum ordinal position has no bearing on any constraint or query in this
+-- schema.
+ALTER TYPE "PortalInvitationDeliveryState" ADD VALUE 'AUTOMATED_UNCONFIRMED' BEFORE 'AUTOMATED_ACCEPTED';

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Prisma } from '@/generated/prisma/client';
+import { normalizeEmail } from '@/lib/contact-normalization';
 import type { AppRole } from '@/lib/auth/roles';
 
 // The only layer that talks to the database for this feature
@@ -95,7 +96,15 @@ export async function createStaffUser(
     data: {
       id: input.id,
       name: input.name,
-      email: input.email,
+      // Defense-in-depth normalization (D-034 Stage 3 Section 8; PR #60's
+      // follow-up gate) — createStaffAccountSchema.email already
+      // trims/lowercases at the Zod boundary today, but this repository
+      // function must be correct on its own for any future caller that
+      // doesn't route through that schema (.claude/rules/database-security.md's
+      // case-insensitive-uniqueness invariant relies on every trusted
+      // User.email write being normalized before it reaches the database,
+      // not merely at one current call site).
+      email: normalizeEmail(input.email),
       role: input.role,
       isActive: true,
       emailVerified: false,
