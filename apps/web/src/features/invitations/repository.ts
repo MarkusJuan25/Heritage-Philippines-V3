@@ -378,21 +378,42 @@ export async function recordRevocation(
   });
 }
 
+// D-037 Section 7: a constrained anonymous-actor representation, not a
+// bare-nullable `actorId`. The database CHECK constraint
+// (`portal_activation_audit_log_actor_kind_actor_id_consistency`,
+// migration 20260827062426) enforces `actorKind = 'USER'` requires a
+// non-null `actorId` and `actorKind = 'ANONYMOUS'` requires a null one —
+// this discriminated-union parameter type enforces the identical
+// invariant at compile time, so a caller cannot pass `ANONYMOUS` together
+// with a defined `actorId`, or `USER` without one. `ANONYMOUS` exists
+// solely for D-034 Stage 5's `PORTAL_INVITATION_OPENED` event, recorded
+// from an unauthenticated request with no `User` to attribute it to.
 export async function insertAuditLog(
   db: Prisma.TransactionClient,
-  entry: {
-    actorId: string;
-    action: string;
-    entityType: string;
-    entityId: string;
-    beforeState?: Prisma.InputJsonValue;
-    afterState?: Prisma.InputJsonValue;
-  },
+  entry:
+    | {
+        actorKind: 'USER';
+        actorId: string;
+        action: string;
+        entityType: string;
+        entityId: string;
+        beforeState?: Prisma.InputJsonValue;
+        afterState?: Prisma.InputJsonValue;
+      }
+    | {
+        actorKind: 'ANONYMOUS';
+        action: string;
+        entityType: string;
+        entityId: string;
+        beforeState?: Prisma.InputJsonValue;
+        afterState?: Prisma.InputJsonValue;
+      },
 ): Promise<void> {
   await db.auditLog.create({
     data: {
       id: randomUUID(),
-      actorId: entry.actorId,
+      actorKind: entry.actorKind,
+      actorId: entry.actorKind === 'USER' ? entry.actorId : null,
       action: entry.action,
       entityType: entry.entityType,
       entityId: entry.entityId,

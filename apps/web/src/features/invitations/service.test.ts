@@ -480,6 +480,7 @@ describe('resendInvitation', () => {
     // (proven at the real-database level in service.integration.test.ts,
     // where both rows can actually be queried back).
     expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, {
+      actorKind: 'USER',
       actorId: ADMIN.id,
       action: 'PORTAL_INVITATION_RESENT',
       entityType: 'PortalInvitation',
