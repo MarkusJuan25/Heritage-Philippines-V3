@@ -732,6 +732,18 @@ model StaffProfile {
   @@map("staff_profile")
 }
 
+// The constrained actor-kind discriminator for AuditLog
+// (docs/HERITAGE_V3_DECISIONS_LOG.md D-037 Section 7). Every existing audit
+// action in this codebase is staff-attributed (USER); ANONYMOUS exists
+// solely for D-034 Stage 5's `PORTAL_INVITATION_OPENED` event, which is
+// recorded from an unauthenticated request with no User to attribute it
+// to. See AuditLog's own doc comment below for the CHECK constraint this
+// enum's two values are paired with.
+enum AuditLogActorKind {
+  USER
+  ANONYMOUS
+}
+
 // Append-only record of sensitive/security-relevant staff actions
 // (blueprint Section 14.9; .claude/rules/backend.md Auditability;
 // .claude/rules/database-security.md Audit Records). No role, including
@@ -740,17 +752,35 @@ model StaffProfile {
 // never UPDATE or DELETE. `onDelete: Restrict` on the actor relation so an
 // actor's User row can never be removed out from under an existing audit
 // trail (accounts are deactivated, never deleted, under this model).
+//
+// `actorKind`/`actorId` (D-037 Section 7): `actorKind` defaults to `USER`
+// and every one of this schema's seven existing audit-write call sites
+// remains unaffected — their `actorId` stays required at the application
+// layer and the column default satisfies the new invariant for them
+// without any code change. `actorId` is nullable only to support the
+// `ANONYMOUS` case; the reverse — a `USER` row with a null `actorId`, or
+// an `ANONYMOUS` row with a non-null `actorId` — is never a valid row. A
+// hand-written CHECK constraint (`portal_activation_audit_log_actor_kind_actor_id_consistency`,
+// this checkpoint's migration; Prisma's schema language cannot express a
+// cross-field conditional constraint) enforces this at the database
+// layer, mirroring this schema's own established precedent for
+// constraints beyond what this file can represent (e.g. PortalInvitation's
+// token-triple nullability CHECK). No production read path in this
+// repository joins or `include`s this relation — every existing read
+// selects `actorId` as a plain scalar — so making `actor` an optional
+// relation has no effect on any existing query.
 model AuditLog {
-  id          String   @id
-  actorId     String
+  id          String            @id
+  actorKind   AuditLogActorKind @default(USER)
+  actorId     String?
   action      String
   entityType  String
   entityId    String
   beforeState Json?
   afterState  Json?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime          @default(now())
 
-  actor User @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: Restrict)
 
   @@index([actorId])
   @@index([entityType, entityId])
@@ -3707,4 +3737,56 @@ model Receipt {
 
   @@index([issuedByStaffUserId])
   @@map("receipt")
+}
+
+// PostgreSQL-backed activation rate limiting (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-037 Section 11) — schema only in this checkpoint; no repository/
+// service/route code reads or writes this table yet (D-034 Stage 5c/5d).
+// One table, two dimensions, discriminated by `dimension`, rather than two
+// near-identical tables for what is structurally the same fixed-window
+// counter. `SOURCE` is keyed by a keyed-HMAC digest of the resolved
+// request source (never a raw or unkeyed-hashed IP address); `TOKEN` is
+// keyed by the invitation token's own existing SHA-256 digest
+// (`features/invitations/token.ts`'s `hashInvitationToken`), computed
+// whether or not the presented token resolves to a real invitation. A
+// request is rejected when an atomic increment (D-037 Section 11: an
+// `upsert` targeting the compound-unique index below, verified against
+// the installed Prisma version before being relied upon as atomic) pushes
+// `count` past the configured limit for the current fixed window.
+// `windowStart` is the window's own start timestamp, not a duration —
+// `@@unique([dimension, bucketKey, windowStart])` is what makes the
+// increment idempotent-per-window. Retention/cleanup (D-037 Section 11)
+// deletes rows whose window has long since closed; this schema places no
+// TTL or trigger on the table itself, since PostgreSQL has no native
+// row-expiry mechanism and this repository's own established preference
+// (per `.claude/rules/architecture.md`'s "avoid premature abstraction")
+// is an explicit, testable, application-layer cleanup function over a
+// database-level scheduled job this codebase has no other user of yet.
+enum RateLimitDimension {
+  SOURCE
+  TOKEN
+}
+
+model RateLimitBucket {
+  id String @id
+
+  dimension RateLimitDimension
+
+  // A keyed-HMAC digest (SOURCE) or the invitation token's own SHA-256
+  // digest (TOKEN) — never a raw IP address and never an unkeyed digest
+  // of one (D-034 §11's "no raw IP address is stored unless separately
+  // justified" — this schema stores neither, closing that requirement by
+  // construction rather than by policy alone).
+  bucketKey String
+
+  windowStart DateTime
+
+  count Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dimension, bucketKey, windowStart])
+  @@index([windowStart])
+  @@map("rate_limit_bucket")
 }

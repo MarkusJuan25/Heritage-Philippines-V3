@@ -114,6 +114,7 @@ export async function prepareInvitation(
 
     const created = await repository.createInvitation(tx, clientId);
     await repository.insertAuditLog(tx, {
+      actorKind: 'USER',
       actorId: actor.id,
       action: INVITATION_AUDIT_ACTIONS.PREPARED,
       entityType: INVITATION_AUDIT_ENTITY_TYPE,
@@ -297,6 +298,7 @@ async function reserveSendOperation(
 
     if (input.deliveryMethod === 'AUTOMATED_EMAIL' || alwaysAudit) {
       await repository.insertAuditLog(tx, {
+        actorKind: 'USER',
         actorId: actor.id,
         action: auditAction,
         entityType: INVITATION_AUDIT_ENTITY_TYPE,
@@ -497,6 +499,7 @@ export async function confirmManualSend(
     });
 
     await repository.insertAuditLog(tx, {
+      actorKind: 'USER',
       actorId: actor.id,
       action: INVITATION_AUDIT_ACTIONS.SENT_MANUAL_CONFIRMED,
       entityType: INVITATION_AUDIT_ENTITY_TYPE,
@@ -538,6 +541,7 @@ export async function revokeInvitation(
 
     const updated = await repository.recordRevocation(tx, invitation.id, new Date());
     await repository.insertAuditLog(tx, {
+      actorKind: 'USER',
       actorId: actor.id,
       action: INVITATION_AUDIT_ACTIONS.REVOKED,
       entityType: INVITATION_AUDIT_ENTITY_TYPE,
