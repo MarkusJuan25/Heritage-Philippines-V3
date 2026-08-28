@@ -4,10 +4,11 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
 
-const { signInEmailMock, pushMock, refreshMock } = vi.hoisted(() => ({
+const { signInEmailMock, pushMock, refreshMock, searchParamsMock } = vi.hoisted(() => ({
   signInEmailMock: vi.fn(),
   pushMock: vi.fn(),
   refreshMock: vi.fn(),
+  searchParamsMock: vi.fn(() => new URLSearchParams()),
 }));
 
 vi.mock('@/lib/auth/auth-client', () => ({
@@ -16,12 +17,14 @@ vi.mock('@/lib/auth/auth-client', () => ({
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushMock, refresh: refreshMock }),
+  useSearchParams: searchParamsMock,
 }));
 
 import LoginPage from './page';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  searchParamsMock.mockReturnValue(new URLSearchParams());
 });
 
 describe('LoginPage', () => {
@@ -74,5 +77,20 @@ describe('LoginPage', () => {
 
     resolveSignIn({ error: null });
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith('/dashboard'));
+  });
+
+  it('shows the activation success banner when activated=1 is present', () => {
+    searchParamsMock.mockReturnValue(new URLSearchParams('activated=1'));
+    render(<LoginPage />);
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Your account has been activated. Sign in to continue.',
+    );
+  });
+
+  it('shows no activation banner on a normal visit', () => {
+    render(<LoginPage />);
+
+    expect(screen.queryByText(/account has been activated/i)).not.toBeInTheDocument();
   });
 });

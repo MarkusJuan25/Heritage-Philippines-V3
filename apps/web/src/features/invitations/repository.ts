@@ -82,6 +82,22 @@ export async function findInvitationBySendOperationId(
   return db.portalInvitation.findUnique({ where: { sendOperationId }, select: INVITATION_SELECT });
 }
 
+/**
+ * D-037 Section 4: the public activation surface's only lookup — by the
+ * SHA-256 digest of a presented raw token, matched against `tokenHash` by
+ * equality, exactly the same shape as the two digest/id lookups above. A
+ * digest that matches no row is indistinguishable from a token that was
+ * later rotated out by a resend (D-037 Section 5) — both simply return
+ * `null`, which is the anti-enumeration-safe behavior D-034 Section 6
+ * requires, achieved here by construction rather than a special case.
+ */
+export async function findInvitationByTokenHash(
+  db: Prisma.TransactionClient,
+  tokenHash: string,
+): Promise<InvitationRecord | null> {
+  return db.portalInvitation.findUnique({ where: { tokenHash }, select: INVITATION_SELECT });
+}
+
 export async function findClientEmailById(
   db: Prisma.TransactionClient,
   clientId: string,
@@ -374,6 +390,50 @@ export async function recordRevocation(
       expiresAt: null,
       destinationEmail: null,
     },
+    select: INVITATION_SELECT,
+  });
+}
+
+/**
+ * The explicit Continue transition (D-037 Sections 5, 6): `INVITATION_SENT
+ * → INVITATION_OPENED`, `openedAt` set once. Conditioned on the row still
+ * being `INVITATION_SENT` under this exact id — if it has already moved on
+ * (already `INVITATION_OPENED` by an earlier or concurrent Continue call,
+ * or moved further by a revoke/resend/activation), this is a no-op (`count
+ * === 0`), never a regression; the caller (features/activation/service.ts)
+ * is the one that decides what a no-op here means (an idempotent success
+ * if the row is already OPENED, an ineligibility error otherwise).
+ */
+export async function markInvitationOpened(
+  db: Prisma.TransactionClient,
+  id: string,
+  openedAt: Date,
+): Promise<InvitationRecord | null> {
+  const { count } = await db.portalInvitation.updateMany({
+    where: { id, status: 'INVITATION_SENT' },
+    data: { status: 'INVITATION_OPENED', openedAt },
+  });
+  if (count === 0) return null;
+  return db.portalInvitation.findUnique({ where: { id }, select: INVITATION_SELECT });
+}
+
+/**
+ * The terminal activation transition (D-037 Section 8, step (k)):
+ * `status → ACCOUNT_ACTIVATED`, `activatedAt` set. Always called from
+ * inside `features/activation/repository.ts`'s own atomic transaction,
+ * after the fresh eligibility recheck and the new `User`/`Account`/
+ * `ClientProfile` rows already exist in the same transaction — this
+ * function performs only the `PortalInvitation` row's own half of that
+ * one atomic write, since this table remains this feature's own.
+ */
+export async function markInvitationActivated(
+  db: Prisma.TransactionClient,
+  id: string,
+  activatedAt: Date,
+): Promise<InvitationRecord> {
+  return db.portalInvitation.update({
+    where: { id },
+    data: { status: 'ACCOUNT_ACTIVATED', activatedAt },
     select: INVITATION_SELECT,
   });
 }
