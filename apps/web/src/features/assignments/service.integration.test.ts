@@ -89,6 +89,10 @@ const hasTestDatabaseUrl = typeof rawTestDatabaseUrl === 'string' && rawTestData
 const originalDatabaseUrl = process.env.DATABASE_URL;
 const originalBetterAuthSecret = process.env.BETTER_AUTH_SECRET;
 const originalBetterAuthUrl = process.env.BETTER_AUTH_URL;
+// D-034 Stage 5d (D-037 Section 11): getServerEnv()'s shared schema now
+// also requires ACTIVATION_RATE_LIMIT_HMAC_SECRET, for the same reason
+// BETTER_AUTH_SECRET/URL are required here above.
+const originalRateLimitSecret = process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET;
 
 describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real database)', () => {
   let prisma: (typeof import('@/lib/db'))['prisma'] | undefined;
@@ -108,6 +112,7 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
   let chainTcActor: AuthenticatedUser;
   let didSetBetterAuthSecret = false;
   let didSetBetterAuthUrl = false;
+  let didSetRateLimitSecret = false;
   const createdUserIds: string[] = [];
   const createdLeadIds: string[] = [];
   const createdClientIds: string[] = [];
@@ -131,6 +136,11 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
     if (!process.env.BETTER_AUTH_URL) {
       process.env.BETTER_AUTH_URL = 'http://localhost:3000';
       didSetBetterAuthUrl = true;
+    }
+    if (!process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET) {
+      process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET =
+        'integration-test-only-rl-secret-not-a-real-credential-00000000';
+      didSetRateLimitSecret = true;
     }
 
     ({ prisma } = await import('@/lib/db'));
@@ -307,6 +317,13 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
           delete process.env.BETTER_AUTH_URL;
         } else {
           process.env.BETTER_AUTH_URL = originalBetterAuthUrl;
+        }
+      }
+      if (didSetRateLimitSecret) {
+        if (originalRateLimitSecret === undefined) {
+          delete process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET;
+        } else {
+          process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET = originalRateLimitSecret;
         }
       }
     }

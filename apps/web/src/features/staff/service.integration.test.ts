@@ -100,6 +100,10 @@ const hasTestDatabaseUrl = typeof rawTestDatabaseUrl === 'string' && rawTestData
 const originalDatabaseUrl = process.env.DATABASE_URL;
 const originalBetterAuthSecret = process.env.BETTER_AUTH_SECRET;
 const originalBetterAuthUrl = process.env.BETTER_AUTH_URL;
+// D-034 Stage 5d (D-037 Section 11): getServerEnv()'s shared schema now
+// also requires ACTIVATION_RATE_LIMIT_HMAC_SECRET, for the same reason
+// BETTER_AUTH_SECRET/URL are required here above.
+const originalRateLimitSecret = process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET;
 
 describe.skipIf(!hasTestDatabaseUrl)('staff authentication integration (real database)', () => {
   // Populated by beforeAll via dynamic import, once TEST_DATABASE_URL has
@@ -114,6 +118,7 @@ describe.skipIf(!hasTestDatabaseUrl)('staff authentication integration (real dat
   let actorId = '';
   let didSetBetterAuthSecret = false;
   let didSetBetterAuthUrl = false;
+  let didSetRateLimitSecret = false;
 
   // Every subject User this run creates, tracked by its unique email —
   // recorded *before* each createStaffAccount call, not after, so a subject
@@ -136,6 +141,11 @@ describe.skipIf(!hasTestDatabaseUrl)('staff authentication integration (real dat
     if (!process.env.BETTER_AUTH_URL) {
       process.env.BETTER_AUTH_URL = 'http://localhost:3000';
       didSetBetterAuthUrl = true;
+    }
+    if (!process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET) {
+      process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET =
+        'integration-test-only-rl-secret-not-a-real-credential-00000000';
+      didSetRateLimitSecret = true;
     }
 
     // 3. Only now — dynamically — import the real, unmocked application
@@ -227,6 +237,13 @@ describe.skipIf(!hasTestDatabaseUrl)('staff authentication integration (real dat
           delete process.env.BETTER_AUTH_URL;
         } else {
           process.env.BETTER_AUTH_URL = originalBetterAuthUrl;
+        }
+      }
+      if (didSetRateLimitSecret) {
+        if (originalRateLimitSecret === undefined) {
+          delete process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET;
+        } else {
+          process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET = originalRateLimitSecret;
         }
       }
     }

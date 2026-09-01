@@ -253,6 +253,15 @@ The items below are implementation-planning details this document surfaces but d
 - Log retention duration and observability/alerting tooling (Section 14) — blocked on the same privacy/compliance review as D-003/D-004.
 - Formal incident/breach-notification process (Section 7.5) — blocked on D-004 (Philippine privacy/compliance posture).
 
+## 20. Portal Activation Rate-Limiting Boundary
+
+D-034 Stage 5d (`docs/HERITAGE_V3_DECISIONS_LOG.md` D-037 Section 11) implements PostgreSQL-backed rate limiting for the public activation surface (`/activate/[token]`, `/api/activation/continue`, `/api/activation/activate`) — `apps/web/src/features/activation/rate-limit.ts` and `source.ts`.
+
+- `ACTIVATION_RATE_LIMIT_HMAC_SECRET` (`apps/web/src/lib/env.ts`, `apps/web/.env.example`) — **required in every environment** (local, staging, production), no default. Derives `SOURCE`-dimension rate-limit bucket keys via `HMAC-SHA256`. Generated per Section 7.1; never reused as `BETTER_AUTH_SECRET` or any other secret, per that same section's "a secret is never reused across two different purposes."
+- No raw IP address, or unkeyed digest of one, is ever stored — every source identifier is HMAC-keyed with this secret before use as a bucket key.
+- The request-source resolver (`source.ts`) is default-deny: no trusted proxy header is configured in any environment under D-037's current authorization, so every source falls back to one shared `"unknown-source"` bucket. Two deployment gates (D-037 Section 12) remain open — verified Hostinger reverse-proxy header-trust behavior, and verified Hostinger access-log behavior for `/activate/*` — and activation must not be exposed in staging or production until both are resolved, independent of this rate-limiting implementation's own completion.
+- Rotating this secret is safe and expected to occasionally happen: every pre-rotation `SOURCE`-dimension bucket becomes orphaned (harmless — it ages out via this module's own retention cleanup) and every source's effective rate-limit history resets to zero, per Section 7.3's rotation boundary.
+
 ---
 
 This document should be updated whenever a real environment variable, secret category, or infrastructure boundary is introduced, so it stays a true reflection of the system rather than a snapshot of Phase 1 intentions.
