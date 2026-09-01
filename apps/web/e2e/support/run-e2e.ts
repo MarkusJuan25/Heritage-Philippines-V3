@@ -55,7 +55,11 @@ const INHERITED_ENV_KEYS = [
   'HOME',
 ] as const;
 
-function buildChildEnv(databaseUrl: string, betterAuthSecret: string): NodeJS.ProcessEnv {
+function buildChildEnv(
+  databaseUrl: string,
+  betterAuthSecret: string,
+  activationRateLimitHmacSecret: string,
+): NodeJS.ProcessEnv {
   const inherited: Record<string, string> = {};
   for (const key of INHERITED_ENV_KEYS) {
     const value = process.env[key];
@@ -77,6 +81,14 @@ function buildChildEnv(databaseUrl: string, betterAuthSecret: string): NodeJS.Pr
     DATABASE_URL: databaseUrl,
     BETTER_AUTH_URL: `http://${E2E_HOST}:${E2E_PORT}`,
     BETTER_AUTH_SECRET: betterAuthSecret,
+    // D-034 Stage 5e (D-037 Section 11/16): a second, independently
+    // generated secret — never derived from or equal to betterAuthSecret
+    // above, mirroring that value's own generation exactly (a fresh
+    // randomBytes(32) call produces a statistically distinct value every
+    // time; this is never a transform of the auth secret). Threaded only
+    // through this child environment, never logged, never written to a
+    // file.
+    ACTIVATION_RATE_LIMIT_HMAC_SECRET: activationRateLimitHmacSecret,
     NODE_ENV: 'production',
   } satisfies Record<string, string> as NodeJS.ProcessEnv;
 }
@@ -156,7 +168,10 @@ async function main(): Promise<void> {
   await assertPortFree(E2E_RPC_PORT, E2E_HOST);
 
   const betterAuthSecret = randomBytes(32).toString('base64');
-  const childEnv = buildChildEnv(databaseUrl, betterAuthSecret);
+  // D-034 Stage 5e: independently generated, never derived from
+  // betterAuthSecret — see buildChildEnv's own doc comment.
+  const activationRateLimitHmacSecret = randomBytes(32).toString('base64');
+  const childEnv = buildChildEnv(databaseUrl, betterAuthSecret, activationRateLimitHmacSecret);
 
   // The generated Prisma client cannot be loaded from Playwright's own
   // CJS-`require`-based `.ts` loader — confirmed directly to fail with a
@@ -176,7 +191,25 @@ async function main(): Promise<void> {
     await runChild(pnpmExecutable, ['--filter', 'web', 'build'], childEnv);
 
     console.log('Running the Playwright E2E suite against the isolated server...');
-    await runChild(pnpmExecutable, ['--filter', 'web', 'exec', 'playwright', 'test'], childEnv);
+    // D-034 Stage 5e: the tag-isolated expected-failure artifact-safety
+    // probe (e2e/support/artifact-safety-probe.spec.ts) must never run as
+    // part of this normal suite — it is designed to fail deliberately.
+    // This CLI-level exclusion is the *only* place that exclusion lives;
+    // playwright.config.ts deliberately sets no config-level grep/grepInvert
+    // at all, since Playwright 1.62.1's own runner applies a config-level
+    // grepInvert as an unconditional suite-load-time filter (verified
+    // directly against the installed source,
+    // node_modules/playwright/lib/runner/index.js) *before* any CLI-level
+    // --grep the harness later supplies is ever evaluated — a config-level
+    // exclusion here would silently defeat the harness's own positive
+    // selection of that same test, producing a false "no tests found"
+    // pass. Keeping the exclusion CLI-only, and only in this one
+    // invocation, avoids that interaction entirely.
+    await runChild(
+      pnpmExecutable,
+      ['--filter', 'web', 'exec', 'playwright', 'test', '--grep-invert', '@expected-failure-probe'],
+      childEnv,
+    );
   } finally {
     // Caught and reported here, rather than left to propagate, so a
     // shutdown-only failure can never mask a genuine build/test failure

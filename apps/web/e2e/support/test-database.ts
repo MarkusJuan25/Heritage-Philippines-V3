@@ -153,6 +153,27 @@ const RPC_ALLOWED_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   leadStatusHistory: new Set(['findMany', 'deleteMany']),
   bookingStatusHistory: new Set(['findMany', 'deleteMany']),
   auditLog: new Set(['findMany', 'deleteMany']),
+  // D-034 Stage 5e (D-037 Section 15): the exact, minimal surface the
+  // activation E2E spec needs — final-state verification and cleanup
+  // only, never anything the browser flow itself could instead perform.
+  // `PortalInvitation.clientId` and `ClientProfile.clientId` are both
+  // `@unique` (schema.prisma), so `findUniqueOrThrow({ where: { clientId
+  // } })` is the same convention every other unique-by-parent lookup in
+  // this allowlist already uses. No `user` or `account` operation is
+  // added here: the activated User's id is recovered from
+  // `clientProfile.findUniqueOrThrow`'s own nested `user` select instead
+  // of a separate lookup, and `Account` cascade-deletes automatically
+  // when its owning `User` row is deleted (`onDelete: Cascade`, already
+  // fixtures.ts's own established assumption).
+  portalInvitation: new Set(['findUniqueOrThrow', 'deleteMany']),
+  clientProfile: new Set(['findUniqueOrThrow', 'deleteMany']),
+  // Real activation requests unavoidably write RateLimitBucket rows
+  // (every gated POST/GET increments the shared SOURCE `"unknown-source"`
+  // bucket before any other work, per D-037 Section 10) — `deleteMany`
+  // only, by exact bucketKey/windowStart, never a read/update/upsert,
+  // since the spec never needs to inspect a count, only to remove the
+  // exact disposable rows its own real HTTP requests created.
+  rateLimitBucket: new Set(['deleteMany']),
 };
 
 /** A transported RPC method: real Prisma input-argument typing, but an
@@ -214,6 +235,17 @@ export type E2EPrismaRpcClient = {
   auditLog: {
     findMany: RpcMethod<Prisma.AuditLogFindManyArgs>;
     deleteMany: RpcMethod<Prisma.AuditLogDeleteManyArgs>;
+  };
+  portalInvitation: {
+    findUniqueOrThrow: RpcMethod<Prisma.PortalInvitationFindUniqueOrThrowArgs>;
+    deleteMany: RpcMethod<Prisma.PortalInvitationDeleteManyArgs>;
+  };
+  clientProfile: {
+    findUniqueOrThrow: RpcMethod<Prisma.ClientProfileFindUniqueOrThrowArgs>;
+    deleteMany: RpcMethod<Prisma.ClientProfileDeleteManyArgs>;
+  };
+  rateLimitBucket: {
+    deleteMany: RpcMethod<Prisma.RateLimitBucketDeleteManyArgs>;
   };
   $disconnect: () => Promise<void>;
 };

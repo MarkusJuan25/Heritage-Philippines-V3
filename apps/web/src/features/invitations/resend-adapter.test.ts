@@ -82,9 +82,9 @@ describe('isAutomatedDeliveryEnabled', () => {
 });
 
 describe('buildActivationUrl', () => {
-  it('builds an activation link from BETTER_AUTH_URL with the raw token URL-encoded', () => {
+  it('builds a fragment-shaped activation link from BETTER_AUTH_URL with the raw token URL-encoded (D-038 Section 2)', () => {
     getServerEnvMock.mockReturnValue({ ...BASE_ENV, BETTER_AUTH_URL: 'http://localhost:3000/' });
-    expect(buildActivationUrl('abc-123')).toBe('http://localhost:3000/activate/abc-123');
+    expect(buildActivationUrl('abc-123')).toBe('http://localhost:3000/activate#token=abc-123');
   });
 });
 

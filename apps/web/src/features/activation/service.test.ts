@@ -25,12 +25,7 @@ vi.mock('@/features/invitations/repository', () => invitationRepositoryMocks);
 import { Prisma } from '@/generated/prisma/client';
 import type { InvitationRecord } from '@/features/invitations/repository';
 
-import {
-  activateAccount,
-  computeEmailVerified,
-  continueInvitation,
-  getActivationPageState,
-} from './service';
+import { activateAccount, computeEmailVerified, continueInvitation } from './service';
 import { ActivationError } from './errors';
 
 const TX_CLIENT = { marker: 'tx-client' };
@@ -88,54 +83,6 @@ describe('computeEmailVerified', () => {
     [null, 'NOT_ATTEMPTED', false],
   ] as const)('deliveryMethod=%s deliveryState=%s -> %s', (method, state, expected) => {
     expect(computeEmailVerified(method, state)).toBe(expected);
-  });
-});
-
-describe('getActivationPageState', () => {
-  it('returns not-found when no invitation matches the token digest', async () => {
-    invitationRepositoryMocks.findInvitationByTokenHash.mockResolvedValue(null);
-    expect(await getActivationPageState(RAW_TOKEN)).toBe('not-found');
-  });
-
-  it.each([
-    'INVITATION_PREPARED',
-    'INVITATION_EXPIRED',
-    'INVITATION_REVOKED',
-    'ACCOUNT_ACTIVATED',
-  ] as const)('returns not-found for %s', async (status) => {
-    invitationRepositoryMocks.findInvitationByTokenHash.mockResolvedValue(invitation({ status }));
-    expect(await getActivationPageState(RAW_TOKEN)).toBe('not-found');
-  });
-
-  it('returns not-found when persisted SENT but effectively expired', async () => {
-    invitationRepositoryMocks.findInvitationByTokenHash.mockResolvedValue(
-      invitation({ status: 'INVITATION_SENT', expiresAt: PAST }),
-    );
-    expect(await getActivationPageState(RAW_TOKEN)).toBe('not-found');
-  });
-
-  it('returns eligible-not-opened for INVITATION_SENT', async () => {
-    invitationRepositoryMocks.findInvitationByTokenHash.mockResolvedValue(
-      invitation({ status: 'INVITATION_SENT' }),
-    );
-    expect(await getActivationPageState(RAW_TOKEN)).toBe('eligible-not-opened');
-  });
-
-  it('returns eligible-opened for INVITATION_OPENED', async () => {
-    invitationRepositoryMocks.findInvitationByTokenHash.mockResolvedValue(
-      invitation({ status: 'INVITATION_OPENED' }),
-    );
-    expect(await getActivationPageState(RAW_TOKEN)).toBe('eligible-opened');
-  });
-
-  it('never mutates anything', async () => {
-    invitationRepositoryMocks.findInvitationByTokenHash.mockResolvedValue(
-      invitation({ status: 'INVITATION_SENT' }),
-    );
-    await getActivationPageState(RAW_TOKEN);
-    expect(invitationRepositoryMocks.markInvitationOpened).not.toHaveBeenCalled();
-    expect(invitationRepositoryMocks.markInvitationActivated).not.toHaveBeenCalled();
-    expect(invitationRepositoryMocks.insertAuditLog).not.toHaveBeenCalled();
   });
 });
 

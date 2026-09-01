@@ -1,5 +1,4 @@
 import { Prisma } from '@/generated/prisma/client';
-import { prisma } from '@/lib/db';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 
 import {
@@ -50,32 +49,13 @@ export function computeEmailVerified(
   return false;
 }
 
-export type ActivationPageState = 'not-found' | 'eligible-not-opened' | 'eligible-opened';
-
-/**
- * The safe, token-bearing GET's own read (D-037 Sections 3, 5): performs
- * no mutation of `PortalInvitation` or any other business-domain row.
- * Distinguishes an already-`INVITATION_OPENED` row from a fresh
- * `INVITATION_SENT` one only so the page can skip straight to the
- * activation form on a reload after an earlier Continue — a passive
- * recognition of prior state, never an automatic Continue (D-034 §5's
- * "never triggered by the initial GET" remains intact: this function
- * never calls `markInvitationOpened`). Every other ineligible cause
- * collapses to the identical `'not-found'` state, deliberately —
- * not-found, malformed, prepared, expired, revoked, and already-activated
- * are indistinguishable here by design (D-034 §6's anti-enumeration
- * requirement, extended to this passive read per D-037 Section 6/14).
- * Collision causes are never checked here at all — they are properties of
- * a write attempt, not of the invitation row alone (D-037 Section 6).
- */
-export async function getActivationPageState(rawToken: string): Promise<ActivationPageState> {
-  const tokenHash = hashInvitationToken(rawToken);
-  const invitation = await invitationRepository.findInvitationByTokenHash(prisma, tokenHash);
-  if (!invitation || !isEligible(invitation, new Date())) {
-    return 'not-found';
-  }
-  return invitation.status === 'INVITATION_OPENED' ? 'eligible-opened' : 'eligible-not-opened';
-}
+// D-038 Section 3/§7 (superseding D-037 Sections 3, 5, 14): `GET
+// /activate` no longer performs any server-side invitation lookup at
+// all — the raw token now travels only in the URL fragment (D-038
+// Section 2), which no server-side code, including this module, ever
+// receives. The function that used to back that lookup,
+// `getActivationPageState`, is removed as dead code rather than kept
+// unused — nothing calls it any longer.
 
 export type ContinueResult = { opened: true };
 
