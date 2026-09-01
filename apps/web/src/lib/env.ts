@@ -50,6 +50,16 @@ const serverEnvSchema = z.object({
   // above happen to be set — automated sending must never be inferred
   // solely from RESEND_API_KEY's presence (D-034 Section 12).
   EMAIL_DELIVERY_ENABLED: z.enum(['true', 'false']).default('false'),
+
+  // Portal activation rate limiting (docs/HERITAGE_V3_DECISIONS_LOG.md
+  // D-037 Section 11) — the purpose-specific HMAC key that derives
+  // SOURCE-dimension rate-limit bucket keys. Required in every
+  // environment; never reused as BETTER_AUTH_SECRET or any other secret
+  // (docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md Section 7.1's "a secret
+  // is never reused across two different purposes").
+  ACTIVATION_RATE_LIMIT_HMAC_SECRET: z
+    .string()
+    .min(32, 'ACTIVATION_RATE_LIMIT_HMAC_SECRET must be at least 32 characters'),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

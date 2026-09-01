@@ -74,3 +74,4 @@ jobs:
           DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci_build_placeholder'
           BETTER_AUTH_SECRET: 'ci-build-placeholder-secret-not-a-real-credential-000000'
           BETTER_AUTH_URL: 'http://localhost:3000'
+          ACTIVATION_RATE_LIMIT_HMAC_SECRET: 'ci-build-placeholder-activation-rl-hmac-not-real-0000'

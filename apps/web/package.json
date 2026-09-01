@@ -16,7 +16,7 @@
     "db:studio": "prisma studio",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --no-file-parallelism src/features/activation/service.integration.test.ts src/features/assignments/service.integration.test.ts src/features/bookings/service.integration.test.ts src/features/clients/service.integration.test.ts src/features/invitations/service.integration.test.ts src/features/leads/service.integration.test.ts src/features/proposals/service.integration.test.ts src/features/staff/service.integration.test.ts",
+    "test:integration": "vitest run --no-file-parallelism src/features/activation/service.integration.test.ts src/features/activation/rate-limit.integration.test.ts src/features/assignments/service.integration.test.ts src/features/bookings/service.integration.test.ts src/features/clients/service.integration.test.ts src/features/invitations/service.integration.test.ts src/features/leads/service.integration.test.ts src/features/proposals/service.integration.test.ts src/features/staff/service.integration.test.ts",
     "test:e2e": "tsx e2e/support/run-e2e.ts"
   },
   "dependencies": {

@@ -6,12 +6,20 @@ import '@testing-library/jest-dom/vitest';
 const serviceMocks = vi.hoisted(() => ({ getActivationPageState: vi.fn() }));
 vi.mock('@/features/activation/service', () => serviceMocks);
 
+const rateLimitMocks = vi.hoisted(() => ({ checkSourceRateLimit: vi.fn(async () => false) }));
+vi.mock('@/features/activation/rate-limit', () => rateLimitMocks);
+
+const headersMock = vi.hoisted(() => vi.fn(async () => new Headers()));
+vi.mock('next/headers', () => ({ headers: headersMock }));
+
 import ActivatePage from './page';
 
 const VALID_TOKEN = 'A1b2C3d4E5f6G7h8I9j0K1L2';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  rateLimitMocks.checkSourceRateLimit.mockResolvedValue(false);
+  headersMock.mockResolvedValue(new Headers());
 });
 
 describe('ActivatePage', () => {
@@ -53,5 +61,32 @@ describe('ActivatePage', () => {
     const { container } = render(ui);
 
     expect(container.innerHTML).not.toContain(VALID_TOKEN);
+  });
+
+  describe('rate limiting (D-037 Sections 3, 11)', () => {
+    it('renders the fixed throttled state and never calls the service when the SOURCE check rejects', async () => {
+      rateLimitMocks.checkSourceRateLimit.mockResolvedValue(true);
+      const ui = await ActivatePage({ params: Promise.resolve({ token: VALID_TOKEN }) });
+      const { container, getByRole } = render(ui);
+
+      expect(container.textContent).toContain('Too many attempts. Please try again later.');
+      expect(getByRole('link', { name: 'Go to sign in' })).toBeInTheDocument();
+      expect(serviceMocks.getActivationPageState).not.toHaveBeenCalled();
+    });
+
+    it('renders the throttled state identically for a malformed token too — SOURCE check runs before token validation', async () => {
+      rateLimitMocks.checkSourceRateLimit.mockResolvedValue(true);
+      const ui = await ActivatePage({ params: Promise.resolve({ token: 'not-a-valid-token' }) });
+      const { container } = render(ui);
+
+      expect(container.textContent).toContain('Too many attempts. Please try again later.');
+      expect(container.textContent).not.toContain('This invitation link is no longer valid.');
+    });
+
+    it('reads request headers via next/headers to resolve the source', async () => {
+      await ActivatePage({ params: Promise.resolve({ token: VALID_TOKEN }) });
+      expect(headersMock).toHaveBeenCalledTimes(1);
+      expect(rateLimitMocks.checkSourceRateLimit).toHaveBeenCalledTimes(1);
+    });
   });
 });
