@@ -14,9 +14,10 @@ import { ActivationError } from './errors';
 // precedent. D-034 Stage 5d (D-037 Section 10): Origin, media-type, and
 // bounded-body processing now implemented here; rate-limit checks
 // themselves live in `./rate-limit.ts` and `./source.ts`, wired in by the
-// two POST routes and the GET page in the exact order D-037 Section 10
-// requires — this module only provides the individual gate functions and
-// their fixed response envelopes.
+// two POST routes only, in the exact order D-037 Section 10 requires —
+// this module only provides the individual gate functions and their fixed
+// response envelopes. The GET page performs no rate-limit check of any
+// kind (D-038 Section 3).
 
 type ValidationIssue = { path: string; message: string };
 

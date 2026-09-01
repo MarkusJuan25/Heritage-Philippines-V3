@@ -25,6 +25,19 @@ if (!betterAuthSecret || betterAuthSecret.length < 32) {
   );
 }
 
+// D-034 Stage 5e (D-037 Section 11/16): validated independently of
+// BETTER_AUTH_SECRET above, mirroring its exact check — the isolated E2E
+// server's own getServerEnv() call requires this variable too, now that
+// it is part of the shared server-env schema.
+const activationRateLimitHmacSecret = process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET;
+if (!activationRateLimitHmacSecret || activationRateLimitHmacSecret.length < 32) {
+  throw new Error(
+    'ACTIVATION_RATE_LIMIT_HMAC_SECRET (>= 32 characters) is required to start the isolated E2E server. ' +
+      'This is set internally by run-e2e.ts before Playwright is invoked — run the suite via ' +
+      '`pnpm --filter web run test:e2e`, not `playwright test` directly.',
+  );
+}
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 180_000,
@@ -56,6 +69,7 @@ export default defineConfig({
       DATABASE_URL: databaseUrl,
       BETTER_AUTH_URL: BASE_URL,
       BETTER_AUTH_SECRET: betterAuthSecret,
+      ACTIVATION_RATE_LIMIT_HMAC_SECRET: activationRateLimitHmacSecret,
       NODE_ENV: 'production',
     },
   },

@@ -112,10 +112,12 @@ async function incrementAndCheck(
  * identifier)` for a trusted, resolved source, or the fixed shared bucket
  * key `"unknown-source"` otherwise — every environment today, since no
  * trusted-header configuration is authorized yet (Section 12), so all
- * activation traffic currently shares this one bucket. Callers (both POST
- * routes, the GET page) are responsible for running this before any
- * TOKEN-dimension check and before reading the request body (Section 10's
- * ordering) — this function does not itself enforce call order.
+ * activation traffic currently shares this one bucket. Callers (the two
+ * POST routes only — D-038 Section 3 removes the GET page's own SOURCE
+ * check entirely, since GET now performs no rate-limit check of any kind)
+ * are responsible for running this before any TOKEN-dimension check and
+ * before reading the request body (Section 10's ordering) — this function
+ * does not itself enforce call order.
  */
 export async function checkSourceRateLimit(
   source: ResolvedSource,

@@ -40,15 +40,22 @@ export function isAutomatedDeliveryEnabled(): boolean {
 /**
  * The activation link embedded in the invitation email. Built from the
  * already-validated `BETTER_AUTH_URL` base (the same origin this
- * application's own auth callbacks already use) — the exact activation
- * route path belongs to Stage 5 (D-034 Section 15), not yet implemented;
- * this path is a provisional, non-fabricated placeholder Stage 5 owns and
- * may adjust, kept in this one function so that adjustment touches nothing
- * else in this feature.
+ * application's own auth callbacks already use). D-038 Section 2 is the
+ * authoritative route contract: the raw token travels only in a URL
+ * fragment (`#token=...`), never in the request path or query string —
+ * a fragment is never transmitted to any server (RFC 3986 §3.5), which
+ * is what closes the raw-token exposure D-034 Stage 5e's own live-HTTP
+ * evidence found in the prior `/activate/<token>` path-based design
+ * (Next.js App Router's RSC/Flight hydration payload unconditionally
+ * serializes a dynamic path segment's — or a non-empty query string's —
+ * actual value; a fragment has no server-visible equivalent for it to
+ * serialize). This is the sole authorized shape for this function's
+ * output (D-038 Section 2) — kept in this one function so any future
+ * adjustment touches nothing else in this feature.
  */
 export function buildActivationUrl(rawToken: string): string {
   const base = getServerEnv().BETTER_AUTH_URL.replace(/\/$/, '');
-  return `${base}/activate/${encodeURIComponent(rawToken)}`;
+  return `${base}/activate#token=${encodeURIComponent(rawToken)}`;
 }
 
 function buildInvitationEmailHtml(activationUrl: string): string {

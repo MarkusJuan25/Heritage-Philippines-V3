@@ -2,18 +2,21 @@
 
 import { useId, useRef, useState, type FormEvent } from 'react';
 
-// D-037 Section 4: the raw token is never passed to this component as a
-// prop, a hidden input, a `data-*` attribute, rendered visible text, a
+// D-038 Section 4 (superseding D-037 Section 4's `window.location.pathname`
+// design): the raw token is never passed to this component as a prop, a
+// hidden form input, a `data-*` attribute, rendered visible text, a
 // cookie, or any persistent browser-storage value — it is derived
 // transiently, at the moment of each Continue/Activate action, from
-// `window.location.pathname`, held only in a function-local variable
-// inside the handler that needs it, never assigned to component state,
+// `window.location.hash`, held only in a function-local variable inside
+// the handler that needs it, never assigned to component state or a ref,
 // never logged, never included in any request other than the one
-// same-origin JSON POST body it belongs to.
-const TOKEN_PATH_PATTERN = /^\/activate\/([A-Za-z0-9_-]{24})$/;
+// same-origin JSON POST body it belongs to. A URL fragment is never part
+// of any HTTP request a browser sends (RFC 3986 §3.5) — this component is
+// the only place in the entire application that ever reads it.
+const TOKEN_HASH_PATTERN = /^#token=([A-Za-z0-9_-]{24})$/;
 
 function readTokenFromLocation(): string | null {
-  const match = TOKEN_PATH_PATTERN.exec(window.location.pathname);
+  const match = TOKEN_HASH_PATTERN.exec(window.location.hash);
   return match?.[1] ?? null;
 }
 
@@ -28,8 +31,12 @@ type UiState =
 
 type FieldErrors = Record<string, string>;
 
-export function ActivationForm({ initialState }: { initialState: 'not-opened' | 'opened' }) {
-  const [ui, setUi] = useState<UiState>({ kind: initialState });
+// D-038 Section 3: GET /activate always renders the identical, fixed,
+// non-enumerating Continue state — there is no longer a server-determined
+// initial state to accept as a prop, since the server performs no lookup
+// of any kind.
+export function ActivationForm() {
+  const [ui, setUi] = useState<UiState>({ kind: 'not-opened' });
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
@@ -60,9 +67,18 @@ export function ActivationForm({ initialState }: { initialState: 'not-opened' | 
       });
       if (response.ok) {
         setUi({ kind: 'opened' });
-      } else {
-        setUi({ kind: 'invalid' });
+        return;
       }
+      // D-038 Section 4: a rate-limit rejection is recoverable — the
+      // token itself remains valid, so the user can simply retry Continue
+      // once the limit clears, without needing to re-open the original
+      // link. Staying in 'not-opened' (never cleared from the URL)
+      // preserves that ability; the token is re-read fresh on the retry.
+      if (response.status === 429) {
+        setUi({ kind: 'not-opened' });
+        return;
+      }
+      setUi({ kind: 'invalid' });
     } catch {
       setUi({ kind: 'invalid' });
     } finally {
@@ -93,7 +109,7 @@ export function ActivationForm({ initialState }: { initialState: 'not-opened' | 
         setUi({ kind: 'success' });
         // Replace, not push, so the token-bearing history entry is
         // overwritten wherever the browser's history API honors it
-        // (D-037 Section 4). No caller-controlled redirect target is ever
+        // (D-038 Section 4). No caller-controlled redirect target is ever
         // read from the response or the request — this destination is a
         // single hard-coded literal.
         window.location.replace('/login?activated=1');
@@ -115,6 +131,19 @@ export function ActivationForm({ initialState }: { initialState: 'not-opened' | 
           setUi({ kind: 'opened' });
           return;
         }
+      }
+
+      // D-038 Section 4: a SOURCE- or TOKEN-dimension rate-limit rejection
+      // (429) is a recoverable condition, not a terminal one — the token
+      // itself is still perfectly valid, so the user must be able to
+      // retry once the limit clears without needing to re-open the
+      // original link. Returning to 'opened' (not 'invalid') preserves
+      // the password form and both submitted field values, and — since
+      // the fragment is never cleared on this branch — Activate can
+      // re-read the token fresh from the URL exactly as before.
+      if (response.status === 429) {
+        setUi({ kind: 'opened' });
+        return;
       }
 
       setUi({ kind: 'invalid' });
