@@ -41,7 +41,9 @@ const resendAdapterMocks = vi.hoisted(() => ({
   isAutomatedDeliveryEnabled: vi.fn(() => false),
   sendInvitationEmail: vi.fn(),
   verifyResendWebhook: vi.fn(),
-  buildActivationUrl: vi.fn((rawToken: string) => `http://localhost:3000/activate/${rawToken}`),
+  buildActivationUrl: vi.fn(
+    (rawToken: string) => `http://localhost:3000/activate#token=${encodeURIComponent(rawToken)}`,
+  ),
 }));
 vi.mock('./resend-adapter', () => resendAdapterMocks);
 
@@ -215,7 +217,10 @@ describe.skipIf(!hasTestDatabaseUrl)('portal invitation service (real database)'
     resendAdapterMocks.sendInvitationEmail.mockReset();
     resendAdapterMocks.buildActivationUrl
       .mockReset()
-      .mockImplementation((rawToken: string) => `http://localhost:3000/activate/${rawToken}`);
+      .mockImplementation(
+        (rawToken: string) =>
+          `http://localhost:3000/activate#token=${encodeURIComponent(rawToken)}`,
+      );
   });
 
   it('runs the full prepare -> send (manual) -> confirm -> revoke lifecycle against the real schema', async () => {
@@ -240,7 +245,7 @@ describe.skipIf(!hasTestDatabaseUrl)('portal invitation service (real database)'
     expect(sendResult.invitation.deliveryState).toBe('NOT_ATTEMPTED');
     // The one and only response that ever carries the raw, one-time
     // manual invitation URL.
-    expect(sendResult.manualInvitationUrl).toMatch(/^https?:\/\/.+\/activate\/.+/);
+    expect(sendResult.manualInvitationUrl).toMatch(/^https?:\/\/.+\/activate#token=.+/);
     // The GET read model never carries a raw token, tokenHash, or URL —
     // only the persisted, hashed/evidence fields.
     const afterSend = await service.getInvitationForClient(adminActor, clientId);
@@ -583,7 +588,7 @@ describe.skipIf(!hasTestDatabaseUrl)('portal invitation service (real database)'
     // A genuinely new token was rotated in (revoke had nulled the old one).
     expect(reissued.invitation.tokenHash).not.toBeNull();
     expect(reissued.invitation.expiresAt).not.toBeNull();
-    expect(reissued.manualInvitationUrl).toMatch(/^https?:\/\/.+\/activate\/.+/);
+    expect(reissued.manualInvitationUrl).toMatch(/^https?:\/\/.+\/activate#token=.+/);
 
     // The historical PORTAL_INVITATION_REVOKED entry is untouched —
     // AuditLog is append-only — and a new PORTAL_INVITATION_RESENT entry

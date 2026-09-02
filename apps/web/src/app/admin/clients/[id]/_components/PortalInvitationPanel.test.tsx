@@ -117,7 +117,7 @@ describe('PortalInvitationPanel — Send (from INVITATION_PREPARED)', () => {
       jsonResponse(200, {
         invitation: sent,
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/raw-token-abc',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=raw-token-abc',
       }),
     );
 
@@ -126,7 +126,7 @@ describe('PortalInvitationPanel — Send (from INVITATION_PREPARED)', () => {
 
     await waitFor(() => expect(screen.getByText('Invitation sent.')).toBeInTheDocument());
     const linkField = screen.getByLabelText('One-time invitation link');
-    expect(linkField).toHaveValue('http://localhost:3000/activate/raw-token-abc');
+    expect(linkField).toHaveValue('http://localhost:3000/activate#token=raw-token-abc');
     expect(screen.getByRole('button', { name: 'Copy invitation link' })).toBeInTheDocument();
     expect(screen.getByText(/shown only once/i)).toBeInTheDocument();
   });
@@ -136,7 +136,7 @@ describe('PortalInvitationPanel — Send (from INVITATION_PREPARED)', () => {
       jsonResponse(200, {
         invitation: invitation({ status: 'INVITATION_SENT' }),
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/raw-token-abc',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=raw-token-abc',
       }),
     );
     const user = userEvent.setup();
@@ -147,7 +147,7 @@ describe('PortalInvitationPanel — Send (from INVITATION_PREPARED)', () => {
 
     await user.click(screen.getByRole('button', { name: 'Copy invitation link' }));
 
-    expect(writeTextSpy).toHaveBeenCalledWith('http://localhost:3000/activate/raw-token-abc');
+    expect(writeTextSpy).toHaveBeenCalledWith('http://localhost:3000/activate#token=raw-token-abc');
     await waitFor(() => expect(screen.getByText('Link copied to clipboard.')).toBeInTheDocument());
   });
 
@@ -199,7 +199,7 @@ describe('PortalInvitationPanel — Send (from INVITATION_PREPARED)', () => {
       jsonResponse(200, {
         invitation: invitation({ status: 'INVITATION_SENT' }),
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/x',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=x',
       }),
     );
     render(<PortalInvitationPanel clientId={CLIENT_ID} initialInvitation={invitation()} />);
@@ -232,7 +232,7 @@ describe('PortalInvitationPanel — Resend/Reissue and stale-precondition recove
           updatedAt: '2026-08-03T00:00:00.000Z',
         }),
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/y',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=y',
       }),
     );
 
@@ -352,7 +352,7 @@ describe('PortalInvitationPanel — Confirm Manual Sent', () => {
       jsonResponse(200, {
         invitation: invitation({ status: 'INVITATION_SENT' }),
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/pending-link',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=pending-link',
       }),
     );
     const user = userEvent.setup();
@@ -498,7 +498,7 @@ describe('PortalInvitationPanel — manualInvitationUrl security', () => {
       jsonResponse(200, {
         invitation: invitation({ status: 'INVITATION_SENT' }),
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/secret-raw-token',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=secret-raw-token',
       }),
     );
 
@@ -520,7 +520,7 @@ describe('PortalInvitationPanel — manualInvitationUrl security', () => {
       jsonResponse(200, {
         invitation: invitation({ status: 'INVITATION_SENT' }),
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/secret-raw-token',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=secret-raw-token',
       }),
     );
 
@@ -540,7 +540,7 @@ describe('PortalInvitationPanel — manualInvitationUrl security', () => {
       jsonResponse(200, {
         invitation: invitation({ status: 'INVITATION_SENT' }),
         delivery: 'reserved-only',
-        manualInvitationUrl: 'http://localhost:3000/activate/first-link',
+        manualInvitationUrl: 'http://localhost:3000/activate#token=first-link',
       }),
     );
     const user = userEvent.setup();

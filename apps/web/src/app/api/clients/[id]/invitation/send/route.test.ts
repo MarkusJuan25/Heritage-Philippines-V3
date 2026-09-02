@@ -91,14 +91,14 @@ describe('POST /api/clients/[id]/invitation/send', () => {
         tokenHash: 'a'.repeat(64),
       },
       delivery: 'reserved-only',
-      manualInvitationUrl: 'http://localhost:3000/activate/a-raw-token',
+      manualInvitationUrl: 'http://localhost:3000/activate#token=a-raw-token',
     });
 
     const response = await POST(request({ deliveryMethod: 'MANUAL_EMAIL' }), context());
     const body = (await response.json()) as { invitation: unknown; manualInvitationUrl: string };
 
     expect(body.invitation).not.toHaveProperty('tokenHash');
-    expect(body.manualInvitationUrl).toBe('http://localhost:3000/activate/a-raw-token');
+    expect(body.manualInvitationUrl).toBe('http://localhost:3000/activate#token=a-raw-token');
   });
 
   it('maps a thrown InvitationError (e.g. DELIVERY_DISABLED) to its declared envelope', async () => {

@@ -35,7 +35,7 @@ const adapterMocks = vi.hoisted(() => ({
   isAutomatedDeliveryEnabled: vi.fn(),
   sendInvitationEmail: vi.fn(),
   verifyResendWebhook: vi.fn(),
-  buildActivationUrl: vi.fn(() => 'http://localhost:3000/activate/mock-token'),
+  buildActivationUrl: vi.fn(() => 'http://localhost:3000/activate#token=mock-token'),
 }));
 vi.mock('./resend-adapter', () => adapterMocks);
 
@@ -222,7 +222,7 @@ describe('sendInvitation', () => {
     expect(result).toEqual({
       invitation: reserved,
       delivery: 'reserved-only',
-      manualInvitationUrl: 'http://localhost:3000/activate/mock-token',
+      manualInvitationUrl: 'http://localhost:3000/activate#token=mock-token',
     });
     expect(adapterMocks.sendInvitationEmail).not.toHaveBeenCalled();
     expect(repositoryMocks.recordSendReservation).toHaveBeenCalledWith(
@@ -559,7 +559,7 @@ describe('resendInvitation', () => {
       concurrencyFor(current),
     );
 
-    expect(result.manualInvitationUrl).toBe('http://localhost:3000/activate/mock-token');
+    expect(result.manualInvitationUrl).toBe('http://localhost:3000/activate#token=mock-token');
   });
 
   it(
