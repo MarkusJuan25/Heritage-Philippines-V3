@@ -3,10 +3,13 @@
 // `X-Real-IP`, or any other) is ignored unconditionally unless
 // `trustConfig.trustedHeaderName` is explicitly set — which no caller in
 // this codebase does yet, in any environment. The two Section 12
-// deployment gates (verified Hostinger proxy-hop behavior; verified
-// access-log behavior for `/activate/*`) remain open, so activation must
-// not be exposed in staging or production regardless of this stage's
-// completion.
+// deployment gates remain open — D-038 Section 6 narrowed them to (a)
+// verified Hostinger reverse-proxy trusted-source-header behavior,
+// applicable only to SOURCE-dimension rate limiting on the two activation
+// POST routes, and (b) confirmation that proxy/origin request-body logging
+// is disabled for `/api/activation/continue` and `/api/activation/activate`
+// specifically — so activation must not be exposed in staging or
+// production regardless of this stage's completion.
 
 export type ResolvedSource = { trusted: true; identifier: string } | { trusted: false };
 
@@ -16,15 +19,19 @@ export type SourceTrustConfig = {
 };
 
 // Only the one method this module needs — deliberately not the full DOM
-// `Headers` type, so both a Route Handler's `Request.headers` and a Server
-// Component's `await headers()` from `next/headers` (a `ReadonlyHeaders`,
-// structurally compatible but not nominally the same type) satisfy this
-// without a cast. D-037 Section 12 illustrates `resolveRequestSource`
-// taking a `Request` directly; `/activate/[token]`'s Server Component has
-// no `Request` object available at all (Next.js's App Router convention),
-// so this narrower parameter type is this implementation's necessary,
-// deliberate adaptation of that illustrative signature — not a silent
-// deviation.
+// `Headers` type. `resolveRequestSource` is called only from the two
+// activation POST route handlers (`app/api/activation/continue/route.ts`
+// and `app/api/activation/activate/route.ts`), each passing its request's
+// own WHATWG `Headers` (`request.headers`), which satisfies this interface
+// directly and without a cast. D-037 Section 12 illustrates
+// `resolveRequestSource` taking a whole `Request`; narrowing the parameter
+// to just the headers view it actually reads is a deliberate adaptation of
+// that illustrative signature — it keeps the resolver independent of any
+// framework request type and trivially unit-testable with a plain
+// `{ get }` stub (see `source.test.ts`), not a silent deviation. (The
+// earlier `/activate/[token]` server-component caller that also motivated
+// this narrowing was removed in D-038 Section 3; the two POST handlers are
+// now the only callers.)
 export type HeadersLike = { get(name: string): string | null };
 
 const IPV6_ZONE_PATTERN = /%.*$/;

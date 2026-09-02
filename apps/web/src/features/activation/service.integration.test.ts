@@ -27,7 +27,9 @@ const resendAdapterMocks = vi.hoisted(() => ({
   isAutomatedDeliveryEnabled: vi.fn(() => false),
   sendInvitationEmail: vi.fn(),
   verifyResendWebhook: vi.fn(),
-  buildActivationUrl: vi.fn((rawToken: string) => `http://localhost:3000/activate/${rawToken}`),
+  buildActivationUrl: vi.fn(
+    (rawToken: string) => `http://localhost:3000/activate#token=${encodeURIComponent(rawToken)}`,
+  ),
 }));
 vi.mock('@/features/invitations/resend-adapter', () => resendAdapterMocks);
 
@@ -187,7 +189,14 @@ describe.skipIf(!hasTestDatabaseUrl)('portal activation service (real database)'
   }
 
   function extractToken(manualInvitationUrl: string): string {
-    return manualInvitationUrl.split('/').pop()!;
+    // The activation link carries the raw token only in its URL fragment
+    // (D-038 Section 2: `/activate#token=<encoded-token>`) — the same
+    // contract `ActivationForm` and `e2e/activation.spec.ts` consume.
+    const match = /#token=([^&]+)$/.exec(new URL(manualInvitationUrl).hash);
+    if (!match) {
+      throw new Error('manualInvitationUrl did not carry the expected #token= fragment');
+    }
+    return decodeURIComponent(match[1]!);
   }
 
   /** prepare -> send (manual) -> confirm-manual-sent, returning the raw token. */

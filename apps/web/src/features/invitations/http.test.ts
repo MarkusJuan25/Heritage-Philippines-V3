@@ -77,11 +77,11 @@ describe('toSendResultResponse', () => {
     const result = toSendResultResponse({
       invitation: record,
       delivery: 'reserved-only',
-      manualInvitationUrl: 'http://localhost:3000/activate/raw-token-value',
+      manualInvitationUrl: 'http://localhost:3000/activate#token=raw-token-value',
     });
 
     expect(result.invitation).not.toHaveProperty('tokenHash');
-    expect(result.manualInvitationUrl).toBe('http://localhost:3000/activate/raw-token-value');
+    expect(result.manualInvitationUrl).toBe('http://localhost:3000/activate#token=raw-token-value');
     expect(result.delivery).toBe('reserved-only');
   });
 
