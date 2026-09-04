@@ -16,6 +16,7 @@ const repositoryMocks = vi.hoisted(() => ({
   findClientById: vi.fn(),
   findDuplicateClientMatches: vi.fn(),
   findDuplicateLeadMatches: vi.fn(),
+  findOwnedClientForUser: vi.fn(),
   updateClientFieldsIfUnstale: vi.fn(),
   insertAuditLog: vi.fn(),
 }));
@@ -38,7 +39,7 @@ import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import { ClientError } from './errors';
 import type { ClientDetailRecord, ClientRecord } from './repository';
-import { getClientById, listClients, updateClient } from './service';
+import { getClientById, getOwnClientForUser, listClients, updateClient } from './service';
 
 const ADMIN_MANAGER: AuthenticatedUser = {
   id: 'admin-1',
@@ -1129,5 +1130,61 @@ describe('updateClient', () => {
       ).rejects.toMatchObject({ code: 'CLIENT_FORBIDDEN' });
       expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
     });
+  });
+});
+
+// --- Client-portal owned-client resolution (D-040 §§2, 3 Contract A) ---
+
+const CLIENT_PORTAL_USER: AuthenticatedUser = {
+  id: 'user-client-1',
+  email: 'client@example.test',
+  name: 'Client One',
+  role: 'CLIENT',
+};
+
+const OWNED_IDENTITY = {
+  clientId: 'client-row-1',
+  fullName: 'Ana Reyes',
+  email: 'ana@example.com',
+  phone: null,
+};
+
+describe('getOwnClientForUser', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('rejects a non-CLIENT actor with ROLE_NOT_PERMITTED and never touches the repository', async () => {
+    for (const actor of [ADMIN_MANAGER, TRAVEL_CONSULTANT]) {
+      await expect(getOwnClientForUser(actor)).rejects.toMatchObject({
+        name: 'ClientError',
+        code: 'ROLE_NOT_PERMITTED',
+        status: 403,
+      });
+    }
+    expect(repositoryMocks.findOwnedClientForUser).not.toHaveBeenCalled();
+  });
+
+  it('resolves the owned Client from actor.id alone — never a clientId, never canAccessClient', async () => {
+    repositoryMocks.findOwnedClientForUser.mockResolvedValue(OWNED_IDENTITY);
+
+    const result = await getOwnClientForUser(CLIENT_PORTAL_USER);
+
+    expect(result).toEqual(OWNED_IDENTITY);
+    expect(repositoryMocks.findOwnedClientForUser).toHaveBeenCalledTimes(1);
+    expect(repositoryMocks.findOwnedClientForUser).toHaveBeenCalledWith(
+      prisma,
+      CLIENT_PORTAL_USER.id,
+    );
+    expect(repositoryMocks.findOwnedClientForUser.mock.calls[0]).toHaveLength(2);
+    // Contract A must not consult canAccessClient — its job is to *produce*
+    // the owned clientId the other contracts then re-check.
+    expect(authorizationMocks.canAccessClient).not.toHaveBeenCalled();
+  });
+
+  it('passes a missing profile through as null ("account setup in progress")', async () => {
+    repositoryMocks.findOwnedClientForUser.mockResolvedValue(null);
+
+    expect(await getOwnClientForUser(CLIENT_PORTAL_USER)).toBeNull();
   });
 });

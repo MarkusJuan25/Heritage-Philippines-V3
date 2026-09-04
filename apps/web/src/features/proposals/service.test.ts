@@ -26,6 +26,8 @@ const repositoryMocks = vi.hoisted(() => ({
   markProposalVersionClientVisible: vi.fn(),
   findProposalAcceptanceForVersion: vi.fn(),
   createExternalProposalAcceptance: vi.fn(),
+  findClientProposalFacts: vi.fn(),
+  findClientProposalPreview: vi.fn(),
   insertAuditLog: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
@@ -52,6 +54,8 @@ import type {
 import {
   createProposal,
   createProposalRevision,
+  getClientProposalFacts,
+  getClientProposalPreview,
   getProposalById,
   listProposals,
   publishProposalVersion,
@@ -1367,5 +1371,84 @@ describe('cross-cutting transaction and retry discipline', () => {
     ).rejects.toMatchObject({ code: 'PROPOSAL_VERSION_SUPERSEDED' });
     // Exactly one attempt — a business-rule rejection is never retried.
     expect(transactionMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- Client-portal reads (D-040 §§2, 3, 4 — Contracts B and C) ---
+
+const CLIENT_PORTAL_ACTOR: AuthenticatedUser = {
+  id: 'user-client-1',
+  email: 'client@example.test',
+  name: 'Client One',
+  role: 'CLIENT',
+};
+
+const CLIENT_PROPOSAL_FACTS = {
+  currentVisibleTotal: 3,
+  awaitingResponse: 1,
+  accepted: 1,
+  acceptedWithoutClientVisibleBooking: 1,
+  respondedNonAccept: 1,
+};
+
+describe('getClientProposalFacts / getClientProposalPreview (Contracts B and C)', () => {
+  it('reject a non-CLIENT actor with ROLE_NOT_PERMITTED before canAccessClient or any repository read', async () => {
+    for (const actor of [ADMIN_MANAGER, TRAVEL_CONSULTANT]) {
+      await expect(getClientProposalFacts(actor, CLIENT_ID)).rejects.toMatchObject({
+        name: 'ProposalError',
+        code: 'ROLE_NOT_PERMITTED',
+      });
+      await expect(getClientProposalPreview(actor, CLIENT_ID)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+      });
+    }
+    expect(authorizationMocks.canAccessClient).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientProposalFacts).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientProposalPreview).not.toHaveBeenCalled();
+  });
+
+  it('call canAccessClient(actor, clientId) BEFORE the repository read, and reject a denial with CLIENT_FORBIDDEN', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(getClientProposalFacts(CLIENT_PORTAL_ACTOR, CLIENT_ID)).rejects.toMatchObject({
+      name: 'ProposalError',
+      code: 'CLIENT_FORBIDDEN',
+      status: 403,
+    });
+    expect(authorizationMocks.canAccessClient).toHaveBeenCalledWith(CLIENT_PORTAL_ACTOR, CLIENT_ID);
+    expect(repositoryMocks.findClientProposalFacts).not.toHaveBeenCalled();
+  });
+
+  it('getClientProposalFacts delegates to the repository once access is granted', async () => {
+    repositoryMocks.findClientProposalFacts.mockResolvedValue(CLIENT_PROPOSAL_FACTS);
+
+    const result = await getClientProposalFacts(CLIENT_PORTAL_ACTOR, CLIENT_ID);
+
+    expect(result).toEqual(CLIENT_PROPOSAL_FACTS);
+    expect(repositoryMocks.findClientProposalFacts).toHaveBeenCalledWith(prisma, CLIENT_ID);
+    const accessOrder = authorizationMocks.canAccessClient.mock.invocationCallOrder[0]!;
+    const readOrder = repositoryMocks.findClientProposalFacts.mock.invocationCallOrder[0]!;
+    expect(accessOrder).toBeLessThan(readOrder);
+  });
+
+  it('getClientProposalPreview maps every responseType (and its absence) to the D-040 §4 label', async () => {
+    repositoryMocks.findClientProposalPreview.mockResolvedValue([
+      { versionNumber: 4, responseType: null },
+      { versionNumber: 3, responseType: 'ACCEPT' },
+      { versionNumber: 2, responseType: 'DECLINE' },
+      { versionNumber: 1, responseType: 'REQUEST_CHANGES' },
+    ]);
+
+    const result = await getClientProposalPreview(CLIENT_PORTAL_ACTOR, CLIENT_ID);
+
+    expect(result).toEqual({
+      items: [
+        { versionNumber: 4, statusLabel: 'Awaiting your response' },
+        { versionNumber: 3, statusLabel: 'Accepted' },
+        { versionNumber: 2, statusLabel: 'Declined' },
+        { versionNumber: 1, statusLabel: 'Changes requested' },
+      ],
+    });
+    expect(repositoryMocks.findClientProposalPreview).toHaveBeenCalledWith(prisma, CLIENT_ID);
   });
 });

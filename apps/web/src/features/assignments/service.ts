@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
+import { canAccessClient } from './authorization';
 import {
   ASSIGNMENT_AUDIT_ACTIONS,
   ASSIGNMENT_AUDIT_ENTITY_TYPE,
@@ -408,4 +409,42 @@ export async function listEligibleTravelConsultants(
     take: query.pageSize,
   });
   return { items, page: query.page, pageSize: query.pageSize, total };
+}
+
+// --- Client-portal read (docs/HERITAGE_V3_DECISIONS_LOG.md D-040 §§2, 3, 7
+// Contract F) ---
+// The Client Home / Overview's Consultant card. Read-only, no transaction,
+// no audit. Authorization is two independent checks, in this order: a
+// CLIENT-role gate (defense in depth), then `canAccessClient(actor,
+// clientId)` — the ownership re-check D-040 §2 layer 4 requires before the
+// repository is touched. The `clientId` is only ever the server-resolved
+// owned id from Contract A. Returns the assigned consultant's NAME ONLY, or
+// `null` when the Client currently has no active assignment.
+
+function assertClientPortalActor(actor: AuthenticatedUser): { id: string } {
+  if (actor.role === 'CLIENT') {
+    return { id: actor.id };
+  }
+  throw new AssignmentError(
+    'ROLE_NOT_PERMITTED',
+    'This role is not permitted to view this client portal information.',
+  );
+}
+
+export async function getActiveConsultantNameForClient(
+  actor: AuthenticatedUser,
+  clientId: string,
+): Promise<{ name: string } | null> {
+  assertClientPortalActor(actor);
+  const access = await canAccessClient(actor, clientId);
+  if (!access.allowed) {
+    // No client-forbidden code exists on AssignmentError; a 404 is the
+    // strongest anti-enumeration choice and an established pattern in this
+    // codebase for an inaccessible target. This path is never reached
+    // through the overview composition (the `clientId` is always the
+    // caller's own owned id) — it exists only for a direct or cross-client
+    // caller.
+    throw new AssignmentError('CLIENT_NOT_FOUND', 'Client not found.');
+  }
+  return repository.findActiveConsultantNameForClient(prisma, clientId);
 }

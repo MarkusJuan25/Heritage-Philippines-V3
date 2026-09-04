@@ -20,6 +20,8 @@ const repositoryMocks = vi.hoisted(() => ({
   findActiveAssignmentForLead: vi.fn(),
   findActiveAssignmentForClient: vi.fn(),
   findActiveAssignmentForBooking: vi.fn(),
+  findClientProfileOwnership: vi.fn(),
+  findActiveConsultantNameForClient: vi.fn(),
   createAssignment: vi.fn(),
   endAssignmentById: vi.fn(),
   insertAuditLog: vi.fn(),
@@ -35,6 +37,7 @@ import type { AssignmentRecord } from './repository';
 import {
   endClientAssignment,
   endLeadAssignment,
+  getActiveConsultantNameForClient,
   listEligibleTravelConsultants,
   setBookingAssignment,
   setClientAssignment,
@@ -774,5 +777,64 @@ describe('listEligibleTravelConsultants', () => {
     const result = await listEligibleTravelConsultants(ACTOR, { page: 1, pageSize: 20 });
 
     expect(result.items).toEqual(items);
+  });
+});
+
+// --- Client-portal read (D-040 §§2, 3, 7 — Contract F) ---
+
+const CLIENT_PORTAL_ACTOR: AuthenticatedUser = {
+  id: 'user-client-1',
+  email: 'client@example.test',
+  name: 'Client One',
+  role: 'CLIENT',
+};
+
+describe('getActiveConsultantNameForClient (Contract F)', () => {
+  it('rejects a non-CLIENT actor with ROLE_NOT_PERMITTED before any access check or read', async () => {
+    for (const role of ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT', 'FINANCE_ACCOUNTING'] as const) {
+      await expect(
+        getActiveConsultantNameForClient({ ...ACTOR, role }, CLIENT_ID),
+      ).rejects.toMatchObject({ name: 'AssignmentError', code: 'ROLE_NOT_PERMITTED' });
+    }
+    expect(repositoryMocks.findActiveConsultantNameForClient).not.toHaveBeenCalled();
+  });
+
+  it('calls canAccessClient (via ClientProfile ownership) BEFORE the read, and rejects a denial with CLIENT_NOT_FOUND', async () => {
+    repositoryMocks.findClientProfileOwnership.mockResolvedValue(null); // ownership denied
+
+    await expect(
+      getActiveConsultantNameForClient(CLIENT_PORTAL_ACTOR, 'someone-elses-client'),
+    ).rejects.toMatchObject({ name: 'AssignmentError', code: 'CLIENT_NOT_FOUND', status: 404 });
+
+    expect(repositoryMocks.findClientProfileOwnership).toHaveBeenCalledWith(
+      prisma,
+      CLIENT_PORTAL_ACTOR.id,
+      'someone-elses-client',
+    );
+    expect(repositoryMocks.findActiveConsultantNameForClient).not.toHaveBeenCalled();
+  });
+
+  it('returns the consultant name when the caller owns the client', async () => {
+    repositoryMocks.findClientProfileOwnership.mockResolvedValue({ id: 'profile-1' }); // ownership granted
+    repositoryMocks.findActiveConsultantNameForClient.mockResolvedValue({ name: 'Maria Santos' });
+
+    const result = await getActiveConsultantNameForClient(CLIENT_PORTAL_ACTOR, CLIENT_ID);
+
+    expect(result).toEqual({ name: 'Maria Santos' });
+    expect(repositoryMocks.findActiveConsultantNameForClient).toHaveBeenCalledWith(
+      prisma,
+      CLIENT_ID,
+    );
+    const ownershipOrder = repositoryMocks.findClientProfileOwnership.mock.invocationCallOrder[0]!;
+    const readOrder =
+      repositoryMocks.findActiveConsultantNameForClient.mock.invocationCallOrder[0]!;
+    expect(ownershipOrder).toBeLessThan(readOrder);
+  });
+
+  it('returns null when the owned client currently has no active assignment', async () => {
+    repositoryMocks.findClientProfileOwnership.mockResolvedValue({ id: 'profile-1' });
+    repositoryMocks.findActiveConsultantNameForClient.mockResolvedValue(null);
+
+    expect(await getActiveConsultantNameForClient(CLIENT_PORTAL_ACTOR, CLIENT_ID)).toBeNull();
   });
 });

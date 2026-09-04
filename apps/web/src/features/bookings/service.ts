@@ -5,6 +5,8 @@ import { prisma } from '@/lib/db';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
+import { canAccessClient } from '@/features/assignments/authorization';
+
 import {
   BOOKING_AUDIT_ACTIONS,
   BOOKING_AUDIT_ENTITY_TYPE,
@@ -13,9 +15,21 @@ import {
 } from './audit';
 import { BookingError } from './errors';
 import * as repository from './repository';
-import type { BookingActor, BookingRecord } from './repository';
+import type {
+  BookingActor,
+  BookingRecord,
+  ClientBookingFacts,
+  ClientBookingPreviewRow,
+  NonDraftBookingStatus,
+} from './repository';
 import type { CreateBookingInput, ListBookingsQuery, UpdateBookingStatusInput } from './schemas';
 import { isTransitionAllowed } from './transitions';
+
+// Re-exported so the compose-only features/client-portal module (D-040 §3)
+// can type its overview DTO against the Booking feature's own status
+// taxonomy without importing another feature's repository.ts.
+export { NON_DRAFT_BOOKING_STATUSES } from './repository';
+export type { ClientBookingFacts, NonDraftBookingStatus } from './repository';
 
 const BOOKING_REFERENCE_PREFIX = 'HPB-';
 const MAX_BOOKING_REFERENCE_ATTEMPTS = 3;
@@ -386,4 +400,98 @@ export async function updateBookingStatus(
     }
     throw error;
   }
+}
+
+// --- Client-portal reads (docs/HERITAGE_V3_DECISIONS_LOG.md D-040 §§2, 3, 5) ---
+// Contracts D and E: the Booking feature's own CLIENT-safe reads for the
+// Client Home / Overview. They are read-only, never open a transaction, and
+// never write an AuditLog row. Authorization is two independent checks, in
+// this order: a CLIENT-role gate (defense in depth — the client-portal
+// composition already checks the role, but a direct or mis-wired caller
+// must still be rejected before any read), then
+// `canAccessClient(actor, clientId)` — the exact ownership re-check D-040 §2
+// layer 4 requires on every client-facing read, run BEFORE the repository
+// is touched. The `clientId` is only ever the server-resolved owned id from
+// Contract A (features/clients/service.ts's `getOwnClientForUser`); this
+// feature never accepts a client identifier from a path, query, body, or
+// caller-controlled object.
+
+const CLIENT_PORTAL_ROLE_MESSAGE = 'This role is not permitted to access client portal bookings.';
+const CLIENT_PORTAL_FORBIDDEN_MESSAGE = 'Bookings for this client are not accessible.';
+
+function assertClientPortalActor(actor: AuthenticatedUser): { id: string } {
+  if (actor.role === 'CLIENT') {
+    return { id: actor.id };
+  }
+  throw new BookingError('ROLE_NOT_PERMITTED', CLIENT_PORTAL_ROLE_MESSAGE);
+}
+
+async function assertClientPortalAccess(actor: AuthenticatedUser, clientId: string): Promise<void> {
+  assertClientPortalActor(actor);
+  const access = await canAccessClient(actor, clientId);
+  if (!access.allowed) {
+    throw new BookingError('BOOKING_FORBIDDEN', CLIENT_PORTAL_FORBIDDEN_MESSAGE);
+  }
+}
+
+// D-040 §5's exact client-facing status labels. DRAFT has no client label —
+// it never reaches a client (excluded from every client-visible read).
+const CLIENT_BOOKING_STATUS_LABELS: Record<NonDraftBookingStatus, string> = {
+  PENDING_CONFIRMATION: 'Pending confirmation',
+  CONFIRMED: 'Confirmed',
+  IN_PREPARATION: 'In preparation',
+  DOCUMENTS_REQUIRED: 'Documents required',
+  VISA_PROCESSING: 'Visa processing',
+  READY_FOR_TRAVEL: 'Ready for travel',
+  IN_PROGRESS: 'Travel in progress',
+  COMPLETED: 'Completed',
+  CANCELLED: 'Cancelled',
+};
+
+export type ClientBookingPreviewItem = {
+  bookingReference: string;
+  statusLabel: string;
+  travelStartDate: Date | null;
+  travelEndDate: Date | null;
+  destination: string | null;
+  tourPackageName: string | null;
+};
+
+export type ClientBookingPreview = { items: ClientBookingPreviewItem[] };
+
+/**
+ * Contract D (D-040 §3/§5): the DRAFT-excluded, fixed nine-key booking
+ * aggregate for the authenticated client's owned Client. Complete dataset
+ * (a `groupBy`, not a bounded list).
+ */
+export async function getClientBookingFacts(
+  actor: AuthenticatedUser,
+  clientId: string,
+): Promise<ClientBookingFacts> {
+  await assertClientPortalAccess(actor, clientId);
+  return repository.findClientBookingFacts(prisma, clientId);
+}
+
+/**
+ * Contract E (D-040 §3/§5): the DRAFT-excluded, five-item, deterministically
+ * ordered client-visible booking preview, each item carrying only the
+ * approved field allow-list (no internal notes, money, traveler count, or
+ * database id — `bookingReference` is the one client-facing identifier).
+ */
+export async function getClientBookingPreview(
+  actor: AuthenticatedUser,
+  clientId: string,
+): Promise<ClientBookingPreview> {
+  await assertClientPortalAccess(actor, clientId);
+  const rows = await repository.findClientBookingPreview(prisma, clientId);
+  return {
+    items: rows.map((row: ClientBookingPreviewRow) => ({
+      bookingReference: row.bookingReference,
+      statusLabel: CLIENT_BOOKING_STATUS_LABELS[row.status],
+      travelStartDate: row.travelStartDate,
+      travelEndDate: row.travelEndDate,
+      destination: row.destination,
+      tourPackageName: row.tourPackageName,
+    })),
+  };
 }

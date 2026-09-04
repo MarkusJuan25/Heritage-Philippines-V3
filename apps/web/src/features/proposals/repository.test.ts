@@ -6,6 +6,8 @@ import {
   createExternalProposalAcceptance,
   createProposalRevision,
   createProposalWithFirstVersion,
+  findClientProposalFacts,
+  findClientProposalPreview,
   findCurrentClientVisibleVersion,
   findProposalAcceptanceForVersion,
   findProposalByIdForActor,
@@ -794,5 +796,121 @@ describe('insertAuditLog', () => {
     expect(Object.keys(writtenData).sort()).toEqual(
       ['id', 'actorId', 'action', 'entityType', 'entityId', 'beforeState', 'afterState'].sort(),
     );
+  });
+});
+
+// --- Client-portal reads (D-040 §4) ---
+
+const CLIENT_VISIBLE_BASE = {
+  proposal: { clientId: CLIENT_ID },
+  clientVisibleAt: { not: null },
+  supersededAt: null,
+};
+
+describe('findClientProposalFacts', () => {
+  it('issues exactly the five D-040 §4 counts, each as base predicate + its own addition', async () => {
+    const count = vi
+      .fn()
+      .mockResolvedValueOnce(4) // currentVisibleTotal
+      .mockResolvedValueOnce(1) // awaitingResponse
+      .mockResolvedValueOnce(2) // accepted
+      .mockResolvedValueOnce(1) // acceptedWithoutClientVisibleBooking
+      .mockResolvedValueOnce(1); // respondedNonAccept
+    const db = { proposalVersion: { count } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientProposalFacts(db, CLIENT_ID);
+
+    expect(count).toHaveBeenCalledTimes(5);
+    expect(count.mock.calls[0]![0]).toEqual({ where: CLIENT_VISIBLE_BASE });
+    expect(count.mock.calls[1]![0]).toEqual({
+      where: { ...CLIENT_VISIBLE_BASE, acceptance: { is: null } },
+    });
+    expect(count.mock.calls[2]![0]).toEqual({
+      where: { ...CLIENT_VISIBLE_BASE, acceptance: { is: { responseType: 'ACCEPT' } } },
+    });
+    expect(count.mock.calls[3]![0]).toEqual({
+      where: {
+        ...CLIENT_VISIBLE_BASE,
+        acceptance: { is: { responseType: 'ACCEPT' } },
+        OR: [{ booking: { is: null } }, { booking: { is: { status: 'DRAFT' } } }],
+      },
+    });
+    expect(count.mock.calls[4]![0]).toEqual({
+      where: {
+        ...CLIENT_VISIBLE_BASE,
+        acceptance: { is: { responseType: { in: ['DECLINE', 'REQUEST_CHANGES'] } } },
+      },
+    });
+
+    expect(result).toEqual({
+      currentVisibleTotal: 4,
+      awaitingResponse: 1,
+      accepted: 2,
+      acceptedWithoutClientVisibleBooking: 1,
+      respondedNonAccept: 1,
+    });
+  });
+
+  it('acceptedWithoutClientVisibleBooking counts a missing booking OR a DRAFT booking (never a non-DRAFT one)', async () => {
+    const count = vi.fn().mockResolvedValue(0);
+    const db = { proposalVersion: { count } } as unknown as Prisma.TransactionClient;
+
+    await findClientProposalFacts(db, CLIENT_ID);
+
+    const acwcvbWhere = count.mock.calls[3]![0].where;
+    expect(acwcvbWhere.OR).toEqual([
+      { booking: { is: null } },
+      { booking: { is: { status: 'DRAFT' } } },
+    ]);
+    expect(acwcvbWhere.acceptance).toEqual({ is: { responseType: 'ACCEPT' } });
+  });
+
+  it('every count carries the clientVisibleAt-set AND supersededAt-null predicate (superseded/draft versions excluded)', async () => {
+    const count = vi.fn().mockResolvedValue(0);
+    const db = { proposalVersion: { count } } as unknown as Prisma.TransactionClient;
+
+    await findClientProposalFacts(db, CLIENT_ID);
+
+    for (const call of count.mock.calls) {
+      expect(call[0].where.clientVisibleAt).toEqual({ not: null });
+      expect(call[0].where.supersededAt).toBeNull();
+      expect(call[0].where.proposal).toEqual({ clientId: CLIENT_ID });
+    }
+  });
+});
+
+describe('findClientProposalPreview', () => {
+  it('applies the current-visible predicate, deterministic proposal-level ordering, take: 5, and a content-free select', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      { versionNumber: 3, acceptance: { responseType: 'ACCEPT' } },
+      { versionNumber: 1, acceptance: null },
+    ]);
+    const db = { proposalVersion: { findMany } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientProposalPreview(db, CLIENT_ID);
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: CLIENT_VISIBLE_BASE,
+      orderBy: [{ proposal: { createdAt: 'desc' } }, { proposal: { id: 'asc' } }],
+      take: 5,
+      select: { versionNumber: true, acceptance: { select: { responseType: true } } },
+    });
+    expect(result).toEqual([
+      { versionNumber: 3, responseType: 'ACCEPT' },
+      { versionNumber: 1, responseType: null },
+    ]);
+    const select = findMany.mock.calls[0]![0].select;
+    expect(select).not.toHaveProperty('content');
+    expect(select).not.toHaveProperty('id');
+    expect(select).not.toHaveProperty('proposalId');
+  });
+
+  it('maps an absent acceptance to responseType: null', async () => {
+    const findMany = vi.fn().mockResolvedValue([{ versionNumber: 1, acceptance: null }]);
+    const db = { proposalVersion: { findMany } } as unknown as Prisma.TransactionClient;
+
+    expect(await findClientProposalPreview(db, CLIENT_ID)).toEqual([
+      { versionNumber: 1, responseType: null },
+    ]);
   });
 });

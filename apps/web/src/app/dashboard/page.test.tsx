@@ -52,8 +52,16 @@ describe('DashboardPage', () => {
     },
   );
 
-  it.each(['SYSTEM_ADMINISTRATOR', 'FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION', 'CLIENT'])(
-    'retains the existing Phase-1 verification content for role %s, never redirecting to /admin',
+  it('redirects role CLIENT to /client (D-040 §2)', async () => {
+    getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role: 'CLIENT' });
+
+    await expect(DashboardPage()).rejects.toThrow('REDIRECT:/client');
+    expect(redirectMock).toHaveBeenCalledWith('/client');
+    expect(redirectMock).not.toHaveBeenCalledWith('/admin');
+  });
+
+  it.each(['SYSTEM_ADMINISTRATOR', 'FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION'])(
+    'retains the existing Phase-1 verification block for role %s, redirecting nowhere (D-040 §2)',
     async (role) => {
       getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
 
@@ -65,6 +73,7 @@ describe('DashboardPage', () => {
       expect(screen.getByText(BASE_USER.email)).toBeInTheDocument();
       expect(screen.getByText(role)).toBeInTheDocument();
       expect(redirectMock).not.toHaveBeenCalledWith('/admin');
+      expect(redirectMock).not.toHaveBeenCalledWith('/client');
     },
   );
 });

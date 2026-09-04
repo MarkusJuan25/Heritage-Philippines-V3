@@ -1,0 +1,266 @@
+/* Client Home / Overview (D-040 Stage 6c). CSS Modules, mirroring the
+   established admin/*.module.css precedent — no runtime CSS framework, no
+   shared cross-feature module. Mobile-first: the base rules already suit a
+   narrow phone screen (single stacked column, nav collapsed to a drawer);
+   the two-column grid and the always-open nav are progressive
+   enhancements for wider viewports at min-width: 48rem
+   (.claude/rules/frontend.md; D-040 §7). */
+
+/* --- Layout shell / chrome --- */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.chrome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.brand {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* --- Navigation (D-040 §7) --- */
+
+.nav {
+  order: 3;
+  flex-basis: 100%;
+}
+
+/* The mobile drawer toggle: a genuine <button>. Visible only on narrow
+   screens; the nav list itself is the drawer it opens. */
+.navToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.75rem;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #b0b0b0;
+  border-radius: 0.4rem;
+  background: #f4f4f4;
+}
+
+.navToggle:focus-visible {
+  outline: 2px solid #1a4f8a;
+  outline-offset: 2px;
+}
+
+/* Drawer closed by default on mobile; opened by the toggle. */
+.navList {
+  display: none;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.navListOpen {
+  display: flex;
+}
+
+.navCurrent,
+.navItem {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+}
+
+.navCurrentLabel {
+  font-weight: 600;
+}
+
+.navItemLabel {
+  color: #333;
+}
+
+/* The visible "Coming soon" marker on each of the nine inert items. */
+.navItemBadge {
+  font-size: 0.75rem;
+  color: #666;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.35rem;
+  padding: 0 0.35rem;
+}
+
+@media (min-width: 48rem) {
+  .navToggle {
+    display: none;
+  }
+
+  /* Above the breakpoint the nav is always shown as a horizontal row —
+     never a shrunk mobile drawer — and follows source order between the
+     brand and the sign-out control (`[brand] [nav] [sign out]`, matching
+     admin/layout.tsx), rather than the full-width own-row `order: 3` the
+     base mobile rule uses. */
+  .nav {
+    order: 0;
+    flex-basis: auto;
+  }
+
+  .navList {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin: 0;
+  }
+}
+
+/* --- Known-state panels (forbidden / no-profile) --- */
+
+.panel {
+  max-width: 36rem;
+}
+
+.panel h1 {
+  margin: 0 0 0.75rem;
+}
+
+.panel p {
+  margin: 0;
+  color: #444;
+}
+
+/* --- Overview body --- */
+
+.overview {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.pageHeading {
+  margin: 0;
+}
+
+.identity {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 1rem;
+  row-gap: 0.35rem;
+}
+
+.identity dt {
+  color: #666;
+  font-size: 0.85rem;
+}
+
+.identity dd {
+  margin: 0;
+}
+
+.sections {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+}
+
+@media (min-width: 48rem) {
+  .sections {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.section {
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.sectionHeading {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+.previewList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.previewItem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.previewItem:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.previewItemPrimary {
+  font-weight: 600;
+}
+
+.previewItemMeta {
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.previewItemDates {
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.emptyState {
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px dashed #c0c0c0;
+  border-radius: 0.5rem;
+  color: #666;
+}
+
+/* --- Travel status (D-040 §6) --- */
+
+.travelStatus {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.proposalLine {
+  margin: 0;
+  font-weight: 600;
+}
+
+.progressLine {
+  margin: 0;
+}
+
+/* --- Consultant / support guidance (D-040 §7) --- */
+/* Rendered inside an OverviewSection (.section already supplies the card
+   border/padding); this is just the vertical stack. */
+.consultant {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.consultantName {
+  margin: 0;
+  font-weight: 600;
+}
+
+.supportGuidance {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #444;
+}

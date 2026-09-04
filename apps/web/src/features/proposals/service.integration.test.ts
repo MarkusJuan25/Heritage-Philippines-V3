@@ -1445,4 +1445,181 @@ describe.skipIf(!hasTestDatabaseUrl)('proposals service integration (real databa
     expect(serialized).not.toContain(secretMethod);
     expect(serialized).not.toContain(secretEvidence);
   });
+
+  // --- D-040 §9: one CLIENT-actor case for Contracts B and C ---
+  describe('getClientProposalFacts / getClientProposalPreview (D-040 Contracts B, C) — real database', () => {
+    let getClientProposalFacts: (typeof import('./service'))['getClientProposalFacts'];
+    let getClientProposalPreview: (typeof import('./service'))['getClientProposalPreview'];
+    const localUserIds: string[] = [];
+    const localClientIds: string[] = [];
+    const localProfileIds: string[] = [];
+    const localProposalIds: string[] = [];
+    const localBookingIds: string[] = [];
+    let clientActor: AuthenticatedUser;
+    let ownedClientId: string;
+    let otherClientId: string;
+
+    async function seedProposal(
+      clientId: string,
+      opts: {
+        published?: boolean;
+        draftOnly?: boolean;
+        superseded?: boolean;
+        acceptance?: 'ACCEPT' | 'DECLINE' | 'REQUEST_CHANGES' | null;
+        draftBooking?: boolean;
+      },
+    ): Promise<void> {
+      const proposalId = randomUUID();
+      const now = new Date();
+      const published = opts.draftOnly ? false : (opts.published ?? true);
+      await prisma!.proposal.create({ data: { id: proposalId, clientId } });
+      localProposalIds.push(proposalId);
+
+      const mkVersion = async (n: number, cv: Date | null, sup: Date | null): Promise<string> => {
+        const id = randomUUID();
+        await prisma!.proposalVersion.create({
+          data: {
+            id,
+            proposalId,
+            versionNumber: n,
+            content: `content ${randomUUID()}`,
+            createdByUserId: tcActor.id,
+            clientVisibleAt: cv,
+            supersededAt: sup,
+          },
+        });
+        return id;
+      };
+
+      let current: string;
+      if (opts.superseded) {
+        await mkVersion(1, new Date(now.getTime() - 1000), now);
+        current = await mkVersion(2, now, null);
+      } else {
+        current = await mkVersion(1, published ? now : null, null);
+      }
+      if (opts.acceptance) {
+        await prisma!.proposalAcceptance.create({
+          data: {
+            id: randomUUID(),
+            proposalVersionId: current,
+            responseType: opts.acceptance,
+            respondedAt: now,
+            recordedByStaffUserId: tcActor.id,
+            responseMethod: 'phone',
+            evidenceReference: `ev-${randomUUID()}`,
+          },
+        });
+      }
+      if (opts.draftBooking) {
+        const bid = randomUUID();
+        await prisma!.booking.create({
+          data: {
+            id: bid,
+            bookingReference: `HPB-${randomUUID().replace(/-/g, '').toUpperCase()}`,
+            clientId,
+            proposalVersionId: current,
+            status: 'DRAFT',
+            statusHistory: {
+              create: {
+                id: randomUUID(),
+                previousStatus: null,
+                newStatus: 'DRAFT',
+                changedByUserId: tcActor.id,
+              },
+            },
+          },
+        });
+        localBookingIds.push(bid);
+      }
+    }
+
+    beforeAll(async () => {
+      ({ getClientProposalFacts, getClientProposalPreview } = await import('./service'));
+
+      const userId = randomUUID();
+      ownedClientId = randomUUID();
+      otherClientId = randomUUID();
+      const profileId = randomUUID();
+      const email = `proposals-portal-${randomUUID()}@example.test`;
+      await prisma!.user.create({
+        data: { id: userId, name: 'Portal Client', email, role: 'CLIENT', isActive: true },
+      });
+      localUserIds.push(userId);
+      await prisma!.client.create({ data: { id: ownedClientId, fullName: 'Owned', email } });
+      await prisma!.client.create({
+        data: {
+          id: otherClientId,
+          fullName: 'Other',
+          email: `proposals-portal-other-${randomUUID()}@example.test`,
+        },
+      });
+      localClientIds.push(ownedClientId, otherClientId);
+      await prisma!.clientProfile.create({
+        data: { id: profileId, userId, clientId: ownedClientId },
+      });
+      localProfileIds.push(profileId);
+      clientActor = { id: userId, email, name: 'Portal Client', role: 'CLIENT' };
+
+      await seedProposal(ownedClientId, { acceptance: null }); // awaiting #1
+      await seedProposal(ownedClientId, { acceptance: 'ACCEPT', draftBooking: true }); // acwcvb
+      await seedProposal(ownedClientId, { draftOnly: true }); // never counted
+      await seedProposal(ownedClientId, { superseded: true, acceptance: null }); // awaiting #2 (v2 only)
+      // otherClientId gets one proposal the CLIENT actor must never see.
+      await seedProposal(otherClientId, { acceptance: null });
+    }, 20000);
+
+    afterAll(async () => {
+      if (!prisma) return;
+      await prisma.bookingStatusHistory.deleteMany({
+        where: { bookingId: { in: localBookingIds } },
+      });
+      await prisma.booking.deleteMany({ where: { id: { in: localBookingIds } } });
+      await prisma.proposalAcceptance.deleteMany({
+        where: { proposalVersion: { proposalId: { in: localProposalIds } } },
+      });
+      await prisma.proposalVersion.deleteMany({ where: { proposalId: { in: localProposalIds } } });
+      await prisma.proposal.deleteMany({ where: { id: { in: localProposalIds } } });
+      await prisma.clientProfile.deleteMany({ where: { id: { in: localProfileIds } } });
+      await prisma.client.deleteMany({ where: { id: { in: localClientIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }, 20000);
+
+    it('computes the five facts over the complete current-visible set, excluding draft-only and superseded versions', async () => {
+      const facts = await getClientProposalFacts(clientActor, ownedClientId);
+      expect(facts).toEqual({
+        currentVisibleTotal: 3,
+        awaitingResponse: 2,
+        accepted: 1,
+        acceptedWithoutClientVisibleBooking: 1, // ACCEPT + DRAFT booking
+        respondedNonAccept: 0,
+      });
+      // Invariant.
+      expect(facts.awaitingResponse + facts.accepted + facts.respondedNonAccept).toBe(
+        facts.currentVisibleTotal,
+      );
+    });
+
+    it('returns a bounded (<= 5) preview independent of the fact counts', async () => {
+      const preview = await getClientProposalPreview(clientActor, ownedClientId);
+      expect(preview.items.length).toBeLessThanOrEqual(5);
+      expect(preview.items.length).toBe(3);
+      for (const item of preview.items) {
+        expect(Object.keys(item).sort()).toEqual(['statusLabel', 'versionNumber']);
+      }
+    });
+
+    it('rejects a CLIENT actor asking for a client they do not own with CLIENT_FORBIDDEN', async () => {
+      await expect(getClientProposalFacts(clientActor, otherClientId)).rejects.toMatchObject({
+        name: 'ProposalError',
+        code: 'CLIENT_FORBIDDEN',
+      });
+    });
+
+    it('rejects a staff actor with ROLE_NOT_PERMITTED', async () => {
+      await expect(getClientProposalFacts(adminActor, ownedClientId)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+      });
+    });
+  });
 });
