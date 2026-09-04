@@ -142,13 +142,19 @@ type RpcResponseBody = { ok: true; result: unknown } | { ok: false; error: strin
  * arbitrary model/method pair supplied in a request body.
  */
 const RPC_ALLOWED_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
-  user: new Set(['create', 'deleteMany']),
-  lead: new Set(['findUniqueOrThrow', 'deleteMany']),
-  client: new Set(['findUniqueOrThrow', 'deleteMany']),
-  proposal: new Set(['findUniqueOrThrow', 'deleteMany']),
-  proposalVersion: new Set(['deleteMany']),
-  proposalAcceptance: new Set(['findUniqueOrThrow', 'deleteMany']),
-  booking: new Set(['findUniqueOrThrow', 'deleteMany']),
+  // D-040 §9 (Stage 6d): `client-overview.spec.ts` adds one read-only
+  // `findMany` per already-allowlisted model below — each call scoped by
+  // exact run-recorded ids with `select: { id: true }`, used only for the
+  // spec's in-test post-cleanup residue check and the `test.afterAll`
+  // fixture-chain residue check. No new model, and no write/upsert method,
+  // is introduced.
+  user: new Set(['create', 'findMany', 'deleteMany']),
+  lead: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
+  client: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
+  proposal: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
+  proposalVersion: new Set(['findMany', 'deleteMany']),
+  proposalAcceptance: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
+  booking: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
   staffAssignment: new Set(['findFirst', 'deleteMany']),
   leadStatusHistory: new Set(['findMany', 'deleteMany']),
   bookingStatusHistory: new Set(['findMany', 'deleteMany']),
@@ -165,15 +171,17 @@ const RPC_ALLOWED_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   // of a separate lookup, and `Account` cascade-deletes automatically
   // when its owning `User` row is deleted (`onDelete: Cascade`, already
   // fixtures.ts's own established assumption).
-  portalInvitation: new Set(['findUniqueOrThrow', 'deleteMany']),
-  clientProfile: new Set(['findUniqueOrThrow', 'deleteMany']),
+  portalInvitation: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
+  clientProfile: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
   // Real activation requests unavoidably write RateLimitBucket rows
   // (every gated POST/GET increments the shared SOURCE `"unknown-source"`
   // bucket before any other work, per D-037 Section 10) — `deleteMany`
-  // only, by exact bucketKey/windowStart, never a read/update/upsert,
-  // since the spec never needs to inspect a count, only to remove the
-  // exact disposable rows its own real HTTP requests created.
-  rateLimitBucket: new Set(['deleteMany']),
+  // by exact bucketKey/windowStart, plus (D-040 §9) an id-only `findMany`
+  // scoped by exact recorded TOKEN-bucket SHA-256 hashes for the spec's
+  // post-cleanup TOKEN-bucket residue assertion. Never a read/update/upsert
+  // of a count, and no strict absence check for the shared `unknown-source`
+  // SOURCE bucket.
+  rateLimitBucket: new Set(['findMany', 'deleteMany']),
 };
 
 /** A transported RPC method: real Prisma input-argument typing, but an
@@ -195,29 +203,36 @@ type RpcMethod<Args> = (args: Args) => Promise<unknown>;
 export type E2EPrismaRpcClient = {
   user: {
     create: RpcMethod<Prisma.UserCreateArgs>;
+    findMany: RpcMethod<Prisma.UserFindManyArgs>;
     deleteMany: RpcMethod<Prisma.UserDeleteManyArgs>;
   };
   lead: {
     findUniqueOrThrow: RpcMethod<Prisma.LeadFindUniqueOrThrowArgs>;
+    findMany: RpcMethod<Prisma.LeadFindManyArgs>;
     deleteMany: RpcMethod<Prisma.LeadDeleteManyArgs>;
   };
   client: {
     findUniqueOrThrow: RpcMethod<Prisma.ClientFindUniqueOrThrowArgs>;
+    findMany: RpcMethod<Prisma.ClientFindManyArgs>;
     deleteMany: RpcMethod<Prisma.ClientDeleteManyArgs>;
   };
   proposal: {
     findUniqueOrThrow: RpcMethod<Prisma.ProposalFindUniqueOrThrowArgs>;
+    findMany: RpcMethod<Prisma.ProposalFindManyArgs>;
     deleteMany: RpcMethod<Prisma.ProposalDeleteManyArgs>;
   };
   proposalVersion: {
+    findMany: RpcMethod<Prisma.ProposalVersionFindManyArgs>;
     deleteMany: RpcMethod<Prisma.ProposalVersionDeleteManyArgs>;
   };
   proposalAcceptance: {
     findUniqueOrThrow: RpcMethod<Prisma.ProposalAcceptanceFindUniqueOrThrowArgs>;
+    findMany: RpcMethod<Prisma.ProposalAcceptanceFindManyArgs>;
     deleteMany: RpcMethod<Prisma.ProposalAcceptanceDeleteManyArgs>;
   };
   booking: {
     findUniqueOrThrow: RpcMethod<Prisma.BookingFindUniqueOrThrowArgs>;
+    findMany: RpcMethod<Prisma.BookingFindManyArgs>;
     deleteMany: RpcMethod<Prisma.BookingDeleteManyArgs>;
   };
   staffAssignment: {
@@ -238,13 +253,16 @@ export type E2EPrismaRpcClient = {
   };
   portalInvitation: {
     findUniqueOrThrow: RpcMethod<Prisma.PortalInvitationFindUniqueOrThrowArgs>;
+    findMany: RpcMethod<Prisma.PortalInvitationFindManyArgs>;
     deleteMany: RpcMethod<Prisma.PortalInvitationDeleteManyArgs>;
   };
   clientProfile: {
     findUniqueOrThrow: RpcMethod<Prisma.ClientProfileFindUniqueOrThrowArgs>;
+    findMany: RpcMethod<Prisma.ClientProfileFindManyArgs>;
     deleteMany: RpcMethod<Prisma.ClientProfileDeleteManyArgs>;
   };
   rateLimitBucket: {
+    findMany: RpcMethod<Prisma.RateLimitBucketFindManyArgs>;
     deleteMany: RpcMethod<Prisma.RateLimitBucketDeleteManyArgs>;
   };
   $disconnect: () => Promise<void>;

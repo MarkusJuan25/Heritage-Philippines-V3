@@ -7,6 +7,7 @@ import {
   findClientByIdForRead,
   findDuplicateClientMatches,
   findDuplicateLeadMatches,
+  findOwnedClientForUser,
   insertAuditLog,
   listClientsForActor,
   updateClientFieldsIfUnstale,
@@ -767,5 +768,69 @@ describe('insertAuditLog (D-025 §8)', () => {
         entityId: 'client-1',
       }),
     ).rejects.toThrow('db unavailable');
+  });
+});
+
+// --- Client-portal owned-client resolution (D-040 §§2, 3 Contract A) ---
+
+describe('findOwnedClientForUser', () => {
+  it('scopes the query by userId alone via findUnique on the @unique column, selecting only the identity-card fields', async () => {
+    const findUnique = vi.fn().mockResolvedValue({
+      client: { id: 'client-9', fullName: 'Ana Reyes', email: 'ana@example.com', phone: null },
+    });
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findOwnedClientForUser(db, 'user-9');
+
+    expect(findUnique).toHaveBeenCalledTimes(1);
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { userId: 'user-9' },
+      select: { client: { select: { id: true, fullName: true, email: true, phone: true } } },
+    });
+    expect(result).toEqual({
+      clientId: 'client-9',
+      fullName: 'Ana Reyes',
+      email: 'ana@example.com',
+      phone: null,
+    });
+  });
+
+  it('never selects dateOfBirth, nationality, address, emergencyContact, notes, normalized contact, timestamps, ClientProfile.id, or userId', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findOwnedClientForUser(db, 'user-9');
+
+    const select = findUnique.mock.calls[0]![0].select as {
+      client: { select: Record<string, unknown> };
+    };
+    const clientKeys = Object.keys(select.client.select).sort();
+    expect(clientKeys).toEqual(['email', 'fullName', 'id', 'phone']);
+    for (const forbidden of [
+      'dateOfBirth',
+      'nationality',
+      'address',
+      'emergencyContact',
+      'notes',
+      'normalizedEmail',
+      'normalizedPhone',
+      'createdAt',
+      'updatedAt',
+      'userId',
+    ]) {
+      expect(clientKeys).not.toContain(forbidden);
+    }
+    expect(select).not.toHaveProperty('id');
+  });
+
+  it('returns null when the user has no ClientProfile row', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    expect(await findOwnedClientForUser(db, 'user-none')).toBeNull();
+  });
+
+  it('accepts no clientId parameter — the signature is (db, userId) only', () => {
+    expect(findOwnedClientForUser).toHaveLength(2);
   });
 });

@@ -463,3 +463,38 @@ export async function updateClient(
     throw error;
   }
 }
+
+// --- Client-portal owned-client resolution (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-040 §§2, 3 Contract A) ---
+// The inverse of `assertClientActor` above: this path is CLIENT-only. It
+// resolves the owned Client EXCLUSIVELY from `actor.id` (via
+// `ClientProfile.userId`), accepts no `clientId` from any caller, and —
+// unlike every other client-facing read — deliberately does NOT call
+// `canAccessClient`: its whole job is to *produce* the owned `clientId`
+// that the other contracts (B-F) then re-check with `canAccessClient`
+// (D-040 §2). A non-CLIENT actor never reaches here through the overview
+// composition (which checks the role first), but this independent gate
+// protects the service boundary for a direct or mis-wired caller.
+
+function assertClientPortalActor(actor: AuthenticatedUser): { id: string } {
+  if (actor.role === 'CLIENT') {
+    return { id: actor.id };
+  }
+  throw new ClientError(
+    'ROLE_NOT_PERMITTED',
+    'This role is not permitted to access a client portal profile.',
+  );
+}
+
+/**
+ * The identity of the Client the authenticated portal user owns, or `null`
+ * when their account is not fully set up yet (no `ClientProfile` row —
+ * D-040 §7's "account setup in progress" state). Derived only from
+ * `actor.id`; never learns, and never lets a caller supply, a `clientId`.
+ */
+export async function getOwnClientForUser(
+  actor: AuthenticatedUser,
+): Promise<repository.OwnedClientIdentity | null> {
+  assertClientPortalActor(actor);
+  return repository.findOwnedClientForUser(prisma, actor.id);
+}

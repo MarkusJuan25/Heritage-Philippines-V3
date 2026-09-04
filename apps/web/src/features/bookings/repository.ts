@@ -342,3 +342,119 @@ export async function insertAuditLog(
     },
   });
 }
+
+// --- Client-portal reads (docs/HERITAGE_V3_DECISIONS_LOG.md D-040 §5) ---
+// The Booking feature owns its own status taxonomy and every Booking
+// database read, including the two the Client Home / Overview consumes.
+// These are pure, bounded reads: no assignment filter is composed here
+// (`Booking.clientId` is a direct FK — D-040 scopes strictly by the
+// server-resolved owned `clientId`, and authorization is the caller's
+// `canAccessClient` gate in features/bookings/service.ts, not a query
+// filter), no transaction, no write, no audit.
+
+// DRAFT is a staff-only working state — it never reaches a client
+// (D-040 §5). `NON_DRAFT_BOOKING_STATUSES` is the fixed, ordered set of the
+// nine statuses the client-visible booking aggregate reports; the
+// `satisfies` check keeps it exhaustive against the Prisma enum at compile
+// time (a tenth non-DRAFT status added to `BookingStatus` would fail here).
+export const NON_DRAFT_BOOKING_STATUSES = [
+  BookingStatus.PENDING_CONFIRMATION,
+  BookingStatus.CONFIRMED,
+  BookingStatus.IN_PREPARATION,
+  BookingStatus.DOCUMENTS_REQUIRED,
+  BookingStatus.VISA_PROCESSING,
+  BookingStatus.READY_FOR_TRAVEL,
+  BookingStatus.IN_PROGRESS,
+  BookingStatus.COMPLETED,
+  BookingStatus.CANCELLED,
+] as const satisfies readonly Exclude<BookingStatus, 'DRAFT'>[];
+
+export type NonDraftBookingStatus = (typeof NON_DRAFT_BOOKING_STATUSES)[number];
+
+export type ClientBookingFacts = {
+  byStatus: Record<NonDraftBookingStatus, number>;
+};
+
+function emptyByStatus(): Record<NonDraftBookingStatus, number> {
+  const record = {} as Record<NonDraftBookingStatus, number>;
+  for (const status of NON_DRAFT_BOOKING_STATUSES) {
+    record[status] = 0;
+  }
+  return record;
+}
+
+/**
+ * D-040 §5's fixed-cardinality booking aggregate for one Client, DRAFT
+ * excluded entirely. One `groupBy` over `status` (at most nine result
+ * rows), normalized into a nine-key record with every missing status
+ * defaulting to 0 — never an unbounded row load, and never a per-row fetch.
+ */
+export async function findClientBookingFacts(
+  db: Prisma.TransactionClient,
+  clientId: string,
+): Promise<ClientBookingFacts> {
+  const grouped = await db.booking.groupBy({
+    by: ['status'],
+    where: { clientId, status: { not: BookingStatus.DRAFT } },
+    _count: { _all: true },
+  });
+
+  const byStatus = emptyByStatus();
+  for (const row of grouped) {
+    if (row.status !== BookingStatus.DRAFT) {
+      byStatus[row.status] = row._count._all;
+    }
+  }
+  return { byStatus };
+}
+
+export const CLIENT_OVERVIEW_BOOKING_PREVIEW_MAX = 5;
+
+// D-040 §5's exact client-visible preview field allow-list. Deliberately
+// excludes `internalNotes`, `clientVisibleNotes`, `totalAmount`,
+// `currencyCode`, `travelerCount`, the `Booking.id`, and all status
+// history. `bookingReference` (a client-facing reference, not a database
+// id) is the one identifier a client sees.
+const CLIENT_BOOKING_PREVIEW_SELECT = {
+  bookingReference: true,
+  status: true,
+  travelStartDate: true,
+  travelEndDate: true,
+  destination: true,
+  tourPackageName: true,
+} as const;
+
+export type ClientBookingPreviewRow = {
+  bookingReference: string;
+  status: NonDraftBookingStatus;
+  travelStartDate: Date | null;
+  travelEndDate: Date | null;
+  destination: string | null;
+  tourPackageName: string | null;
+};
+
+/**
+ * D-040 §5's bounded (five-item), deterministically ordered client-visible
+ * booking preview, DRAFT excluded. `orderBy: [createdAt desc, id asc]` —
+ * `id` breaks a `createdAt` tie — matching this codebase's established
+ * newest-first, fully-deterministic list ordering.
+ */
+export async function findClientBookingPreview(
+  db: Prisma.TransactionClient,
+  clientId: string,
+): Promise<ClientBookingPreviewRow[]> {
+  const rows = await db.booking.findMany({
+    where: { clientId, status: { not: BookingStatus.DRAFT } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    take: CLIENT_OVERVIEW_BOOKING_PREVIEW_MAX,
+    select: CLIENT_BOOKING_PREVIEW_SELECT,
+  });
+  return rows.map((row) => ({
+    bookingReference: row.bookingReference,
+    status: row.status as NonDraftBookingStatus,
+    travelStartDate: row.travelStartDate,
+    travelEndDate: row.travelEndDate,
+    destination: row.destination,
+    tourPackageName: row.tourPackageName,
+  }));
+}

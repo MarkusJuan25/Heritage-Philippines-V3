@@ -624,3 +624,126 @@ export async function insertAuditLog(
     },
   });
 }
+
+// --- Client-portal reads (docs/HERITAGE_V3_DECISIONS_LOG.md D-040 §4) ---
+// The Proposal / ROS feature owns every ProposalVersion database read,
+// including the two the Client Home / Overview consumes. Pure, bounded
+// reads: no assignment filter is composed here (D-040 scopes strictly by
+// the server-resolved owned `clientId`, and authorization is the caller's
+// `canAccessClient` gate in features/proposals/service.ts, not a query
+// filter), no transaction, no write, no audit, and never any proposal
+// `content`.
+
+/**
+ * D-040 §4's "current-client-visible" predicate for a ProposalVersion of
+ * this Client: `clientVisibleAt` set AND `supersededAt` null. The partial
+ * unique index `proposal_version_current_client_visible_key` guarantees at
+ * most one such version per Proposal. Draft-only, unpublished, and
+ * superseded versions are all excluded — so a staff-only draft proposal is
+ * never counted or revealed.
+ */
+function clientVisibleVersionBaseWhere(clientId: string): Prisma.ProposalVersionWhereInput {
+  return {
+    proposal: { clientId },
+    clientVisibleAt: { not: null },
+    supersededAt: null,
+  };
+}
+
+export type ClientProposalFacts = {
+  currentVisibleTotal: number;
+  awaitingResponse: number;
+  accepted: number;
+  acceptedWithoutClientVisibleBooking: number;
+  respondedNonAccept: number;
+};
+
+/**
+ * D-040 §4's five bounded `count()` facts over the complete set of
+ * current-client-visible versions for one Client. Every count applies the
+ * base predicate plus its own addition:
+ *
+ * - `currentVisibleTotal` — base only.
+ * - `awaitingResponse` — no `ProposalAcceptance` row.
+ * - `accepted` — an ACCEPT acceptance.
+ * - `acceptedWithoutClientVisibleBooking` — an ACCEPT acceptance AND
+ *   (no associated `Booking` OR an associated `Booking` with `status =
+ *   DRAFT`): a staff-side DRAFT booking is invisible to the client, so the
+ *   accepted proposal is still awaiting a booking from the client's view.
+ * - `respondedNonAccept` — a DECLINE or REQUEST_CHANGES acceptance.
+ *
+ * Invariant (asserted by the service/integration tests, not here):
+ * `awaitingResponse + accepted + respondedNonAccept === currentVisibleTotal`,
+ * and `0 <= acceptedWithoutClientVisibleBooking <= accepted`.
+ */
+export async function findClientProposalFacts(
+  db: Prisma.TransactionClient,
+  clientId: string,
+): Promise<ClientProposalFacts> {
+  const base = clientVisibleVersionBaseWhere(clientId);
+  const [
+    currentVisibleTotal,
+    awaitingResponse,
+    accepted,
+    acceptedWithoutClientVisibleBooking,
+    respondedNonAccept,
+  ] = await Promise.all([
+    db.proposalVersion.count({ where: base }),
+    db.proposalVersion.count({ where: { ...base, acceptance: { is: null } } }),
+    db.proposalVersion.count({
+      where: { ...base, acceptance: { is: { responseType: 'ACCEPT' } } },
+    }),
+    db.proposalVersion.count({
+      where: {
+        ...base,
+        acceptance: { is: { responseType: 'ACCEPT' } },
+        OR: [{ booking: { is: null } }, { booking: { is: { status: 'DRAFT' } } }],
+      },
+    }),
+    db.proposalVersion.count({
+      where: {
+        ...base,
+        acceptance: { is: { responseType: { in: ['DECLINE', 'REQUEST_CHANGES'] } } },
+      },
+    }),
+  ]);
+
+  return {
+    currentVisibleTotal,
+    awaitingResponse,
+    accepted,
+    acceptedWithoutClientVisibleBooking,
+    respondedNonAccept,
+  };
+}
+
+export const CLIENT_OVERVIEW_PROPOSAL_PREVIEW_MAX = 5;
+
+export type ClientProposalPreviewRow = {
+  versionNumber: number;
+  responseType: ProposalResponseType | null;
+};
+
+/**
+ * D-040 §4's bounded (five-item) client-visible proposal preview for one
+ * Client, applying the identical current-client-visible predicate before
+ * ordering and limiting. `orderBy: [proposal.createdAt desc, proposal.id
+ * asc]` — deterministic, `proposal.id` breaking a `createdAt` tie. Selects
+ * only `versionNumber` and the acceptance's `responseType`; no proposal
+ * `content`, no `Proposal`/`ProposalVersion`/`ProposalAcceptance` id.
+ */
+export async function findClientProposalPreview(
+  db: Prisma.TransactionClient,
+  clientId: string,
+): Promise<ClientProposalPreviewRow[]> {
+  const rows = await db.proposalVersion.findMany({
+    where: clientVisibleVersionBaseWhere(clientId),
+    orderBy: [{ proposal: { createdAt: 'desc' } }, { proposal: { id: 'asc' } }],
+    take: CLIENT_OVERVIEW_PROPOSAL_PREVIEW_MAX,
+    select: { versionNumber: true, acceptance: { select: { responseType: true } } },
+  });
+  return rows.map((row) => ({
+    versionNumber: row.versionNumber,
+    responseType: row.acceptance?.responseType ?? null,
+  }));
+}

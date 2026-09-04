@@ -568,4 +568,123 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
     expect(replacedAudits[0]?.actorId).toBe(adminActor.id);
     expect(replacedAudits[0]?.beforeState).not.toBeNull();
   }, 20000);
+
+  // --- D-040 §9: one CLIENT-actor case for Contract F ---
+  describe('getActiveConsultantNameForClient (D-040 Contract F) — real database', () => {
+    let getActiveConsultantNameForClient: (typeof import('./service'))['getActiveConsultantNameForClient'];
+    const localUserIds: string[] = [];
+    const localClientIds: string[] = [];
+    const localProfileIds: string[] = [];
+    const localAssignmentIds: string[] = [];
+    // `ClientProfile.userId` and `.clientId` are each @unique — a real user
+    // owns exactly one Client — so this suite uses one CLIENT user per owned
+    // Client.
+    let actorWithConsultant: AuthenticatedUser;
+    let actorNoConsultant: AuthenticatedUser;
+    let ownedWithConsultantId: string;
+    let ownedNoConsultantId: string;
+    let unownedClientId: string;
+
+    async function createOwningClient(
+      label: string,
+    ): Promise<{ userId: string; clientId: string }> {
+      const userId = randomUUID();
+      const clientId = randomUUID();
+      const profileId = randomUUID();
+      const email = `assignments-portal-${label}-${randomUUID()}@example.test`;
+      await prisma!.user.create({
+        data: { id: userId, name: `Portal ${label}`, email, role: 'CLIENT', isActive: true },
+      });
+      localUserIds.push(userId);
+      await prisma!.client.create({ data: { id: clientId, fullName: `Owned ${label}`, email } });
+      localClientIds.push(clientId);
+      await prisma!.clientProfile.create({ data: { id: profileId, userId, clientId } });
+      localProfileIds.push(profileId);
+      return { userId, clientId };
+    }
+
+    beforeAll(async () => {
+      ({ getActiveConsultantNameForClient } = await import('./service'));
+
+      const consultantId = randomUUID();
+      await prisma!.user.create({
+        data: {
+          id: consultantId,
+          name: 'Bravo Consultant',
+          email: `assignments-portal-tc-${randomUUID()}@example.test`,
+          role: 'TRAVEL_CONSULTANT',
+          isActive: true,
+        },
+      });
+      localUserIds.push(consultantId);
+
+      const withC = await createOwningClient('with-consultant');
+      ownedWithConsultantId = withC.clientId;
+      actorWithConsultant = {
+        id: withC.userId,
+        email: 'wc@example.test',
+        name: 'WC',
+        role: 'CLIENT',
+      };
+
+      const noC = await createOwningClient('no-consultant');
+      ownedNoConsultantId = noC.clientId;
+      actorNoConsultant = { id: noC.userId, email: 'nc@example.test', name: 'NC', role: 'CLIENT' };
+
+      unownedClientId = randomUUID();
+      await prisma!.client.create({
+        data: {
+          id: unownedClientId,
+          fullName: 'Unowned',
+          email: `assignments-portal-unowned-${randomUUID()}@example.test`,
+        },
+      });
+      localClientIds.push(unownedClientId);
+
+      const aid = randomUUID();
+      await prisma!.staffAssignment.create({
+        data: {
+          id: aid,
+          assignedStaffId: consultantId,
+          assignedByUserId: adminActor.id,
+          clientId: ownedWithConsultantId,
+        },
+      });
+      localAssignmentIds.push(aid);
+    }, 20000);
+
+    afterAll(async () => {
+      if (!prisma) return;
+      await prisma.staffAssignment.deleteMany({ where: { id: { in: localAssignmentIds } } });
+      await prisma.clientProfile.deleteMany({ where: { id: { in: localProfileIds } } });
+      await prisma.client.deleteMany({ where: { id: { in: localClientIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }, 20000);
+
+    it('returns the assigned consultant name only for an owned client', async () => {
+      const result = await getActiveConsultantNameForClient(
+        actorWithConsultant,
+        ownedWithConsultantId,
+      );
+      expect(result).toEqual({ name: 'Bravo Consultant' });
+    });
+
+    it('returns null for an owned client with no active assignment', async () => {
+      expect(
+        await getActiveConsultantNameForClient(actorNoConsultant, ownedNoConsultantId),
+      ).toBeNull();
+    });
+
+    it('rejects a CLIENT actor asking for a client they do not own with CLIENT_NOT_FOUND', async () => {
+      await expect(
+        getActiveConsultantNameForClient(actorWithConsultant, unownedClientId),
+      ).rejects.toMatchObject({ name: 'AssignmentError', code: 'CLIENT_NOT_FOUND' });
+    });
+
+    it('rejects a staff actor with ROLE_NOT_PERMITTED', async () => {
+      await expect(
+        getActiveConsultantNameForClient(adminActor, ownedWithConsultantId),
+      ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED' });
+    });
+  });
 });

@@ -3,9 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '@/generated/prisma/client';
 
 import {
+  NON_DRAFT_BOOKING_STATUSES,
   createBookingWithInitialHistory,
   findBookingByIdForActor,
   findBookingByProposalVersionIdForActor,
+  findClientBookingFacts,
+  findClientBookingPreview,
   findEligibleProposalVersionForActor,
   insertAuditLog,
   listBookingsForActor,
@@ -307,5 +310,131 @@ describe('insertAuditLog', () => {
         afterState: { id: BOOKING_ID },
       },
     });
+  });
+});
+
+// --- Client-portal reads (D-040 §5) ---
+
+const CLIENT_ID = 'client-42';
+
+describe('NON_DRAFT_BOOKING_STATUSES', () => {
+  it('is the fixed nine-status set, DRAFT excluded, in the D-040 §5 order', () => {
+    expect(NON_DRAFT_BOOKING_STATUSES).toEqual([
+      'PENDING_CONFIRMATION',
+      'CONFIRMED',
+      'IN_PREPARATION',
+      'DOCUMENTS_REQUIRED',
+      'VISA_PROCESSING',
+      'READY_FOR_TRAVEL',
+      'IN_PROGRESS',
+      'COMPLETED',
+      'CANCELLED',
+    ]);
+    expect(NON_DRAFT_BOOKING_STATUSES).not.toContain('DRAFT');
+  });
+});
+
+describe('findClientBookingFacts', () => {
+  it('groups by status with DRAFT excluded in the query itself, and normalizes to the fixed nine-key record', async () => {
+    const groupBy = vi.fn().mockResolvedValue([
+      { status: 'CONFIRMED', _count: { _all: 2 } },
+      { status: 'COMPLETED', _count: { _all: 1 } },
+    ]);
+    const db = { booking: { groupBy } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientBookingFacts(db, CLIENT_ID);
+
+    expect(groupBy).toHaveBeenCalledWith({
+      by: ['status'],
+      where: { clientId: CLIENT_ID, status: { not: 'DRAFT' } },
+      _count: { _all: true },
+    });
+    expect(result.byStatus).toEqual({
+      PENDING_CONFIRMATION: 0,
+      CONFIRMED: 2,
+      IN_PREPARATION: 0,
+      DOCUMENTS_REQUIRED: 0,
+      VISA_PROCESSING: 0,
+      READY_FOR_TRAVEL: 0,
+      IN_PROGRESS: 0,
+      COMPLETED: 1,
+      CANCELLED: 0,
+    });
+    expect(Object.keys(result.byStatus).sort()).toEqual([...NON_DRAFT_BOOKING_STATUSES].sort());
+  });
+
+  it('returns an all-zero nine-key record when the client has no non-DRAFT bookings', async () => {
+    const groupBy = vi.fn().mockResolvedValue([]);
+    const db = { booking: { groupBy } } as unknown as Prisma.TransactionClient;
+
+    const { byStatus } = await findClientBookingFacts(db, CLIENT_ID);
+    expect(Object.values(byStatus)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  });
+
+  it('never lets a DRAFT group row leak into the normalized record even if one were returned', async () => {
+    const groupBy = vi.fn().mockResolvedValue([
+      { status: 'DRAFT', _count: { _all: 5 } },
+      { status: 'CANCELLED', _count: { _all: 1 } },
+    ]);
+    const db = { booking: { groupBy } } as unknown as Prisma.TransactionClient;
+
+    const { byStatus } = await findClientBookingFacts(db, CLIENT_ID);
+    expect(byStatus).not.toHaveProperty('DRAFT');
+    expect(byStatus.CANCELLED).toBe(1);
+  });
+});
+
+describe('findClientBookingPreview', () => {
+  it('excludes DRAFT, orders createdAt desc then id asc, limits to 5, and selects only the D-040 §5 allow-list', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        bookingReference: 'HPB-AAAA',
+        status: 'CONFIRMED',
+        travelStartDate: null,
+        travelEndDate: null,
+        destination: 'Cebu',
+        tourPackageName: null,
+      },
+    ]);
+    const db = { booking: { findMany } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientBookingPreview(db, CLIENT_ID);
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { clientId: CLIENT_ID, status: { not: 'DRAFT' } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+      take: 5,
+      select: {
+        bookingReference: true,
+        status: true,
+        travelStartDate: true,
+        travelEndDate: true,
+        destination: true,
+        tourPackageName: true,
+      },
+    });
+    const select = findMany.mock.calls[0]![0].select as Record<string, unknown>;
+    for (const forbidden of [
+      'id',
+      'internalNotes',
+      'clientVisibleNotes',
+      'totalAmount',
+      'currencyCode',
+      'travelerCount',
+      'proposalVersionId',
+      'clientId',
+    ]) {
+      expect(select).not.toHaveProperty(forbidden);
+    }
+    expect(result).toEqual([
+      {
+        bookingReference: 'HPB-AAAA',
+        status: 'CONFIRMED',
+        travelStartDate: null,
+        travelEndDate: null,
+        destination: 'Cebu',
+        tourPackageName: null,
+      },
+    ]);
   });
 });

@@ -517,3 +517,52 @@ export async function insertAuditLog(
     },
   });
 }
+
+// --- Client-portal owned-client resolution (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-040 §§2, 3 Contract A) ---
+// Resolves the Client a portal user owns EXCLUSIVELY from their User id, via
+// `ClientProfile.userId` (`@unique`) — never from email, a Client contact
+// field, a caller-supplied id, or any UI state. This is the one read that
+// turns a session identity into an owned `clientId`; every other
+// client-portal read is then scoped by that server-resolved id and
+// re-checked with `canAccessClient`. Selects only the identity-card fields
+// D-040 §§7-8 permit (fullName / email / phone) — never dateOfBirth,
+// nationality, address, emergencyContact, notes, the normalized contact
+// columns, timestamps, the `ClientProfile.id`, or the `userId`.
+
+export type OwnedClientIdentity = {
+  clientId: string;
+  fullName: string;
+  email: string | null;
+  phone: string | null;
+};
+
+const OWNED_CLIENT_IDENTITY_SELECT = {
+  client: { select: { id: true, fullName: true, email: true, phone: true } },
+} as const;
+
+/**
+ * The Client owned by `userId` via `ClientProfile`, or `null` when this
+ * user has no `ClientProfile` yet ("account setup in progress" — D-040 §7).
+ * Scoped by `userId` alone in the query itself (`findUnique` on the
+ * `@unique` column) — never "fetch a ClientProfile by one field and compare
+ * another in code". Accepts no `clientId`.
+ */
+export async function findOwnedClientForUser(
+  db: Prisma.TransactionClient,
+  userId: string,
+): Promise<OwnedClientIdentity | null> {
+  const row = await db.clientProfile.findUnique({
+    where: { userId },
+    select: OWNED_CLIENT_IDENTITY_SELECT,
+  });
+  if (!row) {
+    return null;
+  }
+  return {
+    clientId: row.client.id,
+    fullName: row.client.fullName,
+    email: row.client.email,
+    phone: row.client.phone,
+  };
+}

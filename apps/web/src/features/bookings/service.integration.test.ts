@@ -1403,4 +1403,148 @@ describe.skipIf(!hasTestDatabaseUrl)('bookings service integration (real databas
       );
     }
   }, 20000);
+
+  // --- D-040 §9: one CLIENT-actor case for Contracts D and E ---
+  describe('getClientBookingFacts / getClientBookingPreview (D-040 Contracts D, E) — real database', () => {
+    let getClientBookingFacts: (typeof import('./service'))['getClientBookingFacts'];
+    let getClientBookingPreview: (typeof import('./service'))['getClientBookingPreview'];
+    const localUserIds: string[] = [];
+    const localClientIds: string[] = [];
+    const localProfileIds: string[] = [];
+    const localProposalIds: string[] = [];
+    const localBookingIds: string[] = [];
+    let clientActor: AuthenticatedUser;
+    let ownedClientId: string;
+    let otherClientId: string;
+
+    async function seedBooking(clientId: string, status: string): Promise<void> {
+      const proposalId = randomUUID();
+      const versionId = randomUUID();
+      const bookingId = randomUUID();
+      await prisma!.proposal.create({ data: { id: proposalId, clientId } });
+      localProposalIds.push(proposalId);
+      await prisma!.proposalVersion.create({
+        data: {
+          id: versionId,
+          proposalId,
+          versionNumber: 1,
+          content: `content ${randomUUID()}`,
+          createdByUserId: tcActor.id,
+          clientVisibleAt: new Date(),
+        },
+      });
+      await prisma!.booking.create({
+        data: {
+          id: bookingId,
+          bookingReference: `HPB-${randomUUID().replace(/-/g, '').toUpperCase()}`,
+          clientId,
+          proposalVersionId: versionId,
+          status: status as never,
+          internalNotes: `internal ${randomUUID()}`,
+          clientVisibleNotes: `client-visible ${randomUUID()}`,
+          totalAmount: '999999.99',
+          currencyCode: 'PHP',
+          destination: 'Cebu',
+          tourPackageName: 'City Tour',
+          statusHistory: {
+            create: {
+              id: randomUUID(),
+              previousStatus: null,
+              newStatus: status as never,
+              changedByUserId: tcActor.id,
+            },
+          },
+        },
+      });
+      localBookingIds.push(bookingId);
+    }
+
+    beforeAll(async () => {
+      ({ getClientBookingFacts, getClientBookingPreview } = await import('./service'));
+
+      const userId = randomUUID();
+      ownedClientId = randomUUID();
+      otherClientId = randomUUID();
+      const profileId = randomUUID();
+      const email = `bookings-portal-${randomUUID()}@example.test`;
+      await prisma!.user.create({
+        data: { id: userId, name: 'Portal Client', email, role: 'CLIENT', isActive: true },
+      });
+      localUserIds.push(userId);
+      await prisma!.client.create({ data: { id: ownedClientId, fullName: 'Owned', email } });
+      await prisma!.client.create({
+        data: {
+          id: otherClientId,
+          fullName: 'Other',
+          email: `bookings-portal-other-${randomUUID()}@example.test`,
+        },
+      });
+      localClientIds.push(ownedClientId, otherClientId);
+      await prisma!.clientProfile.create({
+        data: { id: profileId, userId, clientId: ownedClientId },
+      });
+      localProfileIds.push(profileId);
+      clientActor = { id: userId, email, name: 'Portal Client', role: 'CLIENT' };
+
+      await seedBooking(ownedClientId, 'DRAFT'); // excluded from every client-visible read
+      await seedBooking(ownedClientId, 'CONFIRMED');
+      await seedBooking(ownedClientId, 'COMPLETED');
+      await seedBooking(otherClientId, 'CONFIRMED'); // must never be visible to clientActor
+    }, 20000);
+
+    afterAll(async () => {
+      if (!prisma) return;
+      await prisma.bookingStatusHistory.deleteMany({
+        where: { bookingId: { in: localBookingIds } },
+      });
+      await prisma.booking.deleteMany({ where: { id: { in: localBookingIds } } });
+      await prisma.proposalVersion.deleteMany({ where: { proposalId: { in: localProposalIds } } });
+      await prisma.proposal.deleteMany({ where: { id: { in: localProposalIds } } });
+      await prisma.clientProfile.deleteMany({ where: { id: { in: localProfileIds } } });
+      await prisma.client.deleteMany({ where: { id: { in: localClientIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }, 20000);
+
+    it('excludes DRAFT from the nine-key aggregate and reports only the owned client rows', async () => {
+      const facts = await getClientBookingFacts(clientActor, ownedClientId);
+      expect(Object.keys(facts.byStatus)).toHaveLength(9);
+      expect(facts.byStatus).not.toHaveProperty('DRAFT');
+      expect(facts.byStatus.CONFIRMED).toBe(1);
+      expect(facts.byStatus.COMPLETED).toBe(1);
+      expect(facts.byStatus.PENDING_CONFIRMATION).toBe(0);
+    });
+
+    it('returns a bounded (<= 5) preview with DRAFT excluded and no forbidden field', async () => {
+      const preview = await getClientBookingPreview(clientActor, ownedClientId);
+      expect(preview.items.length).toBeLessThanOrEqual(5);
+      expect(preview.items).toHaveLength(2); // CONFIRMED + COMPLETED, never DRAFT
+      for (const item of preview.items) {
+        expect(Object.keys(item).sort()).toEqual([
+          'bookingReference',
+          'destination',
+          'statusLabel',
+          'tourPackageName',
+          'travelEndDate',
+          'travelStartDate',
+        ]);
+      }
+      const serialized = JSON.stringify(preview);
+      expect(serialized).not.toContain('999999.99');
+      expect(serialized).not.toContain('internal ');
+      expect(serialized).not.toContain('client-visible ');
+    });
+
+    it('rejects a CLIENT actor asking for a client they do not own with BOOKING_FORBIDDEN', async () => {
+      await expect(getClientBookingFacts(clientActor, otherClientId)).rejects.toMatchObject({
+        name: 'BookingError',
+        code: 'BOOKING_FORBIDDEN',
+      });
+    });
+
+    it('rejects a staff actor with ROLE_NOT_PERMITTED', async () => {
+      await expect(getClientBookingFacts(adminActor, ownedClientId)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+      });
+    });
+  });
 });

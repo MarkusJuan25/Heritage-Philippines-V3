@@ -255,3 +255,23 @@ export async function listEligibleTravelConsultants(
 
   return { items, total };
 }
+
+// --- Client-portal read (docs/HERITAGE_V3_DECISIONS_LOG.md D-040 §§3, 7
+// Contract F) ---
+// The Client Home / Overview's Consultant card shows the assigned Travel
+// Consultant's NAME ONLY (D-040 §7) — never their id, email, or the
+// assignment row. Scoped by `clientId` and `endedAt: null` directly in the
+// query (the same discipline `findActiveAssignmentForClient` above
+// applies), selecting only the nested staff member's `name`. The database's
+// partial unique index on (`clientId`) `WHERE endedAt IS NULL` guarantees
+// at most one row can match.
+export async function findActiveConsultantNameForClient(
+  db: Prisma.TransactionClient,
+  clientId: string,
+): Promise<{ name: string } | null> {
+  const row = await db.staffAssignment.findFirst({
+    where: { clientId, endedAt: null },
+    select: { assignedStaff: { select: { name: true } } },
+  });
+  return row ? { name: row.assignedStaff.name } : null;
+}

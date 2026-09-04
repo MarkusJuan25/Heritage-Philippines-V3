@@ -14,22 +14,45 @@ vi.mock('@/lib/db', () => ({
 }));
 
 const repositoryMocks = vi.hoisted(() => ({
+  NON_DRAFT_BOOKING_STATUSES: [
+    'PENDING_CONFIRMATION',
+    'CONFIRMED',
+    'IN_PREPARATION',
+    'DOCUMENTS_REQUIRED',
+    'VISA_PROCESSING',
+    'READY_FOR_TRAVEL',
+    'IN_PROGRESS',
+    'COMPLETED',
+    'CANCELLED',
+  ] as const,
   findBookingByProposalVersionIdForActor: vi.fn(),
   findBookingByIdForActor: vi.fn(),
   listBookingsForActor: vi.fn(),
   findEligibleProposalVersionForActor: vi.fn(),
   createBookingWithInitialHistory: vi.fn(),
   updateBookingStatusWithHistory: vi.fn(),
+  findClientBookingFacts: vi.fn(),
+  findClientBookingPreview: vi.fn(),
   insertAuditLog: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
+
+const authorizationMocks = vi.hoisted(() => ({ canAccessClient: vi.fn() }));
+vi.mock('@/features/assignments/authorization', () => authorizationMocks);
 
 import { Prisma } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import type { BookingActor, BookingRecord } from './repository';
-import { createBooking, getBookingById, listBookings, updateBookingStatus } from './service';
+import {
+  createBooking,
+  getBookingById,
+  getClientBookingFacts,
+  getClientBookingPreview,
+  listBookings,
+  updateBookingStatus,
+} from './service';
 
 const TX_CLIENT = { marker: 'tx-client' };
 
@@ -610,4 +633,142 @@ describe('service-boundary role rejection (defense-in-depth beyond withRole)', (
       expect(transactionMock).not.toHaveBeenCalled();
     },
   );
+});
+
+// --- Client-portal reads (D-040 §§2, 3, 5 — Contracts D and E) ---
+
+const CLIENT_PORTAL_ACTOR: AuthenticatedUser = {
+  id: 'user-client-1',
+  email: 'client@example.test',
+  name: 'Client One',
+  role: 'CLIENT',
+};
+const PORTAL_CLIENT_ID = 'client-row-1';
+
+const EMPTY_BY_STATUS = {
+  PENDING_CONFIRMATION: 0,
+  CONFIRMED: 0,
+  IN_PREPARATION: 0,
+  DOCUMENTS_REQUIRED: 0,
+  VISA_PROCESSING: 0,
+  READY_FOR_TRAVEL: 0,
+  IN_PROGRESS: 0,
+  COMPLETED: 0,
+  CANCELLED: 0,
+};
+
+describe('getClientBookingFacts / getClientBookingPreview (Contracts D and E)', () => {
+  beforeEach(() => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+  });
+
+  it('reject a non-CLIENT actor with ROLE_NOT_PERMITTED before canAccessClient or any repository read', async () => {
+    for (const actor of [ADMIN_MANAGER, TRAVEL_CONSULTANT]) {
+      await expect(getClientBookingFacts(actor, PORTAL_CLIENT_ID)).rejects.toMatchObject({
+        name: 'BookingError',
+        code: 'ROLE_NOT_PERMITTED',
+      });
+      await expect(getClientBookingPreview(actor, PORTAL_CLIENT_ID)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+      });
+    }
+    expect(authorizationMocks.canAccessClient).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientBookingFacts).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientBookingPreview).not.toHaveBeenCalled();
+  });
+
+  it('call canAccessClient(actor, clientId) BEFORE the repository read, and reject a denial with BOOKING_FORBIDDEN', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(
+      getClientBookingFacts(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID),
+    ).rejects.toMatchObject({
+      name: 'BookingError',
+      code: 'BOOKING_FORBIDDEN',
+      status: 403,
+    });
+    expect(authorizationMocks.canAccessClient).toHaveBeenCalledWith(
+      CLIENT_PORTAL_ACTOR,
+      PORTAL_CLIENT_ID,
+    );
+    expect(repositoryMocks.findClientBookingFacts).not.toHaveBeenCalled();
+  });
+
+  it('getClientBookingFacts delegates to the repository and returns the fixed nine-key record', async () => {
+    repositoryMocks.findClientBookingFacts.mockResolvedValue({
+      byStatus: { ...EMPTY_BY_STATUS, CONFIRMED: 2, COMPLETED: 1 },
+    });
+
+    const result = await getClientBookingFacts(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID);
+
+    expect(result.byStatus.CONFIRMED).toBe(2);
+    expect(Object.keys(result.byStatus)).toHaveLength(9);
+    expect(repositoryMocks.findClientBookingFacts).toHaveBeenCalledWith(prisma, PORTAL_CLIENT_ID);
+    const accessOrder = authorizationMocks.canAccessClient.mock.invocationCallOrder[0]!;
+    const readOrder = repositoryMocks.findClientBookingFacts.mock.invocationCallOrder[0]!;
+    expect(accessOrder).toBeLessThan(readOrder);
+  });
+
+  it('getClientBookingPreview maps every non-DRAFT status to the D-040 §5 label and keeps only the allow-listed fields', async () => {
+    repositoryMocks.findClientBookingPreview.mockResolvedValue([
+      {
+        bookingReference: 'HPB-AAAA',
+        status: 'IN_PROGRESS',
+        travelStartDate: new Date('2026-10-01T00:00:00.000Z'),
+        travelEndDate: null,
+        destination: 'Bohol',
+        tourPackageName: null,
+      },
+    ]);
+
+    const result = await getClientBookingPreview(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID);
+
+    expect(result.items).toEqual([
+      {
+        bookingReference: 'HPB-AAAA',
+        statusLabel: 'Travel in progress',
+        travelStartDate: new Date('2026-10-01T00:00:00.000Z'),
+        travelEndDate: null,
+        destination: 'Bohol',
+        tourPackageName: null,
+      },
+    ]);
+    const item = result.items[0]!;
+    for (const forbidden of [
+      'status',
+      'id',
+      'internalNotes',
+      'clientVisibleNotes',
+      'totalAmount',
+    ]) {
+      expect(item).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('the nine status labels match D-040 §5 exactly', async () => {
+    const statuses = repositoryMocks.NON_DRAFT_BOOKING_STATUSES;
+    repositoryMocks.findClientBookingPreview.mockResolvedValue(
+      statuses.map((status, i) => ({
+        bookingReference: `HPB-${i}`,
+        status,
+        travelStartDate: null,
+        travelEndDate: null,
+        destination: null,
+        tourPackageName: null,
+      })),
+    );
+
+    const { items } = await getClientBookingPreview(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID);
+    expect(items.map((item) => item.statusLabel)).toEqual([
+      'Pending confirmation',
+      'Confirmed',
+      'In preparation',
+      'Documents required',
+      'Visa processing',
+      'Ready for travel',
+      'Travel in progress',
+      'Completed',
+      'Cancelled',
+    ]);
+  });
 });

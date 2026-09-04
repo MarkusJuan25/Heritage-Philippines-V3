@@ -8,6 +8,7 @@ import {
   findActiveAssignmentForBooking,
   findActiveAssignmentForClient,
   findActiveAssignmentForLead,
+  findActiveConsultantNameForClient,
   findAssigneeCandidateById,
   findBookingById,
   findClientById,
@@ -471,5 +472,43 @@ describe('insertAuditLog', () => {
     });
 
     expect(result).toBeUndefined();
+  });
+});
+
+// --- Client-portal read (D-040 §§3, 7 Contract F) ---
+
+describe('findActiveConsultantNameForClient', () => {
+  it('scopes by clientId and endedAt: null in the query itself, selecting only the staff name', async () => {
+    const findFirst = vi.fn().mockResolvedValue({ assignedStaff: { name: 'Maria Santos' } });
+    const db = { staffAssignment: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    const result = await findActiveConsultantNameForClient(db, 'client-1');
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { clientId: 'client-1', endedAt: null },
+      select: { assignedStaff: { select: { name: true } } },
+    });
+    expect(result).toEqual({ name: 'Maria Santos' });
+  });
+
+  it('never selects the assignment row id, the staff id, or the staff email', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const db = { staffAssignment: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    await findActiveConsultantNameForClient(db, 'client-1');
+
+    const select = findFirst.mock.calls[0]![0].select as {
+      assignedStaff: { select: Record<string, unknown> };
+    };
+    expect(Object.keys(select.assignedStaff.select)).toEqual(['name']);
+    expect(select).not.toHaveProperty('id');
+    expect(select).not.toHaveProperty('assignedStaffId');
+  });
+
+  it('returns null when the client has no active assignment', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const db = { staffAssignment: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    expect(await findActiveConsultantNameForClient(db, 'client-1')).toBeNull();
   });
 });

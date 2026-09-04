@@ -22,6 +22,23 @@ const nextConfig: NextConfig = {
           { key: 'Referrer-Policy', value: 'no-referrer' },
         ],
       },
+      // D-040 §8: the authenticated /client portal is recomputed per request
+      // from the caller's own session (layout.tsx / page.tsx also declare
+      // `dynamic = 'force-dynamic'` / `revalidate = 0`). A Server Component
+      // cannot set outgoing response headers from within itself, so this
+      // scoped matcher is the framework-native mechanism — exactly as used
+      // for /activate above. Sets only `Cache-Control: private, no-store`
+      // and `Referrer-Policy: no-referrer`; no `Vary` key is set — the App
+      // Router runtime appends its own framework-managed RSC `Vary` for
+      // dynamic responses, and `private, no-store` makes a `Vary: Cookie`
+      // token unnecessary for shared-cache isolation.
+      {
+        source: '/client/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'private, no-store' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ],
+      },
     ];
   },
 };

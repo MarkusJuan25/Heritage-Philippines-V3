@@ -1200,4 +1200,92 @@ describe.skipIf(!hasTestDatabaseUrl)('clients service integration (real database
       expect(reassignmentAuditCount).toBe(1);
     }, 20000);
   });
+
+  // --- D-040 §9: one CLIENT-actor case for Contract A (getOwnClientForUser) ---
+  describe('getOwnClientForUser (D-040 Contract A) — real database', () => {
+    let getOwnClientForUser: (typeof import('./service'))['getOwnClientForUser'];
+    const localUserIds: string[] = [];
+    const localClientIds: string[] = [];
+    const localProfileIds: string[] = [];
+    let clientActor: AuthenticatedUser;
+    let ownedClientId: string;
+    let ownedFullName: string;
+    let ownedEmail: string;
+    let noProfileActor: AuthenticatedUser;
+
+    beforeAll(async () => {
+      ({ getOwnClientForUser } = await import('./service'));
+
+      const userId = randomUUID();
+      ownedClientId = randomUUID();
+      const profileId = randomUUID();
+      ownedFullName = `Owned Portal Client ${randomUUID()}`;
+      ownedEmail = `clients-portal-${randomUUID()}@example.test`;
+      await prisma!.user.create({
+        data: {
+          id: userId,
+          name: ownedFullName,
+          email: ownedEmail,
+          role: 'CLIENT',
+          isActive: true,
+        },
+      });
+      localUserIds.push(userId);
+      await prisma!.client.create({
+        data: { id: ownedClientId, fullName: ownedFullName, email: ownedEmail, phone: null },
+      });
+      localClientIds.push(ownedClientId);
+      await prisma!.clientProfile.create({
+        data: { id: profileId, userId, clientId: ownedClientId },
+      });
+      localProfileIds.push(profileId);
+      clientActor = { id: userId, email: ownedEmail, name: ownedFullName, role: 'CLIENT' };
+
+      const noProfId = randomUUID();
+      await prisma!.user.create({
+        data: {
+          id: noProfId,
+          name: `No Profile Client ${noProfId}`,
+          email: `clients-portal-noprofile-${randomUUID()}@example.test`,
+          role: 'CLIENT',
+          isActive: true,
+        },
+      });
+      localUserIds.push(noProfId);
+      noProfileActor = {
+        id: noProfId,
+        email: `noprofile-${noProfId}@example.test`,
+        name: 'No Profile',
+        role: 'CLIENT',
+      };
+    }, 20000);
+
+    afterAll(async () => {
+      if (!prisma) return;
+      await prisma.clientProfile.deleteMany({ where: { id: { in: localProfileIds } } });
+      await prisma.client.deleteMany({ where: { id: { in: localClientIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }, 20000);
+
+    it('resolves the owned Client from actor.id alone (identity-card fields only)', async () => {
+      const result = await getOwnClientForUser(clientActor);
+      expect(result).toEqual({
+        clientId: ownedClientId,
+        fullName: ownedFullName,
+        email: ownedEmail,
+        phone: null,
+      });
+    });
+
+    it('returns null for a CLIENT user with no ClientProfile', async () => {
+      expect(await getOwnClientForUser(noProfileActor)).toBeNull();
+    });
+
+    it('rejects a staff actor with ROLE_NOT_PERMITTED (the Contract A vs B-F role split)', async () => {
+      await expect(getOwnClientForUser(adminActor)).rejects.toMatchObject({
+        name: 'ClientError',
+        code: 'ROLE_NOT_PERMITTED',
+      });
+    });
+  });
 });

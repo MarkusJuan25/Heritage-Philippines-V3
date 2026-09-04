@@ -747,3 +747,87 @@ export async function recordProposalResponse(
     throw error;
   }
 }
+
+// --- Client-portal reads (docs/HERITAGE_V3_DECISIONS_LOG.md D-040 §§2, 3, 4) ---
+// Contracts B and C: the Proposal / ROS feature's own CLIENT-safe reads for
+// the Client Home / Overview. Read-only, no transaction, no audit.
+// Authorization is two independent checks, in this order: a CLIENT-role
+// gate (defense in depth), then `canAccessClient(actor, clientId)` — the
+// exact ownership re-check D-040 §2 layer 4 requires on every client-facing
+// read, run BEFORE the repository is touched. The `clientId` is only ever
+// the server-resolved owned id from Contract A
+// (features/clients/service.ts's `getOwnClientForUser`); this feature never
+// accepts a client identifier from a path, query, body, or caller-controlled
+// object here.
+
+const CLIENT_PORTAL_ROLE_MESSAGE = 'This role is not permitted to access client portal proposals.';
+
+function assertClientPortalActor(actor: AuthenticatedUser): { id: string } {
+  if (actor.role === 'CLIENT') {
+    return { id: actor.id };
+  }
+  throw new ProposalError('ROLE_NOT_PERMITTED', CLIENT_PORTAL_ROLE_MESSAGE);
+}
+
+async function assertClientPortalAccess(actor: AuthenticatedUser, clientId: string): Promise<void> {
+  assertClientPortalActor(actor);
+  const access = await canAccessClient(actor, clientId);
+  if (!access.allowed) {
+    throw new ProposalError('CLIENT_FORBIDDEN', CLIENT_FORBIDDEN_MESSAGE);
+  }
+}
+
+// D-040 §4's exact client-facing per-item labels, derived from the
+// ProposalVersion's acceptance response type (or its absence).
+const CLIENT_PROPOSAL_STATUS_LABELS = {
+  AWAITING: 'Awaiting your response',
+  ACCEPT: 'Accepted',
+  DECLINE: 'Declined',
+  REQUEST_CHANGES: 'Changes requested',
+} as const;
+
+function clientProposalStatusLabel(
+  responseType: 'ACCEPT' | 'DECLINE' | 'REQUEST_CHANGES' | null,
+): string {
+  return responseType === null
+    ? CLIENT_PROPOSAL_STATUS_LABELS.AWAITING
+    : CLIENT_PROPOSAL_STATUS_LABELS[responseType];
+}
+
+export type ClientProposalPreviewItem = { versionNumber: number; statusLabel: string };
+export type ClientProposalPreview = { items: ClientProposalPreviewItem[] };
+
+/**
+ * Contract B (D-040 §3/§4): the five bounded, complete-dataset proposal
+ * facts for the authenticated client's owned Client — every current-
+ * client-visible ProposalVersion count, including
+ * `acceptedWithoutClientVisibleBooking` (ACCEPT with a missing or DRAFT
+ * booking).
+ */
+export async function getClientProposalFacts(
+  actor: AuthenticatedUser,
+  clientId: string,
+): Promise<repository.ClientProposalFacts> {
+  await assertClientPortalAccess(actor, clientId);
+  return repository.findClientProposalFacts(prisma, clientId);
+}
+
+/**
+ * Contract C (D-040 §3/§4): the five-item, deterministically ordered
+ * client-visible proposal preview, each item carrying only `versionNumber`
+ * and a client-facing `statusLabel` — never proposal content or any
+ * internal identifier.
+ */
+export async function getClientProposalPreview(
+  actor: AuthenticatedUser,
+  clientId: string,
+): Promise<ClientProposalPreview> {
+  await assertClientPortalAccess(actor, clientId);
+  const rows = await repository.findClientProposalPreview(prisma, clientId);
+  return {
+    items: rows.map((row) => ({
+      versionNumber: row.versionNumber,
+      statusLabel: clientProposalStatusLabel(row.responseType),
+    })),
+  };
+}
