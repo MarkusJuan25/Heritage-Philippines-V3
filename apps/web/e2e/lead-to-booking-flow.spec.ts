@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import type { Locator, Page } from '@playwright/test';
+
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/test-database';
 
@@ -22,6 +24,36 @@ function extractTrailingId(url: string): string {
 function formatDatetimeLocal(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * Waits for a locator that only appears after a client-side RSC
+ * `router.refresh()` resolves. If it does not show within the per-attempt
+ * budget, reloads the page (forcing a fresh server render) and tries
+ * again — a targeted remedy for a stalled refresh, never an arbitrary
+ * sleep. The final attempt gets a longer budget and its failure surfaces
+ * normally. Mirrors the reviewed helper of the same name in
+ * `client-overview.spec.ts` (D-040); applied here solely to the
+ * NEW -> QUALIFIED -> "Convert to Client" wait below, per D-042.
+ */
+async function expectAfterRefresh(
+  page: Page,
+  makeLocator: () => Locator,
+  description: string,
+  attempts = 3,
+): Promise<void> {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await expect(makeLocator(), description).toBeVisible({
+        timeout: attempt < attempts ? 20_000 : 45_000,
+      });
+      return;
+    } catch (error) {
+      if (attempt === attempts) throw error;
+      await page.reload({ waitUntil: 'commit', timeout: 45_000 });
+      await page.waitForTimeout(2500);
+    }
+  }
 }
 
 type AuditRow = {
@@ -236,20 +268,49 @@ test('completes the full Lead → Client → Proposal → Booking journey throug
   await expect(page.getByText('Status updated.')).toBeVisible();
 
   // 5. Convert the Lead into a new Client through the conversion panel.
-  await expect(page.getByRole('heading', { name: 'Convert to Client' })).toBeVisible();
+  // ConvertToClientPanel is server-rendered and appears only once the
+  // post-status-change RSC `router.refresh()` resolves; under sustained
+  // E2E load that round trip can exceed the default expect timeout, so
+  // this one wait uses the bounded reload-retry (D-042). A genuine
+  // failure to ever render the panel still surfaces on the final attempt.
+  await expectAfterRefresh(
+    page,
+    () => page.getByRole('heading', { name: 'Convert to Client' }),
+    'Convert to Client panel after NEW -> QUALIFIED',
+  );
   await page.getByLabel('Create a new Client').check();
   await page.getByRole('button', { name: 'Continue' }).click();
-  await page.getByRole('button', { name: 'Confirm' }).click();
-  // ConvertToClientPanel's own success paragraph, unlike
-  // PublishProposalVersionButton's/RecordProposalResponsePanel's, is a
-  // reliable signal here: once set, this component "permanently shows
-  // only the confirmation message" for the rest of its mounted lifetime,
-  // and direct testing confirmed the parent's conditional render does not
-  // unmount it within any bounded wait — so the transient-looking message
-  // is, in practice, durable enough to assert on directly.
-  await expect(
-    page.getByText(`Converted. A new client, "${leadFullName}", was created.`),
-  ).toBeVisible();
+  // The matching conversion response is this step's synchronization gate:
+  // the conversion success paragraph belongs to ConvertToClientPanel, which
+  // page.tsx unmounts once the refreshed server render reports the Lead is no
+  // longer QUALIFIED, so that transient message can be gone before an
+  // assertion polls. The waiter is registered before the Confirm click, so it
+  // observes the response independent of the panel's mount/unmount timing;
+  // the response's ok status and body are asserted below (the waiter itself
+  // can still time out).
+  const [conversionResponse] = await Promise.all([
+    page.waitForResponse((response) => {
+      return (
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === `/api/leads/${leadId}/conversion`
+      );
+    }),
+    page.getByRole('button', { name: 'Confirm' }).click(),
+  ]);
+  expect(conversionResponse.ok()).toBe(true);
+  const conversionBody: unknown = await conversionResponse.json();
+  const conversionRecord = asRecord(conversionBody, 'conversion response');
+  const conversionLead = asRecord(conversionRecord.lead, 'conversion lead');
+  const conversionClient = asRecord(conversionRecord.client, 'conversion client');
+  const responseLeadClientId = asString(conversionLead, 'clientId', 'conversion lead');
+  const responseClientId = asString(conversionClient, 'id', 'conversion client');
+  expect(asString(conversionLead, 'id', 'conversion lead')).toBe(leadId);
+  expect(asString(conversionLead, 'status', 'conversion lead')).toBe('CONVERTED_TO_CLIENT');
+  expect(responseLeadClientId.length).toBeGreaterThan(0);
+  expect(responseClientId.length).toBeGreaterThan(0);
+  expect(responseLeadClientId).toBe(responseClientId);
+  expect(conversionRecord.clientCreated).toBe(true);
+  expect(asString(conversionClient, 'fullName', 'conversion client')).toBe(leadFullName);
 
   // 6. Confirm navigation and access to the resulting Client.
   await page.getByRole('link', { name: 'Clients', exact: true }).click();
