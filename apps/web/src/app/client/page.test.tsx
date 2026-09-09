@@ -16,6 +16,12 @@ const { redirectMock } = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ redirect: redirectMock }));
 
+// The real ClientPortalError class — not mocked — so this page's own
+// `error instanceof ClientPortalError` allow-list (FORBIDDEN /
+// PROFILE_NOT_SET_UP) exercises real logic rather than an unrelated mock
+// class.
+import { ClientPortalError } from '@/features/client-portal/errors';
+
 import ClientOverviewPage from './page';
 
 const CLIENT_USER = {
@@ -203,5 +209,54 @@ describe('ClientOverviewPage (D-040 §2 Layer 3)', () => {
     ]) {
       expect(html).not.toContain(forbidden);
     }
+  });
+
+  // D-045: page.tsx executes alongside layout.tsx during the App Router
+  // render, so getClientOverview throws the known FORBIDDEN /
+  // PROFILE_NOT_SET_UP state here even though layout.tsx owns the visible
+  // panel. The page must swallow exactly those two known codes (returning
+  // null, rendering nothing) and rethrow everything else.
+  describe('known-state handling (D-045)', () => {
+    it('returns null when getClientOverview throws ClientPortalError FORBIDDEN — layout.tsx owns that panel', async () => {
+      getCurrentUserMock.mockResolvedValue(CLIENT_USER);
+      getClientOverviewMock.mockRejectedValue(new ClientPortalError('FORBIDDEN', 'not a client'));
+
+      await expect(ClientOverviewPage()).resolves.toBeNull();
+      expect(getClientOverviewMock).toHaveBeenCalledTimes(1);
+      expect(getClientOverviewMock).toHaveBeenCalledWith(CLIENT_USER);
+    });
+
+    it('returns null when getClientOverview throws ClientPortalError PROFILE_NOT_SET_UP — layout.tsx owns that panel', async () => {
+      getCurrentUserMock.mockResolvedValue(CLIENT_USER);
+      getClientOverviewMock.mockRejectedValue(
+        new ClientPortalError('PROFILE_NOT_SET_UP', 'account not set up yet'),
+      );
+
+      await expect(ClientOverviewPage()).resolves.toBeNull();
+      expect(getClientOverviewMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('rethrows an ordinary unexpected Error so it reaches error.tsx, still calling getClientOverview exactly once', async () => {
+      getCurrentUserMock.mockResolvedValue(CLIENT_USER);
+      const unexpected = new Error('a downstream feature read failed');
+      getClientOverviewMock.mockRejectedValue(unexpected);
+
+      await expect(ClientOverviewPage()).rejects.toBe(unexpected);
+      expect(getClientOverviewMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('rethrows a non-ClientPortalError even when it carries a known-looking `code` — the guard is instanceof, not a duck-typed code', async () => {
+      getCurrentUserMock.mockResolvedValue(CLIENT_USER);
+      // `ClientPortalErrorCode` is exactly `'FORBIDDEN' | 'PROFILE_NOT_SET_UP'`
+      // and the catch names both explicitly, so a genuine third
+      // `ClientPortalError` code is not type-representable today; what must
+      // not regress is that anything which is not a real `ClientPortalError`
+      // instance bubbles unchanged, even when it looks like one.
+      const impostor = Object.assign(new Error('looks forbidden'), { code: 'FORBIDDEN' });
+      getClientOverviewMock.mockRejectedValue(impostor);
+
+      await expect(ClientOverviewPage()).rejects.toBe(impostor);
+      expect(getClientOverviewMock).toHaveBeenCalledTimes(1);
+    });
   });
 });

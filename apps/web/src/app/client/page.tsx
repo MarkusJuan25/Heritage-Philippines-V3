@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 
 import { getCurrentUser } from '@/lib/auth/guards';
+import { ClientPortalError } from '@/features/client-portal/errors';
 import { getClientOverview } from '@/features/client-portal/service';
 
 import { BookingSummarySection } from './_components/BookingSummarySection';
@@ -27,13 +28,24 @@ export const revalidate = 0;
 // identity (Contract A).
 //
 // `getClientOverview` can throw `ClientPortalError` (`FORBIDDEN` /
-// `PROFILE_NOT_SET_UP`), but in the normal flow layout.tsx (Layer 2) has
-// already gated both, so neither reaches here; any genuinely unexpected
-// failure is intentionally not caught — it rejects this component and
-// bubbles to `error.tsx`, exactly as `admin/page.tsx` lets its service
-// calls bubble. The rendered DTO is the identifier-minimized
-// `ClientOverview` (D-040 §8) — no internal id, proposal content, notes,
-// money, currency, traveler count, or invitation data is present in it.
+// `PROFILE_NOT_SET_UP`). In the normal flow layout.tsx (Layer 2) has
+// already gated both and rendered the matching known-state panel without
+// `{children}`, so that panel — not anything here — is the committed,
+// user-visible output. This component still executes alongside the layout
+// during the App Router render, though (D-045 §2; see
+// `e2e/client-overview.spec.ts`), and `getClientOverview` throws that same
+// known state here. It is caught for exactly those two `code` values and
+// `null` is returned — the page renders nothing and adds no data path — so
+// the known state does not escape this component into the renderer /
+// server error log. Every other value rethrows unchanged: a
+// non-`ClientPortalError`, any genuinely unexpected failure, and any other
+// `ClientPortalError` `code` all reject this component and bubble to
+// `error.tsx`, exactly as `admin/leads/[id]/page.tsx` and
+// `admin/clients/[id]/page.tsx` bubble theirs. `redirect('/login')` throws
+// a Next.js navigation signal before the call and is never in scope of the
+// catch. The rendered DTO is the identifier-minimized `ClientOverview`
+// (D-040 §8) — no internal id, proposal content, notes, money, currency,
+// traveler count, or invitation data is present in it.
 export default async function ClientOverviewPage() {
   const user = await getCurrentUser();
 
@@ -41,7 +53,18 @@ export default async function ClientOverviewPage() {
     redirect('/login');
   }
 
-  const overview = await getClientOverview(user);
+  let overview;
+  try {
+    overview = await getClientOverview(user);
+  } catch (error) {
+    if (
+      error instanceof ClientPortalError &&
+      (error.code === 'FORBIDDEN' || error.code === 'PROFILE_NOT_SET_UP')
+    ) {
+      return null;
+    }
+    throw error;
+  }
 
   return (
     <div className={styles.overview}>
