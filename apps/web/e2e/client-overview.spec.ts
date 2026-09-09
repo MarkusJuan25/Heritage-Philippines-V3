@@ -404,10 +404,37 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
     );
     await page.getByLabel('Create a new Client').check();
     await page.getByRole('button', { name: 'Continue' }).click();
-    await page.getByRole('button', { name: 'Confirm' }).click();
-    await expect(
-      page.getByText(`Converted. A new client, "${nameCanary}", was created.`),
-    ).toBeVisible(SLOW);
+    // The matching conversion response is this step's synchronization gate:
+    // the conversion success paragraph belongs to ConvertToClientPanel, which
+    // page.tsx unmounts once the refreshed server render reports the Lead is no
+    // longer QUALIFIED, so that transient message can be gone before an
+    // assertion polls. The waiter is registered before the Confirm click, so it
+    // observes the response independent of the panel's mount/unmount timing;
+    // the response's ok status and body are asserted below (the waiter itself
+    // can still time out under SLOW).
+    const [conversionResponse] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === 'POST' &&
+          new URL(response.url()).pathname === `/api/leads/${leadId}/conversion`,
+        SLOW,
+      ),
+      page.getByRole('button', { name: 'Confirm' }).click(),
+    ]);
+    expect(conversionResponse.ok()).toBe(true);
+    const conversionBody: unknown = await conversionResponse.json();
+    const conversionRecord = asRecord(conversionBody, 'conversion response');
+    const conversionLead = asRecord(conversionRecord.lead, 'conversion lead');
+    const conversionClient = asRecord(conversionRecord.client, 'conversion client');
+    const responseLeadClientId = asString(conversionLead, 'clientId', 'conversion lead');
+    const responseClientId = asString(conversionClient, 'id', 'conversion client');
+    expect(asString(conversionLead, 'id', 'conversion lead')).toBe(leadId);
+    expect(asString(conversionLead, 'status', 'conversion lead')).toBe('CONVERTED_TO_CLIENT');
+    expect(responseLeadClientId.length).toBeGreaterThan(0);
+    expect(responseClientId.length).toBeGreaterThan(0);
+    expect(responseLeadClientId).toBe(responseClientId);
+    expect(conversionRecord.clientCreated).toBe(true);
+    expect(asString(conversionClient, 'fullName', 'conversion client')).toBe(nameCanary);
 
     // Open the Client detail page.
     await page.getByRole('link', { name: 'Clients', exact: true }).click();
