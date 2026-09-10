@@ -566,3 +566,46 @@ export async function findOwnedClientForUser(
     phone: row.client.phone,
   };
 }
+
+// --- Client-portal ClientProfile identity (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-047 §8) ---
+// The server-only `{ clientProfileId, clientId }` pair the client
+// proposal-response mutation needs: resolved on the ordinary Prisma path for
+// the portal-attribution write (D-047 §7 step 2), and re-resolved inside the
+// SERIALIZABLE transaction for the transaction-local ownership check (§7
+// step 4) by passing that same transaction client. Scoped EXCLUSIVELY by the
+// activated user's `ClientProfile.userId` (`@unique`) — never from email, a
+// Client contact field, a caller-supplied id, or any UI state. Distinct from
+// Contract A's `findOwnedClientForUser`, which returns the identity-card
+// fields (fullName / email / phone) for the portal header and never the
+// `ClientProfile.id`: this read returns only the two internal ids, and its
+// result is never placed in a public/client DTO.
+
+export type ClientProfileIdentity = {
+  clientProfileId: string;
+  clientId: string;
+};
+
+/**
+ * The `{ clientProfileId, clientId }` for the `ClientProfile` `userId` owns,
+ * or `null` when this user has no `ClientProfile` yet. Scoped by `userId`
+ * alone in the query itself (`findUnique` on the `@unique` column) — never
+ * "fetch a ClientProfile by one field and compare another in code". Selects
+ * only `id` and `clientId`. Accepts no `clientId` and no email. Takes the
+ * same `Prisma.TransactionClient` shape as every other function here, so it
+ * runs unchanged on the ordinary Prisma client or inside a transaction
+ * (D-047 §§7-8).
+ */
+export async function findClientProfileIdentityForUser(
+  db: Prisma.TransactionClient,
+  userId: string,
+): Promise<ClientProfileIdentity | null> {
+  const row = await db.clientProfile.findUnique({
+    where: { userId },
+    select: { id: true, clientId: true },
+  });
+  if (!row) {
+    return null;
+  }
+  return { clientProfileId: row.id, clientId: row.clientId };
+}

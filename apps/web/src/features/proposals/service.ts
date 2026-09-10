@@ -1,12 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
-import { Prisma } from '@/generated/prisma/client';
+import { z } from 'zod';
+
+import { Prisma, ProposalResponseType } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
 import { canAccessClient } from '@/features/assignments/authorization';
 import * as assignmentRepository from '@/features/assignments/repository';
+import { findClientProfileIdentityForUser } from '@/features/clients/repository';
+import { getOwnClientForUser } from '@/features/clients/service';
 
 import {
   PROPOSAL_AUDIT_ACTIONS,
@@ -16,9 +20,10 @@ import {
   sanitizeProposalVersionCreatedSnapshot,
   sanitizeProposalVersionPublishedSnapshot,
 } from './audit';
-import { ProposalError } from './errors';
+import { ProposalError, type ProposalErrorCode } from './errors';
 import * as repository from './repository';
 import type {
+  ClientProposalReviewRow,
   ProposalAcceptanceRecord,
   ProposalActor,
   ProposalDetailRecord,
@@ -62,6 +67,10 @@ const PROPOSAL_RESPONSE_ALREADY_RECORDED_MESSAGE =
   'A response has already been recorded for this proposal version.';
 const PROPOSAL_CONFLICT_MESSAGE =
   'This proposal could not be completed because of a conflicting update. Please try again.';
+// D-047 §9 — the acknowledgement checkbox and a valid response type are
+// both re-validated server-side; a missing/false value is VALIDATION_ERROR.
+const PROPOSAL_RESPONSE_VALIDATION_MESSAGE =
+  'A valid response type and the final-response acknowledgement are both required.';
 // D-027 §5's exact required wording — never paraphrased.
 const PUBLISH_CONFLICT_MESSAGE =
   'The current version has changed since you last loaded this proposal. Refresh and try again.';
@@ -830,4 +839,410 @@ export async function getClientProposalPreview(
       statusLabel: clientProposalStatusLabel(row.responseType),
     })),
   };
+}
+
+// --- Client proposal-review page (docs/HERITAGE_V3_DECISIONS_LOG.md D-047
+// §5) ---
+// The CLIENT-safe read backing the paginated `/client/my-journey`
+// proposal-review route. Read-only: no transaction, no audit, no mutation.
+// Authorization mirrors Contracts B/C above exactly — the CLIENT-role gate
+// then `canAccessClient(actor, clientId)` via `assertClientPortalAccess`,
+// run BEFORE any proposal repository read; `clientId` is only ever the
+// server-resolved owned id Stage 4 resolves from Contract A
+// (`clients.getOwnClientForUser`), never a value from a path, query, body,
+// or caller object.
+//
+// D-047 §4's internal-identifier boundary is enforced here by returning two
+// distinct shapes: `render` (the identifier-free DTO Stage 4 passes to
+// client components — `versionNumber`, ISO `publishedAt`, `content` or a
+// `{ available: false }` marker, the `{ responseType, respondedAt }`
+// response summary or `null`, and the reused status label; NO `Proposal` /
+// `ProposalVersion` / `ProposalAcceptance` identifier), and `serverModel`
+// (index-aligned with `render.cards`, carrying `proposalVersionId` /
+// `proposalId` for Stage 5 action binding; never passed to a client
+// component).
+
+export type ClientProposalReviewContent = { available: true; text: string } | { available: false };
+
+export type ClientProposalReviewResponse = {
+  responseType: 'ACCEPT' | 'DECLINE' | 'REQUEST_CHANGES';
+  respondedAt: string;
+};
+
+export type ClientProposalReviewCard = {
+  versionNumber: number;
+  publishedAt: string;
+  content: ClientProposalReviewContent;
+  response: ClientProposalReviewResponse | null;
+  statusLabel: string;
+};
+
+export type ClientProposalReviewRender = {
+  page: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+  isEmpty: boolean;
+  cards: ClientProposalReviewCard[];
+};
+
+export type ClientProposalReviewServerCard = { proposalVersionId: string; proposalId: string };
+
+export type ClientProposalReviewServerModel = { cards: ClientProposalReviewServerCard[] };
+
+export type ClientProposalReviewPageResult =
+  | { kind: 'redirect' }
+  | {
+      kind: 'page';
+      render: ClientProposalReviewRender;
+      serverModel: ClientProposalReviewServerModel;
+    };
+
+function toClientProposalReviewContent(content: string | null): ClientProposalReviewContent {
+  return content === null ? { available: false } : { available: true, text: content };
+}
+
+function toClientProposalReviewResponse(
+  acceptance: ClientProposalReviewRow['acceptance'],
+): ClientProposalReviewResponse | null {
+  return acceptance === null
+    ? null
+    : { responseType: acceptance.responseType, respondedAt: acceptance.respondedAt.toISOString() };
+}
+
+/**
+ * Splits one fetched-and-bounded row set (up to `PAGE_SIZE + 1` rows) into
+ * the identifier-free `render` DTO and the server-only `serverModel`. The
+ * `PAGE_SIZE + 1`th row, if present, only sets `hasNext` — at most
+ * `PAGE_SIZE` cards are ever emitted. `render.cards` and `serverModel.cards`
+ * are built from the same sliced list, so they stay index-aligned.
+ */
+function toClientProposalReviewPage(
+  rows: ClientProposalReviewRow[],
+  page: number,
+  hasPrevious: boolean,
+): { render: ClientProposalReviewRender; serverModel: ClientProposalReviewServerModel } {
+  const pageRows = rows.slice(0, repository.CLIENT_PROPOSAL_REVIEW_PAGE_SIZE);
+  const hasNext = rows.length > repository.CLIENT_PROPOSAL_REVIEW_PAGE_SIZE;
+  return {
+    render: {
+      page,
+      hasPrevious,
+      hasNext,
+      isEmpty: pageRows.length === 0,
+      cards: pageRows.map((row) => ({
+        versionNumber: row.versionNumber,
+        publishedAt: row.clientVisibleAt.toISOString(),
+        content: toClientProposalReviewContent(row.content),
+        response: toClientProposalReviewResponse(row.acceptance),
+        statusLabel: clientProposalStatusLabel(row.acceptance?.responseType ?? null),
+      })),
+    },
+    serverModel: {
+      cards: pageRows.map((row) => ({
+        proposalVersionId: row.proposalVersionId,
+        proposalId: row.proposalId,
+      })),
+    },
+  };
+}
+
+/**
+ * D-047 §5: one page of the authenticated client's current-client-visible
+ * proposal-review cards for `/client/my-journey`.
+ *
+ * - Authorization first — `assertClientPortalAccess(actor, clientId)`
+ *   (CLIENT role + `canAccessClient`), before any repository read.
+ * - Page 1 uses the bounded card query directly (`skip 0`,
+ *   `take PAGE_SIZE + 1`); an empty result is the page-1 global empty state
+ *   (`kind: 'page'`, `isEmpty: true`), NOT a redirect.
+ * - Page > 1 first COUNTS (same ownership + current-visible predicate as
+ *   the card query), derives the last existing page (`ceil(count / 10)`),
+ *   and returns `{ kind: 'redirect' }` when the requested page exceeds it —
+ *   BEFORE computing `(page - 1) * PAGE_SIZE` or issuing any offset query.
+ *   A confirmed page > 1 that still returns no rows (concurrent change)
+ *   also returns `{ kind: 'redirect' }`.
+ * - The `render` DTO carries no database identifier; `proposalVersionId` /
+ *   `proposalId` live only in `serverModel`, index-aligned with
+ *   `render.cards`.
+ *
+ * `page` is expected already normalized to a positive safe integer by
+ * `parseProposalReviewPageParam` (schemas.ts); as defense in depth this
+ * function still clamps any non-safe-integer or `< 1` value to page 1, so
+ * an offset is never derived from an unsafe integer even via a mis-wired
+ * caller.
+ */
+export async function getClientProposalReviewPage(
+  actor: AuthenticatedUser,
+  clientId: string,
+  page: number,
+): Promise<ClientProposalReviewPageResult> {
+  await assertClientPortalAccess(actor, clientId);
+
+  const pageSize = repository.CLIENT_PROPOSAL_REVIEW_PAGE_SIZE;
+  const requestedPage = Number.isSafeInteger(page) && page >= 1 ? page : 1;
+
+  if (requestedPage === 1) {
+    const rows = await repository.findClientProposalReviewPage(prisma, clientId, {
+      skip: 0,
+      take: pageSize + 1,
+    });
+    return { kind: 'page', ...toClientProposalReviewPage(rows, 1, false) };
+  }
+
+  const total = await repository.countCurrentClientVisibleProposalVersions(prisma, clientId);
+  const lastPage = Math.max(1, Math.ceil(total / pageSize));
+  if (requestedPage > lastPage) {
+    return { kind: 'redirect' };
+  }
+
+  const skip = (requestedPage - 1) * pageSize;
+  const rows = await repository.findClientProposalReviewPage(prisma, clientId, {
+    skip,
+    take: pageSize + 1,
+  });
+  if (rows.length === 0) {
+    return { kind: 'redirect' };
+  }
+  return { kind: 'page', ...toClientProposalReviewPage(rows, requestedPage, true) };
+}
+
+// --- Client proposal-response mutation (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-047 §6–§10) ---
+// The write path behind the `/client/my-journey` response form. The inline
+// `'use server'` action in `page.tsx` owns the request boundary — the
+// verified session lookup (`getCurrentSession()`), the `.strict()` schema
+// parse of the FormData, mapping the outcome to an identifier-free result,
+// and `revalidatePath('/client/my-journey')` on success. This module owns
+// the business rules: the D-047 §7 fixed check order, the one SERIALIZABLE
+// transaction, conflict mapping, and the atomic audit. Every check is
+// re-derived on every call — the action is treated as directly invocable
+// with a forged payload (§6). No `content`, identifier, staff field,
+// session value, or Prisma detail is ever placed in a value the client can
+// observe (§11); a truly unexpected error propagates to the segment error
+// boundary unchanged.
+
+// D-047 §6/§9. The only two fields the form submits. `.strict()` rejects any
+// extra key — a forged `respondedAt` / `clientId` / `clientProfileId` /
+// `sessionId` / `proposalId` / `proposalVersionId` is a `VALIDATION_ERROR`,
+// never trusted. An unchecked acknowledgement checkbox is absent from the
+// FormData, so `z.literal('on')` (not `.optional()`) makes a missing or
+// non-`'on'` value a `VALIDATION_ERROR` with no write (§9).
+export const clientProposalResponseSchema = z
+  .object({
+    responseType: z.nativeEnum(ProposalResponseType),
+    acknowledgement: z.literal('on'),
+  })
+  .strict();
+export type ClientProposalResponseInput = z.infer<typeof clientProposalResponseSchema>;
+
+// D-047 §6. The controlled, identifier-free code union the Server Action
+// returns to the client. Distinct from `ProposalErrorCode`: the forbidden /
+// not-found / role family all collapse to one `FORBIDDEN` outcome
+// (anti-enumeration — never confirming whether a target exists, §7 step 4).
+export type ClientProposalResponseCode =
+  | 'FORBIDDEN'
+  | 'VALIDATION_ERROR'
+  | 'PROPOSAL_RESPONSE_ALREADY_RECORDED'
+  | 'PROPOSAL_VERSION_NOT_CURRENT'
+  | 'PROPOSAL_VERSION_SUPERSEDED'
+  | 'PROPOSAL_CONFLICT';
+
+// The `useActionState` value the response form renders from. `idle` before
+// the first submit; `success` swaps the form for the read-only summary (and
+// the action has revalidated `/client/my-journey`); `error` keeps the form
+// and shows a client-safe message. Carries no identifier or `content`.
+export type ClientProposalResponseState =
+  | { status: 'idle' }
+  | { status: 'success'; responseType: ProposalResponseType }
+  | { status: 'error'; code: ClientProposalResponseCode };
+
+export type ClientProposalResponseAction = (
+  state: ClientProposalResponseState,
+  formData: FormData,
+) => Promise<ClientProposalResponseState>;
+
+const PROPOSAL_ERROR_TO_RESPONSE_CODE: Partial<
+  Record<ProposalErrorCode, ClientProposalResponseCode>
+> = {
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  PROPOSAL_RESPONSE_ALREADY_RECORDED: 'PROPOSAL_RESPONSE_ALREADY_RECORDED',
+  PROPOSAL_VERSION_NOT_CURRENT: 'PROPOSAL_VERSION_NOT_CURRENT',
+  PROPOSAL_VERSION_SUPERSEDED: 'PROPOSAL_VERSION_SUPERSEDED',
+  PROPOSAL_CONFLICT: 'PROPOSAL_CONFLICT',
+};
+
+/**
+ * Maps a `ProposalError` raised by `submitClientProposalResponse` to the
+ * controlled client-facing code. Anything not in the explicit table —
+ * `ROLE_NOT_PERMITTED`, `CLIENT_FORBIDDEN`, `PROPOSAL*_FORBIDDEN`,
+ * `*_NOT_FOUND` — becomes the single generic `FORBIDDEN` (§6/§7 step 4).
+ */
+export function clientProposalResponseCodeFor(error: ProposalError): ClientProposalResponseCode {
+  return PROPOSAL_ERROR_TO_RESPONSE_CODE[error.code] ?? 'FORBIDDEN';
+}
+
+export type SubmitClientProposalResponseInput = {
+  actor: AuthenticatedUser;
+  sessionId: string;
+  proposalVersionId: string;
+  responseType: ProposalResponseType;
+  acknowledged: boolean;
+};
+
+const RESPONSE_TYPE_VALUES: readonly ProposalResponseType[] = [
+  ProposalResponseType.ACCEPT,
+  ProposalResponseType.DECLINE,
+  ProposalResponseType.REQUEST_CHANGES,
+];
+
+/**
+ * Records a client's portal response to a proposal version — D-047 §6–§10.
+ *
+ * Pre-transaction (§7 steps 1–2), all failing closed with **no write**:
+ *  - `CLIENT` role (`assertClientPortalActor`) and a usable non-empty
+ *    `sessionId` — else `ROLE_NOT_PERMITTED` / `CLIENT_FORBIDDEN`.
+ *  - server-side re-validation of `responseType` (closed enum) and the
+ *    required `acknowledged === true` — else `VALIDATION_ERROR` (§9/§15).
+ *  - Contract A `getOwnClientForUser(actor)` → `ownedClientId`; the §8
+ *    `{ clientProfileId, clientId }` identity read on the ordinary Prisma
+ *    path; `clientId` must equal `ownedClientId`; then the ordinary
+ *    `canAccessClient(actor, ownedClientId)` defense-in-depth check
+ *    (its existing global-Prisma-path signature; `features/assignments/**`
+ *    is not modified). Any unresolved / mismatched / denied value →
+ *    `CLIENT_FORBIDDEN`.
+ *
+ * Inside one `runSerializableWithRetry` (SERIALIZABLE) transaction, in D-027
+ * §7's fixed order (§7 steps 3–8):
+ *  4. `tx`-capable re-resolve of `{ clientProfileId, clientId }` and read of
+ *     the captured target `ProposalVersion` with its `Proposal.clientId`;
+ *     require both `clientId`s equal `ownedClientId`. An absent identity, an
+ *     absent target, or an ownership mismatch → **one identical generic
+ *     `CLIENT_FORBIDDEN`**, never confirming whether the target exists.
+ *     `canAccessClient` is **not** re-called here.
+ *  5. Existing-response check first — any `ProposalAcceptance` row →
+ *     `PROPOSAL_RESPONSE_ALREADY_RECORDED`, unconditionally (response
+ *     before current-version, mirroring D-027 §7).
+ *  6. Current-visible check — if the Proposal's current client-visible
+ *     version is not this target → `PROPOSAL_VERSION_SUPERSEDED` when the
+ *     target is superseded, else `PROPOSAL_VERSION_NOT_CURRENT`.
+ *  7. Portal `ProposalAcceptance` insert — server-generated `respondedAt`,
+ *     the `tx`-resolved `clientProfileId`, the live `sessionId`; external
+ *     fields left `NULL`.
+ *  8. Atomic `PROPOSAL_RESPONSE_RECORDED` audit — `actorId` = the client's
+ *     `User.id`, `entityId` = the target `ProposalVersion.id`, snapshot via
+ *     the existing portal-neutral `sanitizeProposalResponseRecordedSnapshot`
+ *     ({ acceptanceId, responseType, respondedAt } only — no `content`, no
+ *     staff/session field, no acknowledgement).
+ *
+ * A P2002 unique-race on `proposalVersionId` → `PROPOSAL_RESPONSE_ALREADY_
+ * RECORDED` (never an idempotent success, never a raw error). Every other
+ * residual P2002 / P2004 / exhausted P2034 → `PROPOSAL_CONFLICT`. A truly
+ * unexpected error propagates unchanged.
+ */
+export async function submitClientProposalResponse(
+  input: SubmitClientProposalResponseInput,
+): Promise<{ responseType: ProposalResponseType }> {
+  // §7 step 1 — role + live session id.
+  assertClientPortalActor(input.actor);
+  if (typeof input.sessionId !== 'string' || input.sessionId.length === 0) {
+    throw new ProposalError('CLIENT_FORBIDDEN', CLIENT_FORBIDDEN_MESSAGE);
+  }
+
+  // §9/§15 — server-side re-validation, independent of the action's schema.
+  if (input.acknowledged !== true || !RESPONSE_TYPE_VALUES.includes(input.responseType)) {
+    throw new ProposalError('VALIDATION_ERROR', PROPOSAL_RESPONSE_VALIDATION_MESSAGE);
+  }
+
+  // §7 step 2 — Contract A + identity read + canAccessClient (pre-transaction).
+  const owned = await getOwnClientForUser(input.actor);
+  if (!owned) {
+    throw new ProposalError('CLIENT_FORBIDDEN', CLIENT_FORBIDDEN_MESSAGE);
+  }
+  const ownedClientId = owned.clientId;
+
+  const preIdentity = await findClientProfileIdentityForUser(prisma, input.actor.id);
+  if (!preIdentity || preIdentity.clientId !== ownedClientId) {
+    throw new ProposalError('CLIENT_FORBIDDEN', CLIENT_FORBIDDEN_MESSAGE);
+  }
+
+  const access = await canAccessClient(input.actor, ownedClientId);
+  if (!access.allowed) {
+    throw new ProposalError('CLIENT_FORBIDDEN', CLIENT_FORBIDDEN_MESSAGE);
+  }
+
+  try {
+    return await runSerializableWithRetry(async (tx) => {
+      // §7 step 4 — transaction-local ownership re-validation. One identical
+      // generic FORBIDDEN for every mismatch/absence — never confirming a
+      // target exists. `canAccessClient` is NOT re-called here.
+      const txIdentity = await findClientProfileIdentityForUser(tx, input.actor.id);
+      if (!txIdentity || txIdentity.clientId !== ownedClientId) {
+        throw new ProposalError('CLIENT_FORBIDDEN', CLIENT_FORBIDDEN_MESSAGE);
+      }
+
+      const target = await repository.findProposalVersionOwnershipContext(
+        tx,
+        input.proposalVersionId,
+      );
+      if (!target || target.clientId !== ownedClientId) {
+        throw new ProposalError('CLIENT_FORBIDDEN', CLIENT_FORBIDDEN_MESSAGE);
+      }
+
+      // §7 step 5 — existing-response check first (before current-version).
+      const existing = await repository.findProposalAcceptanceForVersion(
+        tx,
+        input.proposalVersionId,
+      );
+      if (existing) {
+        throw new ProposalError(
+          'PROPOSAL_RESPONSE_ALREADY_RECORDED',
+          PROPOSAL_RESPONSE_ALREADY_RECORDED_MESSAGE,
+        );
+      }
+
+      // §7 step 6 — current-visible check.
+      const current = await repository.findCurrentClientVisibleVersion(tx, target.proposalId);
+      if ((current?.id ?? null) !== input.proposalVersionId) {
+        throw target.supersededAt !== null
+          ? new ProposalError('PROPOSAL_VERSION_SUPERSEDED', PROPOSAL_VERSION_SUPERSEDED_MESSAGE)
+          : new ProposalError('PROPOSAL_VERSION_NOT_CURRENT', PROPOSAL_VERSION_NOT_CURRENT_MESSAGE);
+      }
+
+      // §7 step 7 — portal ProposalAcceptance insert (server-generated time).
+      const respondedAt = new Date();
+      const acceptance = await repository.createPortalProposalAcceptance(tx, {
+        proposalVersionId: input.proposalVersionId,
+        responseType: input.responseType,
+        respondedAt,
+        respondingClientProfileId: txIdentity.clientProfileId,
+        respondingSessionIdAtResponse: input.sessionId,
+      });
+
+      // §7 step 8 — atomic audit in the same transaction.
+      await repository.insertAuditLog(tx, {
+        actorId: input.actor.id,
+        action: PROPOSAL_AUDIT_ACTIONS.PROPOSAL_RESPONSE_RECORDED,
+        entityType: PROPOSAL_AUDIT_ENTITY_TYPE.PROPOSAL_VERSION,
+        entityId: input.proposalVersionId,
+        afterState: sanitizeProposalResponseRecordedSnapshot({
+          acceptanceId: acceptance.id,
+          responseType: acceptance.responseType,
+          respondedAt: acceptance.respondedAt,
+        }),
+      });
+
+      return { responseType: acceptance.responseType };
+    });
+  } catch (error) {
+    if (isUniqueConflictOn(error, 'proposalVersionId')) {
+      throw new ProposalError(
+        'PROPOSAL_RESPONSE_ALREADY_RECORDED',
+        PROPOSAL_RESPONSE_ALREADY_RECORDED_MESSAGE,
+      );
+    }
+    if (isOtherKnownConflict(error)) {
+      throw new ProposalError('PROPOSAL_CONFLICT', PROPOSAL_CONFLICT_MESSAGE);
+    }
+    throw error;
+  }
 }

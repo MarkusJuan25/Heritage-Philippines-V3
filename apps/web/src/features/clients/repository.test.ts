@@ -5,6 +5,7 @@ import type { Prisma } from '@/generated/prisma/client';
 import {
   findClientById,
   findClientByIdForRead,
+  findClientProfileIdentityForUser,
   findDuplicateClientMatches,
   findDuplicateLeadMatches,
   findOwnedClientForUser,
@@ -832,5 +833,94 @@ describe('findOwnedClientForUser', () => {
 
   it('accepts no clientId parameter — the signature is (db, userId) only', () => {
     expect(findOwnedClientForUser).toHaveLength(2);
+  });
+});
+
+// --- Client-portal ClientProfile identity (D-047 §8) ---
+
+describe('findClientProfileIdentityForUser', () => {
+  it('returns exactly { clientProfileId, clientId } for a matching User id', async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: 'profile-7', clientId: 'client-7' });
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientProfileIdentityForUser(db, 'user-7');
+
+    expect(result).toEqual({ clientProfileId: 'profile-7', clientId: 'client-7' });
+    expect(Object.keys(result!).sort()).toEqual(['clientId', 'clientProfileId']);
+  });
+
+  it('returns null when the user has no ClientProfile row', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    expect(await findClientProfileIdentityForUser(db, 'user-none')).toBeNull();
+  });
+
+  it('scopes the query by userId alone via findUnique and selects only id and clientId', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findClientProfileIdentityForUser(db, 'user-7');
+
+    expect(findUnique).toHaveBeenCalledTimes(1);
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { userId: 'user-7' },
+      select: { id: true, clientId: true },
+    });
+  });
+
+  it('never queries by email or any client-supplied identifier, and never selects contact/relation fields', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findClientProfileIdentityForUser(db, 'user-7');
+
+    const call = findUnique.mock.calls[0]![0] as {
+      where: Record<string, unknown>;
+      select: Record<string, unknown>;
+    };
+    expect(Object.keys(call.where)).toEqual(['userId']);
+    expect(Object.keys(call.select).sort()).toEqual(['clientId', 'id']);
+    for (const forbidden of [
+      'email',
+      'normalizedEmail',
+      'fullName',
+      'phone',
+      'client',
+      'user',
+      'userId',
+    ]) {
+      expect(call.select).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('uses the injected db argument, never a module-level Prisma singleton', async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: 'profile-7', clientId: 'client-7' });
+    const injected = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findClientProfileIdentityForUser(injected, 'user-7');
+
+    expect(findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts the same Prisma.TransactionClient shape as every other repository function here — ordinary client or transaction', async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: 'profile-7', clientId: 'client-7' });
+    const tx = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await expect(findClientProfileIdentityForUser(tx, 'user-7')).resolves.toEqual({
+      clientProfileId: 'profile-7',
+      clientId: 'client-7',
+    });
+  });
+
+  it('accepts no clientId parameter — the signature is (db, userId) only', () => {
+    expect(findClientProfileIdentityForUser).toHaveLength(2);
+  });
+
+  it('propagates a rejected findUnique rather than swallowing it', async () => {
+    const findUnique = vi.fn().mockRejectedValue(new Error('db unavailable'));
+    const db = { clientProfile: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await expect(findClientProfileIdentityForUser(db, 'user-7')).rejects.toThrow('db unavailable');
   });
 });

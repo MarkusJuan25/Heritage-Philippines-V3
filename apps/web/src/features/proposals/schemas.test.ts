@@ -4,6 +4,7 @@ import {
   createProposalRevisionSchema,
   createProposalSchema,
   listProposalsQuerySchema,
+  parseProposalReviewPageParam,
   proposalIdParamSchema,
   proposalVersionIdParamSchema,
   publishProposalVersionSchema,
@@ -436,5 +437,81 @@ describe('proposalVersionIdParamSchema', () => {
     expect(proposalVersionIdParamSchema.safeParse({ id: VALID_UUID_2, extra: 'x' }).success).toBe(
       false,
     );
+  });
+});
+
+describe('parseProposalReviewPageParam (D-047 §5)', () => {
+  it('treats an absent value as page 1', () => {
+    expect(parseProposalReviewPageParam(undefined)).toBe(1);
+  });
+
+  it('accepts a canonical positive-decimal string as that page', () => {
+    expect(parseProposalReviewPageParam('1')).toBe(1);
+    expect(parseProposalReviewPageParam('2')).toBe(2);
+    expect(parseProposalReviewPageParam('10')).toBe(10);
+    expect(parseProposalReviewPageParam('11')).toBe(11);
+    expect(parseProposalReviewPageParam('999')).toBe(999);
+  });
+
+  it('normalizes every non-canonical lexical form to page 1 without echoing the input', () => {
+    for (const value of [
+      '0',
+      '-1',
+      '+1',
+      '01',
+      '007',
+      ' 1',
+      '1 ',
+      '1 2',
+      '1\n',
+      '\t1',
+      '1.0',
+      '1.5',
+      '1e3',
+      '1E3',
+      '0x1',
+      'abc',
+      '1a',
+      'one',
+      '',
+      ' ',
+    ]) {
+      expect(parseProposalReviewPageParam(value)).toBe(1);
+    }
+  });
+
+  it('treats a repeated query param (string array) as page 1', () => {
+    expect(parseProposalReviewPageParam(['1', '2'])).toBe(1);
+    expect(parseProposalReviewPageParam([])).toBe(1);
+  });
+
+  it('accepts exactly Number.MAX_SAFE_INTEGER', () => {
+    expect(parseProposalReviewPageParam(String(Number.MAX_SAFE_INTEGER))).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it('rejects a value one above Number.MAX_SAFE_INTEGER', () => {
+    expect(parseProposalReviewPageParam('9007199254740992')).toBe(1);
+  });
+
+  it('rejects a 16-digit value that still exceeds Number.MAX_SAFE_INTEGER', () => {
+    expect(parseProposalReviewPageParam('9999999999999999')).toBe(1);
+  });
+
+  it('rejects a 17-plus-digit value by length alone', () => {
+    expect(parseProposalReviewPageParam('10000000000000000')).toBe(1);
+  });
+
+  it('rejects an arbitrarily long digit string without throwing', () => {
+    expect(parseProposalReviewPageParam('9'.repeat(400))).toBe(1);
+  });
+
+  it('always returns a positive safe integer', () => {
+    for (const value of [undefined, '0', '-5', 'x', '1', '25', '9'.repeat(50)]) {
+      const result = parseProposalReviewPageParam(value as string | undefined);
+      expect(Number.isSafeInteger(result)).toBe(true);
+      expect(result).toBeGreaterThanOrEqual(1);
+    }
   });
 });

@@ -15,11 +15,13 @@ const { redirectMock } = vi.hoisted(() => ({
   }),
 }));
 // `SignOutButton` (rendered by the normal branch) and `ClientPortalNav` are
-// Client Components; `SignOutButton` calls `useRouter()` at render time and
-// must resolve to a stub, mirroring admin/layout.test.tsx's discipline.
+// Client Components; `SignOutButton` calls `useRouter()` and `ClientPortalNav`
+// calls `usePathname()` (D-047 §2 active-link state) at render time, so both
+// must resolve to stubs, mirroring admin/layout.test.tsx's discipline.
 vi.mock('next/navigation', () => ({
   redirect: redirectMock,
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
+  usePathname: () => '/client',
 }));
 
 import ClientLayout from './layout';

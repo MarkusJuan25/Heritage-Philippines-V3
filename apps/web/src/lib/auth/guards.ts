@@ -29,6 +29,44 @@ export async function getCurrentUser(): Promise<AuthenticatedUser | null> {
   return { id: user.id, email: user.email, name: user.name, role: user.role };
 }
 
+/**
+ * The narrow, server-only value the D-047 §8 client proposal-response flow
+ * records for portal attribution: the same `AuthenticatedUser` shape
+ * `getCurrentUser` returns, plus the current request's live database
+ * `Session.id`. It deliberately carries nothing else from the session
+ * object — never `Session.token`, `expiresAt`, `userAgent`, or any other
+ * Better Auth session field.
+ */
+export type AuthenticatedSession = {
+  user: AuthenticatedUser;
+  sessionId: string;
+};
+
+/**
+ * Like `getCurrentUser`, but also returns the current request's live
+ * `Session.id` (D-047 §8). Performs exactly one verified
+ * `auth.api.getSession` lookup per call — the same single-lookup contract
+ * `getCurrentUser` has — and applies the identical role normalization, so
+ * the returned `user` is byte-for-byte what `getCurrentUser` would return
+ * for the same request. Fails closed (returns `null`) when there is no
+ * session, no user, or no usable non-empty-string `session.id`. Only
+ * `sessionId` is read from the session object; `session.token` is never
+ * read, returned, logged, or persisted.
+ */
+export async function getCurrentSession(): Promise<AuthenticatedSession | null> {
+  const result = await auth.api.getSession({ headers: await headers() });
+  const sessionId = result?.session?.id;
+  if (!result?.user || typeof sessionId !== 'string' || sessionId.length === 0) {
+    return null;
+  }
+
+  const user = result.user as typeof result.user & { role: AppRole };
+  return {
+    user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    sessionId,
+  };
+}
+
 export class AuthorizationError extends Error {
   readonly status: 401 | 403;
 

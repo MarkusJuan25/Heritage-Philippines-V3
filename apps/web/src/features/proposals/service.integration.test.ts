@@ -1622,4 +1622,608 @@ describe.skipIf(!hasTestDatabaseUrl)('proposals service integration (real databa
       });
     });
   });
+
+  // --- D-047 §7/§10/§15 (Stage 6): one CLIENT-actor case for the portal
+  //     proposal-response WRITE path — real transaction atomicity, the real
+  //     `proposal_acceptance.proposalVersionId` unique race, the real
+  //     `proposal_acceptance_response_path` CHECK, real ownership/current-
+  //     visible predicates, real deterministic pagination ordering, and the
+  //     cross-feature Booking-eligibility regression. None of this can be
+  //     proven by the mocked-Prisma unit tests. ---
+  describe('submitClientProposalResponse + getClientProposalReviewPage (D-047 portal response) — real database', () => {
+    let submitClientProposalResponse: (typeof import('./service'))['submitClientProposalResponse'];
+    let getClientProposalReviewPage: (typeof import('./service'))['getClientProposalReviewPage'];
+
+    const localUserIds: string[] = [];
+    const localClientIds: string[] = [];
+    const localProfileIds: string[] = [];
+    const localProposalIds: string[] = [];
+
+    let clientA: AuthenticatedUser;
+    let clientB: AuthenticatedUser;
+    let clientP: AuthenticatedUser;
+    let profileIdA: string;
+    let ownedClientIdA: string;
+    let ownedClientIdB: string;
+    let ownedClientIdP: string;
+    const SESSION_A = `portal-session-${randomUUID()}`;
+
+    // Content markers — asserted absent from AuditLog rows and used as
+    // per-card ordering evidence in the pagination checks.
+    const CONTENT_ACCEPT = `accept-content-${randomUUID()}`;
+    const CONTENT_B = `client-b-content-${randomUUID()}`;
+
+    const targets: Record<string, { proposalId: string; versionId: string }> = {};
+
+    async function seedCurrentVisible(
+      key: string,
+      clientId: string,
+      content: string,
+      createdAt?: Date,
+    ): Promise<{ proposalId: string; versionId: string }> {
+      const proposalId = randomUUID();
+      await prisma!.proposal.create({
+        data: { id: proposalId, clientId, ...(createdAt ? { createdAt } : {}) },
+      });
+      localProposalIds.push(proposalId);
+      const versionId = randomUUID();
+      await prisma!.proposalVersion.create({
+        data: {
+          id: versionId,
+          proposalId,
+          versionNumber: 1,
+          content,
+          createdByUserId: tcActor.id,
+          clientVisibleAt: new Date(),
+        },
+      });
+      const t = { proposalId, versionId };
+      targets[key] = t;
+      return t;
+    }
+
+    async function respondInput(
+      actor: AuthenticatedUser,
+      versionId: string,
+      responseType: 'ACCEPT' | 'DECLINE' | 'REQUEST_CHANGES',
+    ) {
+      return {
+        actor,
+        sessionId: actor === clientA ? SESSION_A : `portal-session-${randomUUID()}`,
+        proposalVersionId: versionId,
+        responseType,
+        acknowledged: true as const,
+      };
+    }
+
+    beforeAll(async () => {
+      ({ submitClientProposalResponse, getClientProposalReviewPage } = await import('./service'));
+
+      // Two Client + ClientProfile + CLIENT User pairs, plus a third client
+      // dedicated to the pagination ordering checks.
+      const mkPortalClient = async (
+        label: string,
+      ): Promise<{ actor: AuthenticatedUser; clientId: string; profileId: string }> => {
+        const userId = randomUUID();
+        const clientId = randomUUID();
+        const profileId = randomUUID();
+        const email = `proposals-portal-resp-${randomUUID()}@example.test`;
+        await prisma!.user.create({
+          data: { id: userId, name: `Portal ${label}`, email, role: 'CLIENT', isActive: true },
+        });
+        await prisma!.client.create({ data: { id: clientId, fullName: `Portal ${label}`, email } });
+        await prisma!.clientProfile.create({ data: { id: profileId, userId, clientId } });
+        localUserIds.push(userId);
+        localClientIds.push(clientId);
+        localProfileIds.push(profileId);
+        return {
+          actor: { id: userId, email, name: `Portal ${label}`, role: 'CLIENT' },
+          clientId,
+          profileId,
+        };
+      };
+
+      const a = await mkPortalClient('A');
+      const b = await mkPortalClient('B');
+      const p = await mkPortalClient('P');
+      clientA = a.actor;
+      profileIdA = a.profileId;
+      ownedClientIdA = a.clientId;
+      clientB = b.actor;
+      ownedClientIdB = b.clientId;
+      clientP = p.actor;
+      ownedClientIdP = p.clientId;
+
+      // The assigned TC — required only for the TRAVEL_CONSULTANT branch of
+      // the cross-feature Booking-eligibility regression below.
+      await assignClientToStaff(ownedClientIdA, tcActor.id);
+
+      // Client A response targets.
+      await seedCurrentVisible('accept', ownedClientIdA, CONTENT_ACCEPT);
+      await seedCurrentVisible('eligibility', ownedClientIdA, `elig-${randomUUID()}`);
+      await seedCurrentVisible('already', ownedClientIdA, `already-${randomUUID()}`);
+      await seedCurrentVisible('concurrent', ownedClientIdA, `concurrent-${randomUUID()}`);
+      await seedCurrentVisible('rollback', ownedClientIdA, `rollback-${randomUUID()}`);
+
+      // Client A: a superseded v1 (target -> SUPERSEDED) with a live v2.
+      {
+        const proposalId = randomUUID();
+        await prisma!.proposal.create({ data: { id: proposalId, clientId: ownedClientIdA } });
+        localProposalIds.push(proposalId);
+        const v1 = randomUUID();
+        const v2 = randomUUID();
+        const now = new Date();
+        await prisma!.proposalVersion.create({
+          data: {
+            id: v1,
+            proposalId,
+            versionNumber: 1,
+            content: `sup-v1-${randomUUID()}`,
+            createdByUserId: tcActor.id,
+            clientVisibleAt: new Date(now.getTime() - 2000),
+            supersededAt: now,
+          },
+        });
+        await prisma!.proposalVersion.create({
+          data: {
+            id: v2,
+            proposalId,
+            versionNumber: 2,
+            content: `sup-v2-${randomUUID()}`,
+            createdByUserId: tcActor.id,
+            clientVisibleAt: now,
+          },
+        });
+        targets.superseded = { proposalId, versionId: v1 };
+      }
+
+      // Client A: a never-published draft v1 (target -> NOT_CURRENT) with a
+      // live v2.
+      {
+        const proposalId = randomUUID();
+        await prisma!.proposal.create({ data: { id: proposalId, clientId: ownedClientIdA } });
+        localProposalIds.push(proposalId);
+        const v1 = randomUUID();
+        const v2 = randomUUID();
+        await prisma!.proposalVersion.create({
+          data: {
+            id: v1,
+            proposalId,
+            versionNumber: 1,
+            content: `draft-v1-${randomUUID()}`,
+            createdByUserId: tcActor.id,
+            clientVisibleAt: null,
+          },
+        });
+        await prisma!.proposalVersion.create({
+          data: {
+            id: v2,
+            proposalId,
+            versionNumber: 2,
+            content: `draft-v2-${randomUUID()}`,
+            createdByUserId: tcActor.id,
+            clientVisibleAt: new Date(),
+          },
+        });
+        targets.notCurrent = { proposalId, versionId: v1 };
+      }
+
+      // Client B: one current-visible proposal client A must never touch.
+      await seedCurrentVisible('clientB', ownedClientIdB, CONTENT_B);
+
+      // Client P: 12 current-visible proposals with staggered createdAt, so
+      // the deterministic `Proposal.createdAt desc, Proposal.id asc` order
+      // is observable via each card's `content` marker (index 0 = newest).
+      const base = Date.now();
+      for (let i = 0; i < 12; i += 1) {
+        await seedCurrentVisible(
+          `page-${i}`,
+          ownedClientIdP,
+          `PAGE-CONTENT-${String(i).padStart(2, '0')}`,
+          new Date(base - i * 60_000),
+        );
+      }
+      // Client P: 2 non-renderable versions (one draft-only, one
+      // superseded) that both the count and the card query must ignore
+      // identically.
+      {
+        const proposalId = randomUUID();
+        await prisma!.proposal.create({
+          data: { id: proposalId, clientId: ownedClientIdP, createdAt: new Date(base + 60_000) },
+        });
+        localProposalIds.push(proposalId);
+        await prisma!.proposalVersion.create({
+          data: {
+            id: randomUUID(),
+            proposalId,
+            versionNumber: 1,
+            content: `page-draft-${randomUUID()}`,
+            createdByUserId: tcActor.id,
+            clientVisibleAt: null,
+          },
+        });
+      }
+      {
+        const proposalId = randomUUID();
+        await prisma!.proposal.create({
+          data: { id: proposalId, clientId: ownedClientIdP, createdAt: new Date(base + 120_000) },
+        });
+        localProposalIds.push(proposalId);
+        const now = new Date();
+        await prisma!.proposalVersion.create({
+          data: {
+            id: randomUUID(),
+            proposalId,
+            versionNumber: 1,
+            content: `page-sup-${randomUUID()}`,
+            createdByUserId: tcActor.id,
+            clientVisibleAt: new Date(now.getTime() - 1000),
+            supersededAt: now,
+          },
+        });
+      }
+    }, 60000);
+
+    afterAll(async () => {
+      if (!prisma) return;
+      await prisma.proposalAcceptance.deleteMany({
+        where: { proposalVersion: { proposalId: { in: localProposalIds } } },
+      });
+      await prisma.auditLog.deleteMany({ where: { actorId: { in: localUserIds } } });
+      await prisma.proposalVersion.deleteMany({ where: { proposalId: { in: localProposalIds } } });
+      await prisma.proposal.deleteMany({ where: { id: { in: localProposalIds } } });
+      await prisma.staffAssignment.deleteMany({ where: { clientId: { in: localClientIds } } });
+      await prisma.clientProfile.deleteMany({ where: { id: { in: localProfileIds } } });
+      await prisma.client.deleteMany({ where: { id: { in: localClientIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }, 60000);
+
+    it('records client A’s ACCEPT on their own current-visible version as a portal-path ProposalAcceptance with an atomic, content/attribution/acknowledgement-free audit row', async () => {
+      const { versionId } = targets.accept!;
+
+      const result = await submitClientProposalResponse(
+        await respondInput(clientA, versionId, 'ACCEPT'),
+      );
+      expect(result).toEqual({ responseType: 'ACCEPT' });
+
+      const row = await prisma!.proposalAcceptance.findUniqueOrThrow({
+        where: { proposalVersionId: versionId },
+      });
+      // Portal-path attribution written; external/staff fields NULL (so the
+      // hand-written proposal_acceptance_response_path CHECK's portal branch
+      // is the one that passed).
+      expect(row.responseType).toBe('ACCEPT');
+      expect(row.respondingClientProfileId).toBe(profileIdA);
+      expect(row.respondingSessionIdAtResponse).toBe(SESSION_A);
+      expect(row.recordedByStaffUserId).toBeNull();
+      expect(row.responseMethod).toBeNull();
+      expect(row.evidenceReference).toBeNull();
+      expect(row.respondedAt).toBeInstanceOf(Date);
+
+      // Atomic audit — exactly one PROPOSAL_RESPONSE_RECORDED row committed
+      // in the same transaction.
+      const audits = await prisma!.auditLog.findMany({
+        where: {
+          entityType: 'ProposalVersion',
+          entityId: versionId,
+          action: 'PROPOSAL_RESPONSE_RECORDED',
+        },
+      });
+      expect(audits).toHaveLength(1);
+      const audit = audits[0]!;
+      expect(audit.actorId).toBe(clientA.id);
+      expect(audit.beforeState).toBeNull();
+      const after = audit.afterState as Record<string, unknown>;
+      expect(Object.keys(after).sort()).toEqual(['acceptanceId', 'respondedAt', 'responseType']);
+      expect(after.acceptanceId).toBe(row.id);
+      expect(after.responseType).toBe('ACCEPT');
+
+      // The protected AuditLog row legitimately retains entityId =
+      // ProposalVersion.id and the snapshot acceptanceId, but never
+      // proposal content, the portal-attribution / staff fields, or the
+      // acknowledgement.
+      const auditJson = JSON.stringify(audit);
+      expect(auditJson).not.toContain(CONTENT_ACCEPT);
+      expect(auditJson).not.toContain(profileIdA);
+      expect(auditJson).not.toContain(SESSION_A);
+      expect(auditJson.toLowerCase()).not.toContain('acknowledg');
+    });
+
+    it('makes the portal ACCEPT immediately visible to the real, unmodified Booking-eligibility check (findEligibleProposalVersionForActor)', async () => {
+      const { versionId } = targets.eligibility!;
+
+      const before = await findEligibleProposalVersionForActor(
+        prisma!,
+        { id: adminActor.id, role: 'ADMIN_MANAGER' },
+        versionId,
+      );
+      expect(before?.hasAcceptedAcceptance).toBe(false);
+
+      await submitClientProposalResponse(await respondInput(clientA, versionId, 'ACCEPT'));
+
+      const after = await findEligibleProposalVersionForActor(
+        prisma!,
+        { id: adminActor.id, role: 'ADMIN_MANAGER' },
+        versionId,
+      );
+      expect(after?.hasAcceptedAcceptance).toBe(true);
+      expect(after?.clientId).toBe(ownedClientIdA);
+
+      const tcView = await findEligibleProposalVersionForActor(
+        prisma!,
+        { id: tcActor.id, role: 'TRAVEL_CONSULTANT' },
+        versionId,
+      );
+      expect(tcView?.hasAcceptedAcceptance).toBe(true);
+    });
+
+    it('rejects a second response — even after the version is superseded — with PROPOSAL_RESPONSE_ALREADY_RECORDED, never overwriting the original and never PROPOSAL_VERSION_SUPERSEDED', async () => {
+      const { proposalId, versionId } = targets.already!;
+
+      const first = await submitClientProposalResponse(
+        await respondInput(clientA, versionId, 'DECLINE'),
+      );
+      expect(first).toEqual({ responseType: 'DECLINE' });
+
+      // The consultant supersedes v1 with a live v2 (direct write).
+      const now = new Date();
+      await prisma!.proposalVersion.update({
+        where: { id: versionId },
+        data: { supersededAt: now },
+      });
+      await prisma!.proposalVersion.create({
+        data: {
+          id: randomUUID(),
+          proposalId,
+          versionNumber: 2,
+          content: `already-v2-${randomUUID()}`,
+          createdByUserId: tcActor.id,
+          clientVisibleAt: now,
+        },
+      });
+
+      await expect(
+        submitClientProposalResponse(await respondInput(clientA, versionId, 'ACCEPT')),
+      ).rejects.toMatchObject({
+        name: 'ProposalError',
+        code: 'PROPOSAL_RESPONSE_ALREADY_RECORDED',
+        status: 409,
+      });
+
+      // Original response is intact; exactly one acceptance and one audit
+      // row for the version.
+      const row = await prisma!.proposalAcceptance.findUniqueOrThrow({
+        where: { proposalVersionId: versionId },
+      });
+      expect(row.responseType).toBe('DECLINE');
+      expect(
+        await prisma!.proposalAcceptance.count({ where: { proposalVersionId: versionId } }),
+      ).toBe(1);
+      expect(
+        await prisma!.auditLog.count({
+          where: {
+            entityType: 'ProposalVersion',
+            entityId: versionId,
+            action: 'PROPOSAL_RESPONSE_RECORDED',
+          },
+        }),
+      ).toBe(1);
+    });
+
+    it('resolves a genuinely concurrent double-submit to exactly one ProposalAcceptance row plus exactly one PROPOSAL_RESPONSE_ALREADY_RECORDED', async () => {
+      const { versionId } = targets.concurrent!;
+
+      const [r1, r2] = await Promise.allSettled([
+        submitClientProposalResponse(await respondInput(clientA, versionId, 'ACCEPT')),
+        submitClientProposalResponse(await respondInput(clientA, versionId, 'ACCEPT')),
+      ]);
+
+      const fulfilled = [r1, r2].filter((r) => r.status === 'fulfilled');
+      const rejected = [r1, r2].filter((r) => r.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((fulfilled[0] as PromiseFulfilledResult<{ responseType: string }>).value).toEqual({
+        responseType: 'ACCEPT',
+      });
+      expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+        name: 'ProposalError',
+        code: 'PROPOSAL_RESPONSE_ALREADY_RECORDED',
+      });
+
+      expect(
+        await prisma!.proposalAcceptance.count({ where: { proposalVersionId: versionId } }),
+      ).toBe(1);
+      expect(
+        await prisma!.auditLog.count({
+          where: {
+            entityType: 'ProposalVersion',
+            entityId: versionId,
+            action: 'PROPOSAL_RESPONSE_RECORDED',
+          },
+        }),
+      ).toBe(1);
+    });
+
+    it('gives client A one identical generic CLIENT_FORBIDDEN for client B’s version and for a non-existent version — no acceptance, no audit, no confirmation that a target exists', async () => {
+      const { versionId: bVersionId } = targets.clientB!;
+      const missingVersionId = randomUUID();
+
+      await expect(
+        submitClientProposalResponse(await respondInput(clientA, bVersionId, 'ACCEPT')),
+      ).rejects.toMatchObject({ name: 'ProposalError', code: 'CLIENT_FORBIDDEN' });
+
+      await expect(
+        submitClientProposalResponse(await respondInput(clientA, missingVersionId, 'ACCEPT')),
+      ).rejects.toMatchObject({ name: 'ProposalError', code: 'CLIENT_FORBIDDEN' });
+
+      // Symmetric: client B can never respond to one of client A's versions
+      // either — the same generic CLIENT_FORBIDDEN (ownership fails before
+      // any existing-response check).
+      await expect(
+        submitClientProposalResponse(
+          await respondInput(clientB, targets.accept!.versionId, 'ACCEPT'),
+        ),
+      ).rejects.toMatchObject({ name: 'ProposalError', code: 'CLIENT_FORBIDDEN' });
+
+      expect(
+        await prisma!.proposalAcceptance.count({ where: { proposalVersionId: bVersionId } }),
+      ).toBe(0);
+      expect(
+        await prisma!.auditLog.count({
+          where: {
+            entityType: 'ProposalVersion',
+            entityId: { in: [bVersionId, missingVersionId] },
+          },
+        }),
+      ).toBe(0);
+
+      // The read side is isolated too: A cannot even read B's review page,
+      // and B's content never appears in A's own review page.
+      await expect(getClientProposalReviewPage(clientA, ownedClientIdB, 1)).rejects.toMatchObject({
+        name: 'ProposalError',
+        code: 'CLIENT_FORBIDDEN',
+      });
+
+      const aPage = await getClientProposalReviewPage(clientA, ownedClientIdA, 1);
+      expect(aPage.kind).toBe('page');
+      if (aPage.kind === 'page') {
+        expect(JSON.stringify(aPage.render)).not.toContain(CONTENT_B);
+      }
+    });
+
+    it('rejects a response against a superseded version with PROPOSAL_VERSION_SUPERSEDED and against a non-current draft version with PROPOSAL_VERSION_NOT_CURRENT — neither writes a row or audit', async () => {
+      const sup = targets.superseded!;
+      const nc = targets.notCurrent!;
+
+      await expect(
+        submitClientProposalResponse(await respondInput(clientA, sup.versionId, 'ACCEPT')),
+      ).rejects.toMatchObject({
+        name: 'ProposalError',
+        code: 'PROPOSAL_VERSION_SUPERSEDED',
+        status: 409,
+      });
+
+      await expect(
+        submitClientProposalResponse(await respondInput(clientA, nc.versionId, 'ACCEPT')),
+      ).rejects.toMatchObject({
+        name: 'ProposalError',
+        code: 'PROPOSAL_VERSION_NOT_CURRENT',
+        status: 409,
+      });
+
+      for (const versionId of [sup.versionId, nc.versionId]) {
+        expect(
+          await prisma!.proposalAcceptance.count({ where: { proposalVersionId: versionId } }),
+        ).toBe(0);
+        expect(
+          await prisma!.auditLog.count({
+            where: { entityType: 'ProposalVersion', entityId: versionId },
+          }),
+        ).toBe(0);
+      }
+    });
+
+    it('rolls the ProposalAcceptance back when the in-transaction audit step fails — no acceptance row and no audit row survive', async () => {
+      const { versionId } = targets.rollback!;
+      const db = prisma!;
+
+      // Test-only, finally-restored interception: runs the REAL transaction
+      // callback (so the acceptance + audit inserts really execute inside
+      // the transaction), then throws before commit so PostgreSQL rolls the
+      // whole unit back. Never mocks an authorization or lifecycle outcome.
+      const originalTransaction = db.$transaction;
+      const patched = (arg: unknown, options: unknown) => {
+        const call = originalTransaction as unknown as (a: unknown, o: unknown) => unknown;
+        if (typeof arg !== 'function') {
+          return call.call(db, arg, options);
+        }
+        return call.call(
+          db,
+          (tx: unknown) =>
+            Promise.resolve((arg as (t: unknown) => unknown)(tx)).then(() => {
+              throw new Error('forced-rollback-for-test');
+            }),
+          options,
+        );
+      };
+      (db as unknown as { $transaction: unknown }).$transaction = patched;
+
+      try {
+        await expect(
+          submitClientProposalResponse(await respondInput(clientA, versionId, 'ACCEPT')),
+        ).rejects.toThrow('forced-rollback-for-test');
+      } finally {
+        (db as unknown as { $transaction: unknown }).$transaction = originalTransaction;
+      }
+
+      expect(
+        await db.proposalAcceptance.findUnique({ where: { proposalVersionId: versionId } }),
+      ).toBeNull();
+      expect(
+        await prisma!.auditLog.count({
+          where: {
+            entityType: 'ProposalVersion',
+            entityId: versionId,
+            action: 'PROPOSAL_RESPONSE_RECORDED',
+          },
+        }),
+      ).toBe(0);
+
+      // And the write path still works afterward (the interception was
+      // fully restored).
+      const ok = await submitClientProposalResponse(
+        await respondInput(clientA, versionId, 'REQUEST_CHANGES'),
+      );
+      expect(ok).toEqual({ responseType: 'REQUEST_CHANGES' });
+    });
+
+    it('paginates client P’s 12 current-visible proposals into disjoint pages of 10 + 2 in Proposal.createdAt desc, Proposal.id asc order, ignoring draft-only and superseded versions in both the count and the card query', async () => {
+      const page1 = await getClientProposalReviewPage(clientP, ownedClientIdP, 1);
+      expect(page1.kind).toBe('page');
+      if (page1.kind !== 'page') return;
+      expect(page1.render.cards).toHaveLength(10);
+      expect(page1.render.hasPrevious).toBe(false);
+      expect(page1.render.hasNext).toBe(true);
+
+      const page2 = await getClientProposalReviewPage(clientP, ownedClientIdP, 2);
+      expect(page2.kind).toBe('page');
+      if (page2.kind !== 'page') return;
+      expect(page2.render.cards).toHaveLength(2);
+      expect(page2.render.hasPrevious).toBe(true);
+      expect(page2.render.hasNext).toBe(false);
+
+      const contentOf = (cards: typeof page1.render.cards) =>
+        cards.map((c) => (c.content.available ? c.content.text : '(unavailable)'));
+      const p1 = contentOf(page1.render.cards);
+      const p2 = contentOf(page2.render.cards);
+
+      // Deterministic newest-first order (createdAt desc), disjoint, and
+      // together exactly the 12 current-visible proposals — the two
+      // non-renderable versions are excluded identically by the count and
+      // the card query.
+      expect(p1).toEqual([
+        'PAGE-CONTENT-00',
+        'PAGE-CONTENT-01',
+        'PAGE-CONTENT-02',
+        'PAGE-CONTENT-03',
+        'PAGE-CONTENT-04',
+        'PAGE-CONTENT-05',
+        'PAGE-CONTENT-06',
+        'PAGE-CONTENT-07',
+        'PAGE-CONTENT-08',
+        'PAGE-CONTENT-09',
+      ]);
+      expect(p2).toEqual(['PAGE-CONTENT-10', 'PAGE-CONTENT-11']);
+      expect(new Set([...p1, ...p2]).size).toBe(12);
+    });
+
+    it('redirects an out-of-range page (page 3 of 2, and an astronomically large page) to /client/my-journey without a large-offset scan', async () => {
+      await expect(getClientProposalReviewPage(clientP, ownedClientIdP, 3)).resolves.toEqual({
+        kind: 'redirect',
+      });
+      await expect(
+        getClientProposalReviewPage(clientP, ownedClientIdP, Number.MAX_SAFE_INTEGER),
+      ).resolves.toEqual({ kind: 'redirect' });
+    });
+  });
 });

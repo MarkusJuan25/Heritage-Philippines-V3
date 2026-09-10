@@ -15,7 +15,7 @@ vi.mock('next/headers', () => ({
   headers: vi.fn(async () => new Headers()),
 }));
 
-import { withRole, type AuthenticatedUser } from './guards';
+import { getCurrentSession, getCurrentUser, withRole, type AuthenticatedUser } from './guards';
 
 const CLIENT_USER = {
   id: 'user-1',
@@ -148,5 +148,113 @@ describe('withRole', () => {
       expect(typeof body.error.code).toBe('string');
       expect(typeof body.error.message).toBe('string');
     }
+  });
+});
+
+describe('getCurrentSession (D-047 §8)', () => {
+  beforeEach(() => {
+    getSessionMock.mockReset();
+  });
+
+  // A full Better Auth session row — every field except `id` must be absent
+  // from what getCurrentSession returns.
+  const SESSION = {
+    id: 'session-abc123',
+    token: 'tok_secret_must_never_leak',
+    userId: 'user-1',
+    expiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    createdAt: new Date('2026-09-09T00:00:00.000Z'),
+    updatedAt: new Date('2026-09-09T00:00:00.000Z'),
+    ipAddress: '203.0.113.7',
+    userAgent: 'stage-2-test-agent',
+  };
+
+  it('returns null when there is no session at all', async () => {
+    getSessionMock.mockResolvedValue(null);
+    expect(await getCurrentSession()).toBeNull();
+  });
+
+  it('returns null when a session exists but carries no user', async () => {
+    getSessionMock.mockResolvedValue({ session: SESSION });
+    expect(await getCurrentSession()).toBeNull();
+  });
+
+  it('fails closed (null) when session.id is missing', async () => {
+    getSessionMock.mockResolvedValue({ user: CLIENT_USER, session: { token: 'tok_x' } });
+    expect(await getCurrentSession()).toBeNull();
+  });
+
+  it('fails closed (null) when session.id is an empty string', async () => {
+    getSessionMock.mockResolvedValue({ user: CLIENT_USER, session: { ...SESSION, id: '' } });
+    expect(await getCurrentSession()).toBeNull();
+  });
+
+  it('returns the exact AuthenticatedUser shape plus the live Session.id when authenticated', async () => {
+    getSessionMock.mockResolvedValue({ user: CLIENT_USER, session: SESSION });
+
+    const result = await getCurrentSession();
+
+    expect(result).toEqual({ user: CLIENT_USER, sessionId: 'session-abc123' });
+  });
+
+  it('exposes only { user, sessionId } — never Session.token or any other Better Auth session field', async () => {
+    getSessionMock.mockResolvedValue({ user: CLIENT_USER, session: SESSION });
+
+    const result = await getCurrentSession();
+
+    expect(Object.keys(result!).sort()).toEqual(['sessionId', 'user']);
+    expect(Object.keys(result!.user).sort()).toEqual(['email', 'id', 'name', 'role']);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('tok_secret_must_never_leak');
+    expect(serialized).not.toContain('203.0.113.7');
+    expect(serialized).not.toContain('stage-2-test-agent');
+    expect(serialized).not.toContain('expiresAt');
+  });
+
+  it('applies the same role normalization as getCurrentUser — the returned user is identical for the same session', async () => {
+    getSessionMock.mockResolvedValue({ user: ADMIN_USER, session: SESSION });
+    const fromSession = await getCurrentSession();
+
+    getSessionMock.mockResolvedValue({ user: ADMIN_USER, session: SESSION });
+    const fromUser = await getCurrentUser();
+
+    expect(fromSession?.user).toEqual(ADMIN_USER);
+    expect(fromSession?.user).toEqual(fromUser);
+  });
+
+  it('performs exactly one auth.api.getSession lookup per invocation', async () => {
+    getSessionMock.mockResolvedValue({ user: CLIENT_USER, session: SESSION });
+
+    await getCurrentSession();
+
+    expect(getSessionMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getCurrentUser (unchanged public contract)', () => {
+  beforeEach(() => {
+    getSessionMock.mockReset();
+  });
+
+  it('returns null when unauthenticated', async () => {
+    getSessionMock.mockResolvedValue(null);
+    expect(await getCurrentUser()).toBeNull();
+  });
+
+  it('returns exactly { id, email, name, role } and nothing else for an authenticated user', async () => {
+    getSessionMock.mockResolvedValue({ user: CLIENT_USER, session: { id: 'session-abc123' } });
+
+    const user = await getCurrentUser();
+
+    expect(user).toEqual(CLIENT_USER);
+    expect(Object.keys(user!).sort()).toEqual(['email', 'id', 'name', 'role']);
+  });
+
+  it('still performs exactly one auth.api.getSession lookup per invocation', async () => {
+    getSessionMock.mockResolvedValue({ user: CLIENT_USER, session: { id: 'session-abc123' } });
+
+    await getCurrentUser();
+
+    expect(getSessionMock).toHaveBeenCalledTimes(1);
   });
 });

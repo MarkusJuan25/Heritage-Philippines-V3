@@ -159,3 +159,49 @@ export const proposalVersionIdParamSchema = z
   })
   .strict();
 export type ProposalVersionIdParam = z.infer<typeof proposalVersionIdParamSchema>;
+
+// --- Client proposal-review page query (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-047 §5, §17.1) ---
+// The `/client/my-journey` proposal-review route accepts one optional URL
+// query, `page=N`, that carries NO database identifier. This is the strict
+// parser D-047 §5 mandates for it. Unlike `listProposalsQuerySchema` above —
+// a staff-only endpoint that uses `z.coerce.number()` — this parser
+// deliberately never performs an unsafe JavaScript `Number()` / `parseInt`
+// conversion on the caller's value first: a hostile or fat-fingered `?page=`
+// must never be able to drive a large or imprecise database offset (D-047 §5
+// "Numerical validation"). It is a plain exported function rather than a Zod
+// schema because the lexical-then-BigInt check does not map cleanly onto one
+// `z` chain, and because every caller wants the same "normalize to page 1,
+// never echo the rejected value" outcome rather than a thrown `ZodError`.
+//
+// A value is accepted ONLY when it is a single string in the canonical
+// positive-decimal form `/^[1-9][0-9]*$/` that also represents a positive
+// safe integer (`<= Number.MAX_SAFE_INTEGER`). A leading `+`/`-` sign,
+// surrounding or embedded whitespace (including a trailing newline), a
+// decimal point, exponent notation, `0`, a negative value, an empty value, a
+// leading-zero form, a non-string (a repeated `?page=` arrives as an array),
+// and any value above `Number.MAX_SAFE_INTEGER` — including an arbitrarily
+// long digit string — all normalize to `1`. The rejected input is never
+// returned, logged, or echoed.
+export function parseProposalReviewPageParam(raw: string | string[] | undefined): number {
+  if (typeof raw !== 'string') {
+    return 1;
+  }
+  // Canonical positive-decimal form only. The second test closes the single
+  // gap in `$` (which, without the `m` flag, still tolerates one trailing
+  // line terminator): any non-digit character anywhere is a rejection.
+  if (!/^[1-9][0-9]*$/.test(raw) || /[^0-9]/.test(raw)) {
+    return 1;
+  }
+  // Representable as a positive safe integer? Decide WITHOUT an unsafe
+  // `Number(raw)` first: `Number.MAX_SAFE_INTEGER` (9007199254740991) has 16
+  // digits, so any 17-plus-digit string is out of range by length alone, and
+  // `BigInt` settles every remaining 16-digit case exactly (e.g.
+  // `9999999999999999` still exceeds the bound).
+  if (raw.length > 16 || BigInt(raw) > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return 1;
+  }
+  // Proven `>= 1` (regex) and `<= Number.MAX_SAFE_INTEGER` (checks above):
+  // this conversion is now exact.
+  return Number(raw);
+}

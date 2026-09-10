@@ -843,9 +843,11 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
         await expect(clientPage.getByText(client.nameCanary, { exact: true })).toBeVisible();
         await expect(clientPage.getByText(client.email, { exact: true })).toBeVisible();
 
-        // Navigation — ten labels verbatim, Home / Overview current (not a
-        // link), the nine later-phase items inert with a visible
-        // "Coming soon" and no href.
+        // Navigation — ten labels verbatim. On `/client`, "Home / Overview" is
+        // the current item (a non-link <span aria-current="page">) and
+        // "My Journey" (D-047 §2) is the one real in-app <Link>; the remaining
+        // eight later-phase items are inert with a visible "Coming soon" and no
+        // href.
         const navItems = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .locator('li');
@@ -860,10 +862,14 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
           .getByText('Home / Overview', { exact: true });
         await expect(current).toHaveAttribute('aria-current', 'page');
         expect(await current.evaluate((node) => node.tagName)).toBe('SPAN');
-        await expect(
-          clientPage.getByRole('navigation', { name: 'Client portal' }).getByRole('link'),
-        ).toHaveCount(0);
-        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(9);
+        // Exactly one real navigation link: "My Journey" -> /client/my-journey.
+        const navLinks = clientPage
+          .getByRole('navigation', { name: 'Client portal' })
+          .getByRole('link');
+        await expect(navLinks).toHaveCount(1);
+        await expect(navLinks).toHaveAccessibleName('My Journey');
+        await expect(navLinks).toHaveAttribute('href', '/client/my-journey');
+        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(8);
 
         // Consultant card + support-guidance line (the converting TC is
         // auto-assigned during Lead -> Client conversion).
