@@ -747,3 +747,191 @@ export async function findClientProposalPreview(
     responseType: row.acceptance?.responseType ?? null,
   }));
 }
+
+// --- Client proposal-review page reads (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-047 §5) ---
+// The two server-only reads backing the paginated `/client/my-journey`
+// proposal-review route: a bounded COUNT of the authenticated client's
+// current-client-visible proposal versions (D-047 §5's "existing-page check
+// before any offset"), and the paginated CARD read for one confirmed page.
+// Both reuse `clientVisibleVersionBaseWhere` unchanged, so the count and the
+// card query apply byte-identical ownership and current-visible predicates
+// (D-047 §15/§17.1). Like the D-040 §4 reads above: no assignment filter is
+// composed here (D-047 scopes strictly by the server-resolved owned
+// `clientId`, and authorization is the caller's `assertClientPortalAccess`
+// gate in features/proposals/service.ts, not a query filter), no
+// transaction, no write, no audit. Unlike the D-040 preview read, the card
+// read DOES select `content` — it is the review target the authenticated
+// owner is entitled to see (D-047 §4) — plus `id`/`proposalId`, which the
+// service keeps in a server-only companion model and never places in the
+// render DTO.
+
+// D-047 §5's fixed page size for `/client/my-journey`: 10 cards per page.
+// The card read fetches `CLIENT_PROPOSAL_REVIEW_PAGE_SIZE + 1` rows for a
+// confirmed page and the service renders at most
+// `CLIENT_PROPOSAL_REVIEW_PAGE_SIZE`, using the extra row only to decide
+// whether a Next-page link is shown.
+export const CLIENT_PROPOSAL_REVIEW_PAGE_SIZE = 10;
+
+/**
+ * The count of current-client-visible ProposalVersions for one Client
+ * (`clientVisibleAt` set AND `supersededAt` null, via the shared
+ * `clientVisibleVersionBaseWhere` predicate). D-047 §5's existing-page
+ * check: the service derives the last existing page (`ceil(count / 10)`)
+ * from this and redirects an out-of-range `page` > 1 BEFORE it computes or
+ * issues any offset query. Scoped by `clientId` alone; no acceptance,
+ * booking, or assignment clause.
+ */
+export async function countCurrentClientVisibleProposalVersions(
+  db: Prisma.TransactionClient,
+  clientId: string,
+): Promise<number> {
+  return db.proposalVersion.count({ where: clientVisibleVersionBaseWhere(clientId) });
+}
+
+export type ClientProposalReviewRow = {
+  proposalVersionId: string;
+  proposalId: string;
+  versionNumber: number;
+  content: string | null;
+  clientVisibleAt: Date;
+  acceptance: { responseType: ProposalResponseType; respondedAt: Date } | null;
+};
+
+/**
+ * One page of current-client-visible proposal-review rows for one Client,
+ * in D-047 §5's deterministic order — `Proposal.createdAt` descending, then
+ * `Proposal.id` ascending as the server-only tie-breaker (`proposal.id` is
+ * used only for ordering, never returned). Applies the identical
+ * `clientVisibleVersionBaseWhere` predicate the count uses. `skip`/`take`
+ * are supplied by the service, which passes
+ * `take = CLIENT_PROPOSAL_REVIEW_PAGE_SIZE + 1` and only ever computes a
+ * `skip` for a page it has already confirmed exists (D-047 §5). Selects
+ * `content` (the review target — D-047 §4) and `id`/`proposalId` (for the
+ * service's server-only companion model and Stage 5 action binding); a
+ * legacy `content: null` row is returned unchanged, its "Content
+ * unavailable" known state a rendering decision for a later stage.
+ * `clientVisibleAt` is typed `Date` (never `null`) because the predicate
+ * requires `clientVisibleAt: { not: null }`.
+ */
+export async function findClientProposalReviewPage(
+  db: Prisma.TransactionClient,
+  clientId: string,
+  params: { skip: number; take: number },
+): Promise<ClientProposalReviewRow[]> {
+  const rows = await db.proposalVersion.findMany({
+    where: clientVisibleVersionBaseWhere(clientId),
+    orderBy: [{ proposal: { createdAt: 'desc' } }, { proposal: { id: 'asc' } }],
+    skip: params.skip,
+    take: params.take,
+    select: {
+      id: true,
+      proposalId: true,
+      versionNumber: true,
+      content: true,
+      clientVisibleAt: true,
+      acceptance: { select: { responseType: true, respondedAt: true } },
+    },
+  });
+  return rows.map((row) => ({
+    proposalVersionId: row.id,
+    proposalId: row.proposalId,
+    versionNumber: row.versionNumber,
+    content: row.content,
+    clientVisibleAt: row.clientVisibleAt as Date,
+    acceptance: row.acceptance
+      ? { responseType: row.acceptance.responseType, respondedAt: row.acceptance.respondedAt }
+      : null,
+  }));
+}
+
+// --- Client proposal-response write path (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-047 §7) ---
+// Two narrow primitives the portal-response service composes, in D-047 §7's
+// exact order, inside one `runSerializableWithRetry` transaction. Neither
+// decides an eligibility, authorization, ordering, or conflict outcome —
+// every D-047 §7 decision (ownership match, existing-response, current-
+// visible, P2002 mapping, atomic audit) is the service's, mirroring this
+// file's existing publish/external-response split. `content` is never
+// selected or returned here (§11).
+
+export type ClientProposalVersionOwnership = {
+  proposalVersionId: string;
+  proposalId: string;
+  clientId: string;
+  supersededAt: Date | null;
+};
+
+/**
+ * The captured target `ProposalVersion` with its owning `Proposal.clientId`
+ * and `supersededAt` (D-047 §7 step 4c/d, and step 6's
+ * `PROPOSAL_VERSION_SUPERSEDED` vs `PROPOSAL_VERSION_NOT_CURRENT` split).
+ * Deliberately unscoped by any assignment/actor filter: the caller
+ * re-validates `clientId` against the server-resolved owned `clientId` and
+ * turns a `null` result and an ownership mismatch into the *same* generic
+ * `FORBIDDEN` outcome (§7 step 4 anti-enumeration). Selects only the two
+ * ids and `supersededAt` — never `content`, `createdByUserId`, or any
+ * acceptance/attribution field. `findUnique` on the `@id` column.
+ */
+export async function findProposalVersionOwnershipContext(
+  db: Prisma.TransactionClient,
+  proposalVersionId: string,
+): Promise<ClientProposalVersionOwnership | null> {
+  const row = await db.proposalVersion.findUnique({
+    where: { id: proposalVersionId },
+    select: {
+      id: true,
+      proposalId: true,
+      supersededAt: true,
+      proposal: { select: { clientId: true } },
+    },
+  });
+  if (!row) {
+    return null;
+  }
+  return {
+    proposalVersionId: row.id,
+    proposalId: row.proposalId,
+    clientId: row.proposal.clientId,
+    supersededAt: row.supersededAt,
+  };
+}
+
+export type CreatePortalProposalAcceptanceInput = {
+  proposalVersionId: string;
+  responseType: ProposalResponseType;
+  respondedAt: Date;
+  respondingClientProfileId: string;
+  respondingSessionIdAtResponse: string;
+};
+
+/**
+ * Creates exactly one **portal-path** `ProposalAcceptance` (D-047 §7 step 7).
+ * Sets only the portal-attribution fields — `respondingClientProfileId` and
+ * `respondingSessionIdAtResponse` (the immutable `Session.id` snapshot,
+ * never `Session.token`) — and omits `recordedByStaffUserId` /
+ * `responseMethod` / `evidenceReference` entirely, so those columns are
+ * written `NULL` and the hand-written `proposal_acceptance_response_path`
+ * CHECK's portal branch is satisfied (the service has already guaranteed
+ * both portal values are present — §8; the CHECK is only a backstop).
+ * `respondedAt` is the caller's server-generated `new Date()` (§8) — never
+ * computed here. Does not catch or translate a unique-constraint conflict
+ * on `proposalVersionId`; that is the service's D-047 §7 concern, mirroring
+ * `createExternalProposalAcceptance`.
+ */
+export async function createPortalProposalAcceptance(
+  db: Prisma.TransactionClient,
+  input: CreatePortalProposalAcceptanceInput,
+): Promise<ProposalAcceptanceRecord> {
+  return db.proposalAcceptance.create({
+    data: {
+      id: randomUUID(),
+      proposalVersionId: input.proposalVersionId,
+      responseType: input.responseType,
+      respondedAt: input.respondedAt,
+      respondingClientProfileId: input.respondingClientProfileId,
+      respondingSessionIdAtResponse: input.respondingSessionIdAtResponse,
+    },
+    select: PROPOSAL_ACCEPTANCE_SELECT,
+  });
+}

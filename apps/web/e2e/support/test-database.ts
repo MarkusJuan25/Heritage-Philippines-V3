@@ -151,8 +151,21 @@ const RPC_ALLOWED_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   user: new Set(['create', 'findMany', 'deleteMany']),
   lead: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
   client: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
-  proposal: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
-  proposalVersion: new Set(['findMany', 'deleteMany']),
+  // D-047 §15 (Stage 6, narrow test-provisioning exception): `client-
+  // proposal-review.spec.ts` must place client A over the fixed 10-card
+  // `/client/my-journey` pagination boundary. The real admin UI still
+  // creates and publishes the three response-eligible proposals the core
+  // journey exercises; only the *extra* filler proposals needed to cross
+  // that boundary are bridge-seeded, and only via these two `create`
+  // methods — each dispatched through a strict scalar-only validator
+  // (`RPC_WRITE_ARG_VALIDATORS` below) that rejects every nested write,
+  // relation `connect`, `select`/`include`, non-scalar field, and any
+  // `supersededAt`, so a bridge-seeded ProposalVersion is *always* a
+  // current-client-visible scalar row and no `ProposalAcceptance`, audit,
+  // booking, or any other row can be reached through them. `update` /
+  // `upsert` / raw execution remain unallowlisted and unreachable.
+  proposal: new Set(['create', 'findUniqueOrThrow', 'findMany', 'deleteMany']),
+  proposalVersion: new Set(['create', 'findMany', 'deleteMany']),
   proposalAcceptance: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
   booking: new Set(['findUniqueOrThrow', 'findMany', 'deleteMany']),
   staffAssignment: new Set(['findFirst', 'deleteMany']),
@@ -182,6 +195,122 @@ const RPC_ALLOWED_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   // of a count, and no strict absence check for the shared `unknown-source`
   // SOURCE bucket.
   rateLimitBucket: new Set(['findMany', 'deleteMany']),
+};
+
+// --- D-047 §15 (Stage 6): strict scalar-only validators for the only two
+// write methods added above. Each takes the request's raw `args` and
+// returns a freshly-built, minimized `{ data: {...} }` containing ONLY the
+// explicitly-permitted scalar fields — every other key (nested `create` /
+// `connect` / `connectOrCreate`, `select`, `include`, `where`, `data`
+// relation fields, `supersededAt`, etc.) causes a rejection. This is not a
+// general-purpose Prisma write surface: no field outside the allowlist, no
+// nested write, and no relation link is ever forwarded to Prisma.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_SEED_CONTENT_LEN = 20_000;
+
+function rejectRpcWriteArgs(): never {
+  throw new Error('Malformed or disallowed E2E RPC write payload.');
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** A required UUID scalar. */
+function seedUuid(value: unknown): string {
+  if (typeof value !== 'string' || !UUID_RE.test(value)) rejectRpcWriteArgs();
+  return value;
+}
+
+/** A required, non-null timestamp scalar supplied as an ISO string. */
+function seedTimestamp(value: unknown): Date {
+  if (typeof value !== 'string') rejectRpcWriteArgs();
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) rejectRpcWriteArgs();
+  return date;
+}
+
+/** `data` must be a plain object whose key set is a subset of `allowed`
+ * and a superset of `required`. */
+function seedData(
+  args: unknown,
+  allowed: readonly string[],
+  required: readonly string[],
+): Record<string, unknown> {
+  if (!isPlainObject(args) || Object.keys(args).some((k) => k !== 'data')) rejectRpcWriteArgs();
+  const data = args.data;
+  if (!isPlainObject(data)) rejectRpcWriteArgs();
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(data)) {
+    if (!allowedSet.has(key)) rejectRpcWriteArgs();
+  }
+  for (const key of required) {
+    if (!(key in data)) rejectRpcWriteArgs();
+  }
+  return data;
+}
+
+type RpcWriteValidator = (args: unknown) => { data: Record<string, unknown> };
+
+const RPC_WRITE_ARG_VALIDATORS: Readonly<
+  Record<string, Readonly<Record<string, RpcWriteValidator>>>
+> = {
+  proposal: {
+    // Only a bare Proposal row for an already-provisioned Client, with an
+    // optional explicit `createdAt` for deterministic pagination
+    // ordering. No nested `versions`, no `client` link, nothing else.
+    create: (args) => {
+      const data = seedData(args, ['id', 'clientId', 'createdAt'], ['id', 'clientId']);
+      const built: Record<string, unknown> = {
+        id: seedUuid(data.id),
+        clientId: seedUuid(data.clientId),
+      };
+      if ('createdAt' in data) {
+        built.createdAt = seedTimestamp(data.createdAt);
+      }
+      return { data: built };
+    },
+  },
+  proposalVersion: {
+    // Only a current-client-visible scalar ProposalVersion: `clientVisibleAt`
+    // is REQUIRED and non-null; `supersededAt` is NOT an accepted key, so a
+    // bridge-seeded version can never be anything but current-visible. No
+    // nested `acceptance` / `booking`, no relation link.
+    create: (args) => {
+      const data = seedData(
+        args,
+        ['id', 'proposalId', 'versionNumber', 'content', 'createdByUserId', 'clientVisibleAt'],
+        ['id', 'proposalId', 'versionNumber', 'content', 'createdByUserId', 'clientVisibleAt'],
+      );
+      const versionNumber = data.versionNumber;
+      if (
+        typeof versionNumber !== 'number' ||
+        !Number.isInteger(versionNumber) ||
+        versionNumber < 1
+      ) {
+        rejectRpcWriteArgs();
+      }
+      const content = data.content;
+      if (
+        typeof content !== 'string' ||
+        content.trim().length === 0 ||
+        content.length > MAX_SEED_CONTENT_LEN
+      ) {
+        rejectRpcWriteArgs();
+      }
+      return {
+        data: {
+          id: seedUuid(data.id),
+          proposalId: seedUuid(data.proposalId),
+          versionNumber,
+          content,
+          createdByUserId: seedUuid(data.createdByUserId),
+          clientVisibleAt: seedTimestamp(data.clientVisibleAt),
+        },
+      };
+    },
+  },
 };
 
 /** A transported RPC method: real Prisma input-argument typing, but an
@@ -217,11 +346,15 @@ export type E2EPrismaRpcClient = {
     deleteMany: RpcMethod<Prisma.ClientDeleteManyArgs>;
   };
   proposal: {
+    // D-047 §15: scalar-only, validator-gated (see RPC_WRITE_ARG_VALIDATORS).
+    create: RpcMethod<Prisma.ProposalCreateArgs>;
     findUniqueOrThrow: RpcMethod<Prisma.ProposalFindUniqueOrThrowArgs>;
     findMany: RpcMethod<Prisma.ProposalFindManyArgs>;
     deleteMany: RpcMethod<Prisma.ProposalDeleteManyArgs>;
   };
   proposalVersion: {
+    // D-047 §15: scalar-only, validator-gated (see RPC_WRITE_ARG_VALIDATORS).
+    create: RpcMethod<Prisma.ProposalVersionCreateArgs>;
     findMany: RpcMethod<Prisma.ProposalVersionFindManyArgs>;
     deleteMany: RpcMethod<Prisma.ProposalVersionDeleteManyArgs>;
   };
@@ -341,12 +474,21 @@ export async function startE2EPrismaRpcServer(): Promise<{ close: () => Promise<
           }
           loggedOperation = `${model}.${method}`;
 
+          // D-047 §15: the two allowlisted `create` methods are dispatched
+          // ONLY with a freshly-built, scalar-only `{ data }` — never the
+          // caller's raw `args` — so no nested write, relation link,
+          // `select`/`include`, or non-permitted field can reach Prisma.
+          // Every other allowlisted op (reads, `deleteMany`, the existing
+          // `user.create`) is unaffected.
+          const validator = RPC_WRITE_ARG_VALIDATORS[model]?.[method];
+          const dispatchArgs = validator ? validator(args) : args;
+
           const modelClient = prismaRecord[model];
           const fn = modelClient?.[method];
           if (typeof fn !== 'function') {
             throw new Error('Prisma model/method not available.');
           }
-          const result = await fn.call(modelClient, args);
+          const result = await fn.call(modelClient, dispatchArgs);
           responseBody = { ok: true, result };
         } catch (error) {
           // Only safe, non-sensitive information is ever logged or

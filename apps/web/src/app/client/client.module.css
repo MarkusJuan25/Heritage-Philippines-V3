@@ -264,3 +264,80 @@
   font-size: 0.9rem;
   color: #444;
 }
+
+/* --- My Journey — proposal review (D-047 §5/§12). Additive only. --- */
+
+/* Shared by the real navigation links (My Journey / Home / Overview when
+   not the active page) and the Previous / Next pagination links. */
+.navLink {
+  color: #1a4f8a;
+  text-decoration: none;
+}
+
+.navLink:hover {
+  text-decoration: underline;
+}
+
+.navLink:focus-visible {
+  outline: 2px solid #1a4f8a;
+  outline-offset: 2px;
+}
+
+.reviewList {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.reviewCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.reviewCardHeading {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.reviewCardMeta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.reviewCardDetails {
+  margin: 0;
+}
+
+/* Proposal content is plain text only (§11): preserve the consultant's own
+   line breaks, wrap long unbroken strings rather than overflow. */
+.reviewCardContent {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reviewCardStatus {
+  margin: 0;
+  font-weight: 600;
+}
+
+.reviewCardResponse {
+  margin: 0;
+  color: #444;
+}
+
+.reviewCardUnavailable {
+  margin: 0;
+  color: #666;
+}
+
+.reviewPagination {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.5rem;
+}

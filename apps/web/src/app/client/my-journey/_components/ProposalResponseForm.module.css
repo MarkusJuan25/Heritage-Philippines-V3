@@ -1,0 +1,83 @@
+/* D-047 §12 — the proposal-response form. Co-located CSS Module (Stage 5
+   authorizes `my-journey/_components/**`; it does not authorize editing the
+   shared `client.module.css`). Mobile-first: a single stacked column of
+   native form controls, usable on a phone as-is; visible focus rings on
+   every interactive element. */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.4rem;
+}
+
+.legend {
+  padding: 0 0.35rem;
+  font-weight: 600;
+}
+
+.option,
+.acknowledgement {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.option input,
+.acknowledgement input {
+  margin-top: 0.15rem;
+}
+
+.option input:focus-visible,
+.acknowledgement input:focus-visible,
+.submit:focus-visible {
+  outline: 2px solid #1a4f8a;
+  outline-offset: 2px;
+}
+
+.submit {
+  align-self: flex-start;
+  padding: 0.45rem 1rem;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #1a4f8a;
+  border-radius: 0.4rem;
+  background: #1a4f8a;
+  color: #fff;
+}
+
+.submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pending {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #555;
+}
+
+.error {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #b23b3b;
+  border-radius: 0.4rem;
+  color: #7a2020;
+  background: #fbeaea;
+}
+
+.result {
+  margin: 0;
+  color: #444;
+}

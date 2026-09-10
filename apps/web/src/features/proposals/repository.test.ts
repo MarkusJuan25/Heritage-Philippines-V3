@@ -3,12 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '@/generated/prisma/client';
 
 import {
+  CLIENT_PROPOSAL_REVIEW_PAGE_SIZE,
+  countCurrentClientVisibleProposalVersions,
   createExternalProposalAcceptance,
+  createPortalProposalAcceptance,
   createProposalRevision,
   createProposalWithFirstVersion,
   findClientProposalFacts,
   findClientProposalPreview,
+  findClientProposalReviewPage,
   findCurrentClientVisibleVersion,
+  findProposalVersionOwnershipContext,
   findProposalAcceptanceForVersion,
   findProposalByIdForActor,
   findProposalContext,
@@ -912,5 +917,341 @@ describe('findClientProposalPreview', () => {
     expect(await findClientProposalPreview(db, CLIENT_ID)).toEqual([
       { versionNumber: 1, responseType: null },
     ]);
+  });
+});
+
+// --- Client proposal-review page reads (D-047 §5) ---
+
+describe('CLIENT_PROPOSAL_REVIEW_PAGE_SIZE', () => {
+  it('is the D-047 §5 fixed page size of 10', () => {
+    expect(CLIENT_PROPOSAL_REVIEW_PAGE_SIZE).toBe(10);
+  });
+});
+
+describe('countCurrentClientVisibleProposalVersions', () => {
+  it('issues exactly one count with the shared current-visible base predicate, scoped by clientId alone', async () => {
+    const count = vi.fn().mockResolvedValue(7);
+    const db = { proposalVersion: { count } } as unknown as Prisma.TransactionClient;
+
+    const result = await countCurrentClientVisibleProposalVersions(db, CLIENT_ID);
+
+    expect(result).toBe(7);
+    expect(count).toHaveBeenCalledTimes(1);
+    expect(count).toHaveBeenCalledWith({ where: CLIENT_VISIBLE_BASE });
+    const where = count.mock.calls[0]![0].where;
+    expect(where.clientVisibleAt).toEqual({ not: null });
+    expect(where.supersededAt).toBeNull();
+    expect(where.proposal).toEqual({ clientId: CLIENT_ID });
+    expect(where).not.toHaveProperty('acceptance');
+    expect(where).not.toHaveProperty('booking');
+    expect(where).not.toHaveProperty('assignments');
+  });
+
+  it('uses the injected db and propagates a rejected count', async () => {
+    const count = vi.fn().mockRejectedValue(new Error('db unavailable'));
+    const db = { proposalVersion: { count } } as unknown as Prisma.TransactionClient;
+
+    await expect(countCurrentClientVisibleProposalVersions(db, CLIENT_ID)).rejects.toThrow(
+      'db unavailable',
+    );
+  });
+});
+
+describe('findClientProposalReviewPage', () => {
+  const dbWith = (findMany: ReturnType<typeof vi.fn>) =>
+    ({ proposalVersion: { findMany } }) as unknown as Prisma.TransactionClient;
+
+  it('applies the shared predicate, D-047 §5 ordering, the passed skip/take, and the review-card select', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+
+    await findClientProposalReviewPage(dbWith(findMany), CLIENT_ID, { skip: 20, take: 11 });
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(findMany).toHaveBeenCalledWith({
+      where: CLIENT_VISIBLE_BASE,
+      orderBy: [{ proposal: { createdAt: 'desc' } }, { proposal: { id: 'asc' } }],
+      skip: 20,
+      take: 11,
+      select: {
+        id: true,
+        proposalId: true,
+        versionNumber: true,
+        content: true,
+        clientVisibleAt: true,
+        acceptance: { select: { responseType: true, respondedAt: true } },
+      },
+    });
+  });
+
+  it('uses a where clause byte-identical to the count query (same ownership + current-visible predicates)', async () => {
+    const count = vi.fn().mockResolvedValue(0);
+    const findMany = vi.fn().mockResolvedValue([]);
+
+    await countCurrentClientVisibleProposalVersions(
+      { proposalVersion: { count } } as unknown as Prisma.TransactionClient,
+      CLIENT_ID,
+    );
+    await findClientProposalReviewPage(dbWith(findMany), CLIENT_ID, { skip: 0, take: 11 });
+
+    expect(findMany.mock.calls[0]![0].where).toEqual(count.mock.calls[0]![0].where);
+  });
+
+  it('never selects a proposal/client relation, staff, or portal-attribution field', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+
+    await findClientProposalReviewPage(dbWith(findMany), CLIENT_ID, { skip: 0, take: 11 });
+
+    const select = findMany.mock.calls[0]![0].select;
+    for (const forbidden of [
+      'proposal',
+      'client',
+      'createdByUserId',
+      'recordedByStaffUserId',
+      'respondingClientProfileId',
+      'respondingSessionIdAtResponse',
+      'responseMethod',
+      'evidenceReference',
+    ]) {
+      expect(select).not.toHaveProperty(forbidden);
+    }
+    expect(select.acceptance.select).toEqual({ responseType: true, respondedAt: true });
+  });
+
+  it('maps id -> proposalVersionId and normalizes an absent acceptance to null', async () => {
+    const published = new Date('2026-09-01T00:00:00.000Z');
+    const responded = new Date('2026-09-03T09:30:00.000Z');
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        id: 'version-b',
+        proposalId: 'proposal-b',
+        versionNumber: 2,
+        content: 'Palawan revised itinerary.',
+        clientVisibleAt: published,
+        acceptance: { responseType: 'ACCEPT', respondedAt: responded },
+      },
+      {
+        id: 'version-a',
+        proposalId: 'proposal-a',
+        versionNumber: 1,
+        content: null,
+        clientVisibleAt: published,
+        acceptance: null,
+      },
+    ]);
+
+    const rows = await findClientProposalReviewPage(dbWith(findMany), CLIENT_ID, {
+      skip: 0,
+      take: 11,
+    });
+
+    expect(rows).toEqual([
+      {
+        proposalVersionId: 'version-b',
+        proposalId: 'proposal-b',
+        versionNumber: 2,
+        content: 'Palawan revised itinerary.',
+        clientVisibleAt: published,
+        acceptance: { responseType: 'ACCEPT', respondedAt: responded },
+      },
+      {
+        proposalVersionId: 'version-a',
+        proposalId: 'proposal-a',
+        versionNumber: 1,
+        content: null,
+        clientVisibleAt: published,
+        acceptance: null,
+      },
+    ]);
+  });
+
+  it('passes a legacy content: null row through unchanged (no repository-layer substitution)', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        id: 'version-legacy',
+        proposalId: 'proposal-legacy',
+        versionNumber: 1,
+        content: null,
+        clientVisibleAt: new Date('2026-08-01T00:00:00.000Z'),
+        acceptance: null,
+      },
+    ]);
+
+    const rows = await findClientProposalReviewPage(dbWith(findMany), CLIENT_ID, {
+      skip: 0,
+      take: 11,
+    });
+
+    expect(rows[0]!.content).toBeNull();
+  });
+
+  it('uses the injected db and propagates a rejected findMany', async () => {
+    const findMany = vi.fn().mockRejectedValue(new Error('db unavailable'));
+
+    await expect(
+      findClientProposalReviewPage(dbWith(findMany), CLIENT_ID, { skip: 0, take: 11 }),
+    ).rejects.toThrow('db unavailable');
+  });
+});
+
+// --- Client proposal-response write path (D-047 §7) ---
+
+describe('findProposalVersionOwnershipContext', () => {
+  it('reads the target version by @id and returns only its two ids plus supersededAt', async () => {
+    const findUnique = vi.fn().mockResolvedValue({
+      id: VERSION_ID,
+      proposalId: PROPOSAL_ID,
+      supersededAt: null,
+      proposal: { clientId: CLIENT_ID },
+    });
+    const db = { proposalVersion: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findProposalVersionOwnershipContext(db, VERSION_ID);
+
+    expect(findUnique).toHaveBeenCalledTimes(1);
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: VERSION_ID },
+      select: {
+        id: true,
+        proposalId: true,
+        supersededAt: true,
+        proposal: { select: { clientId: true } },
+      },
+    });
+    expect(result).toEqual({
+      proposalVersionId: VERSION_ID,
+      proposalId: PROPOSAL_ID,
+      clientId: CLIENT_ID,
+      supersededAt: null,
+    });
+    expect(Object.keys(result!).sort()).toEqual([
+      'clientId',
+      'proposalId',
+      'proposalVersionId',
+      'supersededAt',
+    ]);
+  });
+
+  it('passes a non-null supersededAt through unchanged', async () => {
+    const superseded = new Date('2026-09-05T00:00:00.000Z');
+    const findUnique = vi.fn().mockResolvedValue({
+      id: VERSION_ID,
+      proposalId: PROPOSAL_ID,
+      supersededAt: superseded,
+      proposal: { clientId: CLIENT_ID },
+    });
+    const db = { proposalVersion: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    const result = await findProposalVersionOwnershipContext(db, VERSION_ID);
+
+    expect(result!.supersededAt).toBe(superseded);
+  });
+
+  it('returns null when the version does not exist', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { proposalVersion: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    expect(await findProposalVersionOwnershipContext(db, VERSION_ID)).toBeNull();
+  });
+
+  it('never selects content, staff, or acceptance/attribution fields', async () => {
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const db = { proposalVersion: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await findProposalVersionOwnershipContext(db, VERSION_ID);
+
+    const select = findUnique.mock.calls[0]![0].select;
+    for (const forbidden of [
+      'content',
+      'createdByUserId',
+      'acceptance',
+      'clientVisibleAt',
+      'versionNumber',
+    ]) {
+      expect(select).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('uses the injected db and propagates a rejected findUnique', async () => {
+    const findUnique = vi.fn().mockRejectedValue(new Error('db unavailable'));
+    const db = { proposalVersion: { findUnique } } as unknown as Prisma.TransactionClient;
+
+    await expect(findProposalVersionOwnershipContext(db, VERSION_ID)).rejects.toThrow(
+      'db unavailable',
+    );
+  });
+});
+
+describe('createPortalProposalAcceptance', () => {
+  const RESPONDED_AT = new Date('2026-09-06T09:30:00.000Z');
+
+  it('writes only the portal-attribution fields (external fields omitted) and returns the acceptance record', async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: ACCEPTANCE_ID,
+      proposalVersionId: VERSION_ID,
+      responseType: 'ACCEPT',
+      respondedAt: RESPONDED_AT,
+      recordedByStaffUserId: null,
+      responseMethod: null,
+      evidenceReference: null,
+      createdAt: RESPONDED_AT,
+    });
+    const db = { proposalAcceptance: { create } } as unknown as Prisma.TransactionClient;
+
+    const result = await createPortalProposalAcceptance(db, {
+      proposalVersionId: VERSION_ID,
+      responseType: 'ACCEPT',
+      respondedAt: RESPONDED_AT,
+      respondingClientProfileId: 'profile-1',
+      respondingSessionIdAtResponse: 'session-abc',
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const arg = create.mock.calls[0]![0] as { data: Record<string, unknown>; select: unknown };
+    expect(typeof arg.data.id).toBe('string');
+    expect((arg.data.id as string).length).toBe(36);
+    expect(arg.data).toMatchObject({
+      proposalVersionId: VERSION_ID,
+      responseType: 'ACCEPT',
+      respondedAt: RESPONDED_AT,
+      respondingClientProfileId: 'profile-1',
+      respondingSessionIdAtResponse: 'session-abc',
+    });
+    for (const external of ['recordedByStaffUserId', 'responseMethod', 'evidenceReference']) {
+      expect(arg.data).not.toHaveProperty(external);
+    }
+    expect(result.id).toBe(ACCEPTANCE_ID);
+    expect(result.responseType).toBe('ACCEPT');
+  });
+
+  it('passes the caller-supplied server-generated respondedAt through unchanged', async () => {
+    const create = vi.fn().mockResolvedValue({ id: ACCEPTANCE_ID });
+    const db = { proposalAcceptance: { create } } as unknown as Prisma.TransactionClient;
+
+    await createPortalProposalAcceptance(db, {
+      proposalVersionId: VERSION_ID,
+      responseType: 'DECLINE',
+      respondedAt: RESPONDED_AT,
+      respondingClientProfileId: 'profile-1',
+      respondingSessionIdAtResponse: 'session-abc',
+    });
+
+    expect((create.mock.calls[0]![0] as { data: { respondedAt: Date } }).data.respondedAt).toBe(
+      RESPONDED_AT,
+    );
+  });
+
+  it('uses the injected db and propagates a rejected create', async () => {
+    const create = vi.fn().mockRejectedValue(new Error('db unavailable'));
+    const db = { proposalAcceptance: { create } } as unknown as Prisma.TransactionClient;
+
+    await expect(
+      createPortalProposalAcceptance(db, {
+        proposalVersionId: VERSION_ID,
+        responseType: 'ACCEPT',
+        respondedAt: RESPONDED_AT,
+        respondingClientProfileId: 'profile-1',
+        respondingSessionIdAtResponse: 'session-abc',
+      }),
+    ).rejects.toThrow('db unavailable');
   });
 });

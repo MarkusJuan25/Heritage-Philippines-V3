@@ -1,5 +1,7 @@
 'use client';
 
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { useState } from 'react';
 
 import { ClientPortalNavItem } from './ClientPortalNavItem';
@@ -7,13 +9,28 @@ import { CLIENT_PORTAL_NAV_LIST_ID, MobileNavToggle } from './MobileNavToggle';
 import styles from '../client.module.css';
 
 // D-040 §7 / blueprint §2.3 — the ten canonical client-portal navigation
-// labels, verbatim and in this exact order. "Home / Overview" (the current
-// page, and the only real page in Stage 6) is a non-link
-// `<span aria-current="page">`; the other nine are inert
-// `ClientPortalNavItem`s (visible text + a "Coming soon" marker, no href /
-// anchor / button / onClick / tabindex / role).
+// labels, verbatim and in this exact order:
+//   Home / Overview · My Journey · Bookings · Payments & Receipts ·
+//   Documents · Visa Center · Regional Tours · Support & Messages ·
+//   Profile · Settings
+//
+// D-047 §2 promotes the previously-inert "My Journey" label to a real
+// in-app link to `/client/my-journey`. There are now two real client-portal
+// routes sharing this nav, so both "Home / Overview" (`/client`) and
+// "My Journey" are rendered active-aware: the label whose href matches the
+// current path is a non-link `<span aria-current="page">` (D-040 §7's "not a
+// link to itself"), and the other is an ordinary in-app `<Link>` — so there
+// is exactly one `aria-current="page"` at any time. No new "Proposals"
+// label is added and the ten-label set/order is unchanged. The remaining
+// eight later-phase labels stay inert `ClientPortalNavItem`s (visible text
+// plus a "Coming soon" marker; no href / anchor / button / onClick /
+// tabindex / role).
+const REAL_NAV_ITEMS = [
+  { label: 'Home / Overview', href: '/client' },
+  { label: 'My Journey', href: '/client/my-journey' },
+] as const;
+
 const LATER_PHASE_LABELS = [
-  'My Journey',
   'Bookings',
   'Payments & Receipts',
   'Documents',
@@ -28,10 +45,12 @@ const LATER_PHASE_LABELS = [
 // (toggled by `MobileNavToggle`) — not a shrunk sidebar. The <ul> is
 // always in the DOM (so the label set is server-rendered and the
 // keyboard-tab walk is stable); CSS shows it inline at >= 48rem and, below
-// that, only while `open`. Only the toggle is focusable within this <nav>;
-// none of the ten items is.
+// that, only while `open`. Within this <nav> the focusable controls are the
+// mobile toggle and whichever of the two real nav items is not the current
+// page; none of the eight inert items is focusable.
 export function ClientPortalNav() {
   const [open, setOpen] = useState(false);
+  const pathname = usePathname();
 
   return (
     <nav aria-label="Client portal" className={styles.nav}>
@@ -40,11 +59,19 @@ export function ClientPortalNav() {
         id={CLIENT_PORTAL_NAV_LIST_ID}
         className={open ? `${styles.navList} ${styles.navListOpen}` : styles.navList}
       >
-        <li className={styles.navCurrent}>
-          <span className={styles.navCurrentLabel} aria-current="page">
-            Home / Overview
-          </span>
-        </li>
+        {REAL_NAV_ITEMS.map(({ label, href }) => (
+          <li key={label} className={styles.navCurrent}>
+            {pathname === href ? (
+              <span className={styles.navCurrentLabel} aria-current="page">
+                {label}
+              </span>
+            ) : (
+              <Link className={styles.navLink} href={href}>
+                {label}
+              </Link>
+            )}
+          </li>
+        ))}
         {LATER_PHASE_LABELS.map((label) => (
           <ClientPortalNavItem key={label} label={label} />
         ))}
