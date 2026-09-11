@@ -458,3 +458,143 @@ export async function findClientBookingPreview(
     tourPackageName: row.tourPackageName,
   }));
 }
+
+// --- Client booking list and detail reads (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-049 §§2, 4, 5) ---
+// Extends the D-040 §5 client-portal reads above with a paginated list and a
+// single-booking detail read for `/client/bookings` and its detail view
+// (Stage 3, not implemented here). Same discipline as the D-040 reads
+// above: no assignment filter (`Booking.clientId` is a direct FK;
+// authorization is the caller's `assertClientPortalAccess` gate in
+// service.ts, independently before each read — D-049 §2), no transaction,
+// no write, no audit, DRAFT excluded from every predicate (D-049 §6).
+
+// D-049 §4's fixed page size for `/client/bookings`. The list read fetches
+// `CLIENT_BOOKING_LIST_PAGE_SIZE + 1` rows for a confirmed page; the service
+// renders at most `CLIENT_BOOKING_LIST_PAGE_SIZE`, using the extra row only
+// to decide whether a Next-page link is shown (D-049 §4).
+export const CLIENT_BOOKING_LIST_PAGE_SIZE = 10;
+
+/**
+ * The count of one Client's non-DRAFT Bookings (D-049 §4's existing-page
+ * check: the service derives the last existing page
+ * (`ceil(count / CLIENT_BOOKING_LIST_PAGE_SIZE)`) from this and redirects an
+ * out-of-range `page` > 1 BEFORE it computes or issues any offset query).
+ * Scoped by `clientId` alone, DRAFT excluded — the identical predicate
+ * `findClientBookingListPage` below uses, so the count and the list query
+ * agree exactly on which rows exist.
+ */
+export async function countClientBookings(
+  db: Prisma.TransactionClient,
+  clientId: string,
+): Promise<number> {
+  return db.booking.count({ where: { clientId, status: { not: BookingStatus.DRAFT } } });
+}
+
+/**
+ * One page of a Client's non-DRAFT Bookings, in D-049 §4's deterministic
+ * order — `createdAt` descending, `id` ascending as the server-only
+ * tie-breaker (never returned) — reusing `findClientBookingPreview`'s
+ * established ordering and field allow-list exactly (D-049 §5 List DTO:
+ * `bookingReference`, `status`, `travelStartDate`, `travelEndDate`,
+ * `destination`, `tourPackageName` — no new field). `skip`/`take` are
+ * supplied by the service, which passes
+ * `take = CLIENT_BOOKING_LIST_PAGE_SIZE + 1` and only ever computes a `skip`
+ * for a page it has already confirmed exists (D-049 §4).
+ */
+export async function findClientBookingListPage(
+  db: Prisma.TransactionClient,
+  clientId: string,
+  params: { skip: number; take: number },
+): Promise<ClientBookingPreviewRow[]> {
+  const rows = await db.booking.findMany({
+    where: { clientId, status: { not: BookingStatus.DRAFT } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    skip: params.skip,
+    take: params.take,
+    select: CLIENT_BOOKING_PREVIEW_SELECT,
+  });
+  return rows.map((row) => ({
+    bookingReference: row.bookingReference,
+    status: row.status as NonDraftBookingStatus,
+    travelStartDate: row.travelStartDate,
+    travelEndDate: row.travelEndDate,
+    destination: row.destination,
+    tourPackageName: row.tourPackageName,
+  }));
+}
+
+// D-049 §5's exact detail-view field allow-list: the D-040 six plus
+// `travelerCount`, `includedServices`, `excludedServices`, `specialRequests`,
+// and `clientVisibleNotes` (each individually approved in D-049 §5).
+// Deliberately excludes `id`, `clientId`, `proposalVersionId`,
+// `internalNotes` (D-049 §5 — rejected), `totalAmount`/`currencyCode`
+// (D-049 §6), `createdAt`/`updatedAt`, and every relation — none of these
+// is a D-049-approved client-visible field.
+const CLIENT_BOOKING_DETAIL_SELECT = {
+  bookingReference: true,
+  status: true,
+  tourPackageName: true,
+  destination: true,
+  travelStartDate: true,
+  travelEndDate: true,
+  travelerCount: true,
+  includedServices: true,
+  excludedServices: true,
+  specialRequests: true,
+  clientVisibleNotes: true,
+} as const;
+
+export type ClientBookingDetailRow = {
+  bookingReference: string;
+  status: NonDraftBookingStatus;
+  tourPackageName: string | null;
+  destination: string | null;
+  travelStartDate: Date | null;
+  travelEndDate: Date | null;
+  travelerCount: number | null;
+  includedServices: string | null;
+  excludedServices: string | null;
+  specialRequests: string | null;
+  clientVisibleNotes: string | null;
+};
+
+/**
+ * One Client's single Booking, addressed by its canonical `bookingReference`
+ * — D-049 §2's combined predicate: `clientId` (server-resolved, never
+ * caller-supplied) AND `bookingReference` (already lexically validated by
+ * the caller — D-049 §3) AND non-DRAFT, all in **one** query. A nonexistent
+ * reference, a DRAFT booking's reference, and another client's booking's
+ * reference are indistinguishable to this query by construction — each
+ * simply matches zero rows — and this function returns `null` for all
+ * three, never throwing and never calling any Next.js navigation function
+ * (D-049 §7); the caller (service.ts) maps `null` identically regardless of
+ * which of those three held. This is never an unrestricted global
+ * `findFirst`/`findUnique` by `bookingReference` alone followed by an
+ * application-level ownership check — `clientId` is part of the same
+ * `where` clause as `bookingReference`, not a check applied after the read.
+ */
+export async function findClientBookingDetailByReference(
+  db: Prisma.TransactionClient,
+  clientId: string,
+  bookingReference: string,
+): Promise<ClientBookingDetailRow | null> {
+  const row = await db.booking.findFirst({
+    where: { clientId, bookingReference, status: { not: BookingStatus.DRAFT } },
+    select: CLIENT_BOOKING_DETAIL_SELECT,
+  });
+  if (!row) return null;
+  return {
+    bookingReference: row.bookingReference,
+    status: row.status as NonDraftBookingStatus,
+    tourPackageName: row.tourPackageName,
+    destination: row.destination,
+    travelStartDate: row.travelStartDate,
+    travelEndDate: row.travelEndDate,
+    travelerCount: row.travelerCount,
+    includedServices: row.includedServices,
+    excludedServices: row.excludedServices,
+    specialRequests: row.specialRequests,
+    clientVisibleNotes: row.clientVisibleNotes,
+  };
+}

@@ -22,6 +22,7 @@ import type {
   ClientBookingPreviewRow,
   NonDraftBookingStatus,
 } from './repository';
+import { isValidClientBookingReference } from './schemas';
 import type { CreateBookingInput, ListBookingsQuery, UpdateBookingStatusInput } from './schemas';
 import { isTransitionAllowed } from './transitions';
 
@@ -493,5 +494,160 @@ export async function getClientBookingPreview(
       destination: row.destination,
       tourPackageName: row.tourPackageName,
     })),
+  };
+}
+
+// --- Client booking list and detail reads (docs/HERITAGE_V3_DECISIONS_LOG.md
+// D-049 §§2–8) ---
+// Two new CLIENT-safe reads for `/client/bookings` and its detail view
+// (Stage 3, not implemented here). Each independently calls
+// `assertClientPortalAccess` — the existing private D-040 helper above — its
+// own required check, before its own Booking repository query (D-049 §2);
+// no request-wide single-resolution guarantee is assumed or introduced, and
+// neither read relies on the other's already-performed check.
+
+export type ClientBookingListPageResult =
+  | { kind: 'redirect' }
+  | { kind: 'page'; items: ClientBookingPreviewItem[]; page: number; hasNext: boolean };
+
+function toClientBookingListPage(
+  rows: ClientBookingPreviewRow[],
+  page: number,
+): { kind: 'page'; items: ClientBookingPreviewItem[]; page: number; hasNext: boolean } {
+  const hasNext = rows.length > repository.CLIENT_BOOKING_LIST_PAGE_SIZE;
+  const pageRows = hasNext ? rows.slice(0, repository.CLIENT_BOOKING_LIST_PAGE_SIZE) : rows;
+  return {
+    kind: 'page',
+    items: pageRows.map((row) => ({
+      bookingReference: row.bookingReference,
+      statusLabel: CLIENT_BOOKING_STATUS_LABELS[row.status],
+      travelStartDate: row.travelStartDate,
+      travelEndDate: row.travelEndDate,
+      destination: row.destination,
+      tourPackageName: row.tourPackageName,
+    })),
+    page,
+    hasNext,
+  };
+}
+
+/**
+ * D-049 §4: one page of the authenticated client's own non-DRAFT Bookings,
+ * reusing the D-040 §5 six-field allow-list and the fixed page size 10.
+ * `assertClientPortalAccess` runs once, before either Booking repository
+ * query this function may issue (the count, for `page > 1`, and the list
+ * read) — this is "the list read"'s own independent check (D-049 §2), not
+ * shared with `getClientBookingDetail` below. `page` is re-validated as a
+ * positive safe integer defensively (mirroring
+ * `getClientProposalReviewPage`'s identical D-047 §17.1 precedent) even
+ * though the caller is expected to have already run it through
+ * `parseClientBookingListPageParam`. For `page` > 1, the existing-page count
+ * runs, and issues its own query, BEFORE any offset is computed (D-049 §4);
+ * an out-of-range or concurrently-emptied `page` > 1 resolves to
+ * `{ kind: 'redirect' }`, signaling the future Stage 3 page to redirect to
+ * `/client/bookings` — this function itself never calls `redirect()` or any
+ * other Next.js navigation function (D-049 §7).
+ */
+export async function getClientBookingListPage(
+  actor: AuthenticatedUser,
+  clientId: string,
+  page: number,
+): Promise<ClientBookingListPageResult> {
+  await assertClientPortalAccess(actor, clientId);
+
+  const pageSize = repository.CLIENT_BOOKING_LIST_PAGE_SIZE;
+  const requestedPage = Number.isSafeInteger(page) && page >= 1 ? page : 1;
+
+  if (requestedPage === 1) {
+    const rows = await repository.findClientBookingListPage(prisma, clientId, {
+      skip: 0,
+      take: pageSize + 1,
+    });
+    return toClientBookingListPage(rows, 1);
+  }
+
+  const total = await repository.countClientBookings(prisma, clientId);
+  const lastPage = Math.max(1, Math.ceil(total / pageSize));
+  if (requestedPage > lastPage) {
+    return { kind: 'redirect' };
+  }
+
+  const skip = (requestedPage - 1) * pageSize;
+  const rows = await repository.findClientBookingListPage(prisma, clientId, {
+    skip,
+    take: pageSize + 1,
+  });
+  if (rows.length === 0) {
+    return { kind: 'redirect' };
+  }
+  return toClientBookingListPage(rows, requestedPage);
+}
+
+export type ClientBookingDetail = {
+  bookingReference: string;
+  statusLabel: string;
+  tourPackageName: string | null;
+  destination: string | null;
+  travelStartDate: Date | null;
+  travelEndDate: Date | null;
+  travelerCount: number | null;
+  includedServices: string | null;
+  excludedServices: string | null;
+  specialRequests: string | null;
+  clientVisibleNotes: string | null;
+};
+
+/**
+ * D-049 §§2–7: the authenticated client's own single Booking detail,
+ * addressed by its canonical `bookingReference`. A malformed reference
+ * (D-049 §3's `/^HPB-[0-9A-F]{20}$/`) is rejected lexically and returns
+ * `null` immediately — it never reaches `assertClientPortalAccess` or any
+ * Booking repository query. A well-formed reference then runs this read's
+ * own independent `assertClientPortalAccess` call (D-049 §2 — not shared
+ * with `getClientBookingListPage` above), followed by the one combined
+ * `clientId` + `bookingReference` + non-DRAFT repository query (D-049 §2,
+ * §6). A nonexistent reference, a DRAFT booking's reference, and another
+ * client's booking's reference all resolve to the same repository `null`
+ * and are mapped here to the identical `null` result — this function never
+ * throws for any of those three controlled outcomes and never calls
+ * `notFound()`, `redirect()`, or any other Next.js navigation function
+ * (D-049 §7); a future Stage 3 page is expected to call `notFound()` itself
+ * in response to this `null`. The returned object is an explicit allow-list
+ * (D-049 §5 Detail DTO) — never a spread of the repository row — and
+ * excludes `internalNotes`, every database identifier, and every financial
+ * field (D-049 §5, §6).
+ */
+export async function getClientBookingDetail(
+  actor: AuthenticatedUser,
+  clientId: string,
+  bookingReference: string,
+): Promise<ClientBookingDetail | null> {
+  if (!isValidClientBookingReference(bookingReference)) {
+    return null;
+  }
+
+  await assertClientPortalAccess(actor, clientId);
+
+  const row = await repository.findClientBookingDetailByReference(
+    prisma,
+    clientId,
+    bookingReference,
+  );
+  if (!row) {
+    return null;
+  }
+
+  return {
+    bookingReference: row.bookingReference,
+    statusLabel: CLIENT_BOOKING_STATUS_LABELS[row.status],
+    tourPackageName: row.tourPackageName,
+    destination: row.destination,
+    travelStartDate: row.travelStartDate,
+    travelEndDate: row.travelEndDate,
+    travelerCount: row.travelerCount,
+    includedServices: row.includedServices,
+    excludedServices: row.excludedServices,
+    specialRequests: row.specialRequests,
+    clientVisibleNotes: row.clientVisibleNotes,
   };
 }
