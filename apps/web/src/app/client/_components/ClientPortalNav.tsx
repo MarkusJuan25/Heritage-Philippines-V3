@@ -14,24 +14,25 @@ import styles from '../client.module.css';
 //   Documents · Visa Center · Regional Tours · Support & Messages ·
 //   Profile · Settings
 //
-// D-047 §2 promotes the previously-inert "My Journey" label to a real
-// in-app link to `/client/my-journey`. There are now two real client-portal
-// routes sharing this nav, so both "Home / Overview" (`/client`) and
-// "My Journey" are rendered active-aware: the label whose href matches the
-// current path is a non-link `<span aria-current="page">` (D-040 §7's "not a
-// link to itself"), and the other is an ordinary in-app `<Link>` — so there
-// is exactly one `aria-current="page"` at any time. No new "Proposals"
-// label is added and the ten-label set/order is unchanged. The remaining
-// eight later-phase labels stay inert `ClientPortalNavItem`s (visible text
-// plus a "Coming soon" marker; no href / anchor / button / onClick /
-// tabindex / role).
+// D-047 §2 promoted the previously-inert "My Journey" label to a real
+// in-app link, and D-049 §7 does the same for "Bookings" (`/client/bookings`).
+// There are now three real client-portal routes sharing this nav, so
+// "Home / Overview" (`/client`), "My Journey", and "Bookings" are each
+// rendered active-aware: the label whose href matches the current path is
+// a non-link `<span aria-current="page">` (D-040 §7's "not a link to
+// itself"), and every other real item is an ordinary in-app `<Link>` — so
+// there is exactly one `aria-current="page"` at any time. No new
+// "Proposals" label is added and the ten-label set/order is unchanged.
+// The remaining seven later-phase labels stay inert `ClientPortalNavItem`s
+// (visible text plus a "Coming soon" marker; no href / anchor / button /
+// onClick / tabindex / role).
 const REAL_NAV_ITEMS = [
   { label: 'Home / Overview', href: '/client' },
   { label: 'My Journey', href: '/client/my-journey' },
+  { label: 'Bookings', href: '/client/bookings' },
 ] as const;
 
 const LATER_PHASE_LABELS = [
-  'Bookings',
   'Payments & Receipts',
   'Documents',
   'Visa Center',
