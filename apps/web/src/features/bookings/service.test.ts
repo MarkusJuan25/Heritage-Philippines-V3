@@ -33,6 +33,10 @@ const repositoryMocks = vi.hoisted(() => ({
   updateBookingStatusWithHistory: vi.fn(),
   findClientBookingFacts: vi.fn(),
   findClientBookingPreview: vi.fn(),
+  CLIENT_BOOKING_LIST_PAGE_SIZE: 10,
+  countClientBookings: vi.fn(),
+  findClientBookingListPage: vi.fn(),
+  findClientBookingDetailByReference: vi.fn(),
   insertAuditLog: vi.fn(),
 }));
 vi.mock('./repository', () => repositoryMocks);
@@ -48,7 +52,9 @@ import type { BookingActor, BookingRecord } from './repository';
 import {
   createBooking,
   getBookingById,
+  getClientBookingDetail,
   getClientBookingFacts,
+  getClientBookingListPage,
   getClientBookingPreview,
   listBookings,
   updateBookingStatus,
@@ -770,5 +776,269 @@ describe('getClientBookingFacts / getClientBookingPreview (Contracts D and E)', 
       'Completed',
       'Cancelled',
     ]);
+  });
+});
+
+describe('getClientBookingListPage (D-049 §2, §4)', () => {
+  beforeEach(() => {
+    authorizationMocks.canAccessClient.mockReset();
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+    repositoryMocks.findClientBookingListPage.mockClear();
+    repositoryMocks.countClientBookings.mockClear();
+  });
+
+  it('reject a non-CLIENT actor with ROLE_NOT_PERMITTED before canAccessClient or any repository read', async () => {
+    for (const actor of [ADMIN_MANAGER, TRAVEL_CONSULTANT]) {
+      await expect(getClientBookingListPage(actor, PORTAL_CLIENT_ID, 1)).rejects.toMatchObject({
+        name: 'BookingError',
+        code: 'ROLE_NOT_PERMITTED',
+      });
+    }
+    expect(authorizationMocks.canAccessClient).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientBookingListPage).not.toHaveBeenCalled();
+    expect(repositoryMocks.countClientBookings).not.toHaveBeenCalled();
+  });
+
+  it('calls canAccessClient BEFORE any Booking repository query, and rejects a denial with BOOKING_FORBIDDEN', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(
+      getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 1),
+    ).rejects.toMatchObject({ name: 'BookingError', code: 'BOOKING_FORBIDDEN' });
+    expect(repositoryMocks.findClientBookingListPage).not.toHaveBeenCalled();
+    expect(repositoryMocks.countClientBookings).not.toHaveBeenCalled();
+  });
+
+  it('page 1 queries directly with skip 0 and take pageSize + 1, issuing no count query', async () => {
+    repositoryMocks.findClientBookingListPage.mockResolvedValue([]);
+
+    const result = await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 1);
+
+    expect(repositoryMocks.findClientBookingListPage).toHaveBeenCalledWith(
+      prisma,
+      PORTAL_CLIENT_ID,
+      { skip: 0, take: 11 },
+    );
+    expect(repositoryMocks.countClientBookings).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'page', items: [], page: 1, hasNext: false });
+  });
+
+  it('sets hasNext and renders exactly 10 items when an 11th row is returned', async () => {
+    const rows = Array.from({ length: 11 }, (_, i) => ({
+      bookingReference: `HPB-${String(i).padStart(20, '0')}`,
+      status: 'CONFIRMED',
+      travelStartDate: null,
+      travelEndDate: null,
+      destination: null,
+      tourPackageName: null,
+    }));
+    repositoryMocks.findClientBookingListPage.mockResolvedValue(rows);
+
+    const result = await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 1);
+
+    expect(result.kind).toBe('page');
+    if (result.kind === 'page') {
+      expect(result.items).toHaveLength(10);
+      expect(result.hasNext).toBe(true);
+    }
+  });
+
+  it('does not set hasNext when exactly pageSize rows are returned', async () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ({
+      bookingReference: `HPB-${String(i).padStart(20, '0')}`,
+      status: 'CONFIRMED',
+      travelStartDate: null,
+      travelEndDate: null,
+      destination: null,
+      tourPackageName: null,
+    }));
+    repositoryMocks.findClientBookingListPage.mockResolvedValue(rows);
+
+    const result = await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 1);
+
+    expect(result.kind).toBe('page');
+    if (result.kind === 'page') {
+      expect(result.items).toHaveLength(10);
+      expect(result.hasNext).toBe(false);
+    }
+  });
+
+  it('for page > 1, counts before computing any offset, and the offset query runs only once the page is confirmed to exist', async () => {
+    repositoryMocks.countClientBookings.mockResolvedValue(25);
+    repositoryMocks.findClientBookingListPage.mockResolvedValue([]);
+
+    await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 2);
+
+    expect(repositoryMocks.countClientBookings).toHaveBeenCalledWith(prisma, PORTAL_CLIENT_ID);
+    expect(repositoryMocks.findClientBookingListPage).toHaveBeenCalledWith(
+      prisma,
+      PORTAL_CLIENT_ID,
+      { skip: 10, take: 11 },
+    );
+    const countOrder = repositoryMocks.countClientBookings.mock.invocationCallOrder[0]!;
+    const listOrder = repositoryMocks.findClientBookingListPage.mock.invocationCallOrder[0]!;
+    expect(countOrder).toBeLessThan(listOrder);
+  });
+
+  it('redirects when the requested page exceeds the last existing page, without issuing an offset query', async () => {
+    repositoryMocks.countClientBookings.mockResolvedValue(15); // last page = 2
+
+    const result = await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 3);
+
+    expect(result).toEqual({ kind: 'redirect' });
+    expect(repositoryMocks.findClientBookingListPage).not.toHaveBeenCalled();
+  });
+
+  it('redirects when a confirmed page > 1 concurrently resolves to zero rows', async () => {
+    repositoryMocks.countClientBookings.mockResolvedValue(15); // last page = 2
+    repositoryMocks.findClientBookingListPage.mockResolvedValue([]);
+
+    const result = await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 2);
+
+    expect(result).toEqual({ kind: 'redirect' });
+  });
+
+  it('resolves to a plain redirect signal rather than throwing or calling a navigation function, for a zero-booking client', async () => {
+    repositoryMocks.countClientBookings.mockResolvedValue(0);
+
+    const result = await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 5);
+
+    expect(result).toEqual({ kind: 'redirect' });
+  });
+});
+
+describe('getClientBookingDetail (D-049 §2, §3, §5, §7)', () => {
+  const VALID_REFERENCE = `HPB-${'A'.repeat(20)}`;
+
+  beforeEach(() => {
+    authorizationMocks.canAccessClient.mockReset();
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+    repositoryMocks.findClientBookingDetailByReference.mockClear();
+  });
+
+  it('returns null for a malformed bookingReference without calling canAccessClient or any repository function', async () => {
+    for (const malformed of [
+      'not-a-reference',
+      `HPB-${'a'.repeat(20)}`, // lowercase
+      `HPB-${'A'.repeat(19)}`, // too short
+      `HPB-${'A'.repeat(21)}`, // too long
+      `XXX-${'A'.repeat(20)}`, // wrong prefix
+      '',
+    ]) {
+      const result = await getClientBookingDetail(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, malformed);
+      expect(result).toBeNull();
+    }
+    expect(authorizationMocks.canAccessClient).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientBookingDetailByReference).not.toHaveBeenCalled();
+  });
+
+  it('reject a non-CLIENT actor with ROLE_NOT_PERMITTED before canAccessClient or any repository read, for a well-formed reference', async () => {
+    for (const actor of [ADMIN_MANAGER, TRAVEL_CONSULTANT]) {
+      await expect(
+        getClientBookingDetail(actor, PORTAL_CLIENT_ID, VALID_REFERENCE),
+      ).rejects.toMatchObject({ name: 'BookingError', code: 'ROLE_NOT_PERMITTED' });
+    }
+    expect(authorizationMocks.canAccessClient).not.toHaveBeenCalled();
+    expect(repositoryMocks.findClientBookingDetailByReference).not.toHaveBeenCalled();
+  });
+
+  it('calls canAccessClient BEFORE the repository read, and rejects a denial with BOOKING_FORBIDDEN', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: false, status: 403 });
+
+    await expect(
+      getClientBookingDetail(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, VALID_REFERENCE),
+    ).rejects.toMatchObject({ name: 'BookingError', code: 'BOOKING_FORBIDDEN' });
+    expect(repositoryMocks.findClientBookingDetailByReference).not.toHaveBeenCalled();
+  });
+
+  it('calls the repository with the exact combined clientId + bookingReference predicate', async () => {
+    repositoryMocks.findClientBookingDetailByReference.mockResolvedValue(null);
+
+    await getClientBookingDetail(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, VALID_REFERENCE);
+
+    expect(repositoryMocks.findClientBookingDetailByReference).toHaveBeenCalledWith(
+      prisma,
+      PORTAL_CLIENT_ID,
+      VALID_REFERENCE,
+    );
+  });
+
+  it('returns null — never throws — for a nonexistent, DRAFT, or foreign-client booking (indistinguishable at this layer)', async () => {
+    repositoryMocks.findClientBookingDetailByReference.mockResolvedValue(null);
+
+    const result = await getClientBookingDetail(
+      CLIENT_PORTAL_ACTOR,
+      PORTAL_CLIENT_ID,
+      VALID_REFERENCE,
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it('maps exactly the D-049 §5 detail allow-list, excluding every database identifier, internalNotes, and financial field', async () => {
+    repositoryMocks.findClientBookingDetailByReference.mockResolvedValue({
+      bookingReference: VALID_REFERENCE,
+      status: 'CONFIRMED',
+      tourPackageName: 'Island Hopping',
+      destination: 'Cebu',
+      travelStartDate: new Date('2026-10-01T00:00:00.000Z'),
+      travelEndDate: new Date('2026-10-05T00:00:00.000Z'),
+      travelerCount: 2,
+      includedServices: 'Hotel, breakfast',
+      excludedServices: 'Airfare',
+      specialRequests: 'Ground floor room',
+      clientVisibleNotes: 'Welcome pack included',
+    });
+
+    const result = await getClientBookingDetail(
+      CLIENT_PORTAL_ACTOR,
+      PORTAL_CLIENT_ID,
+      VALID_REFERENCE,
+    );
+
+    expect(result).toEqual({
+      bookingReference: VALID_REFERENCE,
+      statusLabel: 'Confirmed',
+      tourPackageName: 'Island Hopping',
+      destination: 'Cebu',
+      travelStartDate: new Date('2026-10-01T00:00:00.000Z'),
+      travelEndDate: new Date('2026-10-05T00:00:00.000Z'),
+      travelerCount: 2,
+      includedServices: 'Hotel, breakfast',
+      excludedServices: 'Airfare',
+      specialRequests: 'Ground floor room',
+      clientVisibleNotes: 'Welcome pack included',
+    });
+    for (const forbidden of [
+      'id',
+      'clientId',
+      'proposalVersionId',
+      'internalNotes',
+      'totalAmount',
+      'currencyCode',
+      'status',
+    ]) {
+      expect(result).not.toHaveProperty(forbidden);
+    }
+  });
+});
+
+describe('client-portal Booking reads perform independent authorization checks (D-049 §2)', () => {
+  beforeEach(() => {
+    authorizationMocks.canAccessClient.mockReset();
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+    repositoryMocks.findClientBookingListPage.mockClear();
+    repositoryMocks.findClientBookingDetailByReference.mockClear();
+  });
+
+  it("getClientBookingListPage and getClientBookingDetail each call canAccessClient their own time — neither shares the other's check", async () => {
+    repositoryMocks.findClientBookingListPage.mockResolvedValue([]);
+    repositoryMocks.findClientBookingDetailByReference.mockResolvedValue(null);
+    const reference = `HPB-${'A'.repeat(20)}`;
+
+    await getClientBookingListPage(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, 1);
+    await getClientBookingDetail(CLIENT_PORTAL_ACTOR, PORTAL_CLIENT_ID, reference);
+
+    expect(authorizationMocks.canAccessClient).toHaveBeenCalledTimes(2);
   });
 });

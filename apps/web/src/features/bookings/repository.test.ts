@@ -4,10 +4,13 @@ import type { Prisma } from '@/generated/prisma/client';
 
 import {
   NON_DRAFT_BOOKING_STATUSES,
+  countClientBookings,
   createBookingWithInitialHistory,
   findBookingByIdForActor,
   findBookingByProposalVersionIdForActor,
+  findClientBookingDetailByReference,
   findClientBookingFacts,
+  findClientBookingListPage,
   findClientBookingPreview,
   findEligibleProposalVersionForActor,
   insertAuditLog,
@@ -436,5 +439,142 @@ describe('findClientBookingPreview', () => {
         tourPackageName: null,
       },
     ]);
+  });
+});
+
+describe('countClientBookings (D-049 §4)', () => {
+  it("counts only the given client's non-DRAFT bookings", async () => {
+    const count = vi.fn().mockResolvedValue(3);
+    const db = { booking: { count } } as unknown as Prisma.TransactionClient;
+
+    const result = await countClientBookings(db, 'client-1');
+
+    expect(result).toBe(3);
+    expect(count).toHaveBeenCalledWith({
+      where: { clientId: 'client-1', status: { not: 'DRAFT' } },
+    });
+  });
+});
+
+describe('findClientBookingListPage (D-049 §4, §5)', () => {
+  it('queries by clientId with DRAFT excluded, deterministic ordering, and the supplied skip/take', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const db = { booking: { findMany } } as unknown as Prisma.TransactionClient;
+
+    await findClientBookingListPage(db, 'client-1', { skip: 10, take: 11 });
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { clientId: 'client-1', status: { not: 'DRAFT' } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+      skip: 10,
+      take: 11,
+      select: expect.any(Object),
+    });
+  });
+
+  it('returns only the D-040 §5 six-field allow-list, never internalNotes, clientVisibleNotes, travelerCount, or the database id', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        bookingReference: `HPB-${'A'.repeat(20)}`,
+        status: 'CONFIRMED',
+        travelStartDate: null,
+        travelEndDate: null,
+        destination: 'Cebu',
+        tourPackageName: 'Island Hopping',
+      },
+    ]);
+    const db = { booking: { findMany } } as unknown as Prisma.TransactionClient;
+
+    const rows = await findClientBookingListPage(db, 'client-1', { skip: 0, take: 11 });
+
+    expect(rows).toEqual([
+      {
+        bookingReference: `HPB-${'A'.repeat(20)}`,
+        status: 'CONFIRMED',
+        travelStartDate: null,
+        travelEndDate: null,
+        destination: 'Cebu',
+        tourPackageName: 'Island Hopping',
+      },
+    ]);
+    const row = rows[0]!;
+    for (const forbidden of ['id', 'internalNotes', 'clientVisibleNotes', 'travelerCount']) {
+      expect(row).not.toHaveProperty(forbidden);
+    }
+  });
+});
+
+describe('findClientBookingDetailByReference (D-049 §2, §5)', () => {
+  const REFERENCE = `HPB-${'A'.repeat(20)}`;
+
+  it('queries with clientId, bookingReference, and non-DRAFT status in one combined predicate', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const db = { booking: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    await findClientBookingDetailByReference(db, 'client-1', REFERENCE);
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        clientId: 'client-1',
+        bookingReference: REFERENCE,
+        status: { not: 'DRAFT' },
+      },
+      select: expect.any(Object),
+    });
+    expect(findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null for a zero-row result — nonexistent, DRAFT, or another client's booking are all indistinguishable here", async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const db = { booking: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientBookingDetailByReference(db, 'client-1', REFERENCE);
+
+    expect(result).toBeNull();
+  });
+
+  it('maps exactly the D-049 §5 detail allow-list, excluding every database identifier, internalNotes, and financial field', async () => {
+    const findFirst = vi.fn().mockResolvedValue({
+      bookingReference: REFERENCE,
+      status: 'CONFIRMED',
+      tourPackageName: 'Island Hopping',
+      destination: 'Cebu',
+      travelStartDate: new Date('2026-10-01T00:00:00.000Z'),
+      travelEndDate: new Date('2026-10-05T00:00:00.000Z'),
+      travelerCount: 2,
+      includedServices: 'Hotel, breakfast',
+      excludedServices: 'Airfare',
+      specialRequests: 'Ground floor room',
+      clientVisibleNotes: 'Welcome pack included',
+    });
+    const db = { booking: { findFirst } } as unknown as Prisma.TransactionClient;
+
+    const result = await findClientBookingDetailByReference(db, 'client-1', REFERENCE);
+
+    expect(result).toEqual({
+      bookingReference: REFERENCE,
+      status: 'CONFIRMED',
+      tourPackageName: 'Island Hopping',
+      destination: 'Cebu',
+      travelStartDate: new Date('2026-10-01T00:00:00.000Z'),
+      travelEndDate: new Date('2026-10-05T00:00:00.000Z'),
+      travelerCount: 2,
+      includedServices: 'Hotel, breakfast',
+      excludedServices: 'Airfare',
+      specialRequests: 'Ground floor room',
+      clientVisibleNotes: 'Welcome pack included',
+    });
+    for (const forbidden of [
+      'id',
+      'clientId',
+      'proposalVersionId',
+      'internalNotes',
+      'totalAmount',
+      'currencyCode',
+      'createdAt',
+      'updatedAt',
+    ]) {
+      expect(result).not.toHaveProperty(forbidden);
+    }
   });
 });
