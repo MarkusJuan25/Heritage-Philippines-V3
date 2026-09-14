@@ -439,6 +439,19 @@ test('D-047 §15: an activated client reads, responds to (Accept/Decline/Request
     // Open the Client detail page.
     await page.getByRole('link', { name: 'Clients', exact: true }).click();
     await page.waitForURL((url) => url.pathname === '/admin/clients');
+    // /admin/clients is a Server Component that awaits a real listClients()
+    // query before any content exists, and this is a client-side Next.js
+    // <Link> transition (no full document reload) — waitForURL's own
+    // load-based sync does not guarantee that RSC render has actually
+    // streamed in yet. Same targeted remedy expectAfterRefresh already
+    // applies elsewhere in this file (D-049 Stage 4 cross-tier
+    // investigation: confirmed directly as the cause of an otherwise
+    // symptomless getByLabel('Search') timeout here).
+    await expectAfterRefresh(
+      page,
+      () => page.getByLabel('Search'),
+      'Clients list Search field after navigating from the Clients nav link',
+    );
     await page.getByLabel('Search').fill(nameCanary);
     await page.getByRole('button', { name: 'Apply filters' }).click();
     await page.locator('a:visible', { hasText: nameCanary }).click();

@@ -64,6 +64,36 @@ async function expectAfterRefresh(
   }
 }
 
+/**
+ * Retries a critical, already-exact-id-scoped cleanup write up to
+ * `attempts` times with a short linear backoff — a targeted remedy for a
+ * transient database/driver error under the isolated server's small
+ * connection pool (the same class of stall `expectAfterRefresh` above
+ * already tolerates for UI reads), never a broad/wildcard retry and never
+ * a Playwright test retry. D-049 Stage 4 cross-tier investigation
+ * confirmed this exact gap directly: a single transient failure on one of
+ * these writes previously left a PortalInvitation row undeleted, which
+ * then made the tcAccount fixture's own downstream Client `deleteMany`
+ * fail on the `onDelete: Restrict` FK — permanently orphaning Client and
+ * User rows across full E2E runs (never a data-loss risk in the other
+ * direction: every retried call is the exact same already-scoped
+ * `deleteMany`/`delete`, so a successful earlier attempt plus a
+ * network-only failure on the response is simply a harmless no-op retry).
+ */
+async function withCleanupRetry<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+  throw lastError;
+}
+
 // --- Constants mirrored from feature modules (duplicated, not imported:
 // the feature modules transitively import @/lib/db / the generated Prisma
 // client, which cannot be loaded from Playwright-run code — see
@@ -439,6 +469,19 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
     // Open the Client detail page.
     await page.getByRole('link', { name: 'Clients', exact: true }).click();
     await page.waitForURL((url) => url.pathname === '/admin/clients');
+    // /admin/clients is a Server Component that awaits a real listClients()
+    // query before any content exists, and this is a client-side Next.js
+    // <Link> transition (no full document reload) — waitForURL's own
+    // load-based sync does not guarantee that RSC render has actually
+    // streamed in yet. Same targeted remedy expectAfterRefresh already
+    // applies elsewhere in this file (D-049 Stage 4 cross-tier
+    // investigation: confirmed directly as the cause of an otherwise
+    // symptomless getByLabel('Search') timeout here).
+    await expectAfterRefresh(
+      page,
+      () => page.getByLabel('Search'),
+      'Clients list Search field after navigating from the Clients nav link',
+    );
     await page.getByLabel('Search').fill(nameCanary);
     await page.getByRole('button', { name: 'Apply filters' }).click();
     await page.locator('a:visible', { hasText: nameCanary }).click();
@@ -844,10 +887,10 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
         await expect(clientPage.getByText(client.email, { exact: true })).toBeVisible();
 
         // Navigation — ten labels verbatim. On `/client`, "Home / Overview" is
-        // the current item (a non-link <span aria-current="page">) and
-        // "My Journey" (D-047 §2) is the one real in-app <Link>; the remaining
-        // eight later-phase items are inert with a visible "Coming soon" and no
-        // href.
+        // the current item (a non-link <span aria-current="page">); "My
+        // Journey" (D-047 §2) and "Bookings" (D-049 §7) are the two real
+        // in-app <Link>s; the remaining seven later-phase items are inert
+        // with a visible "Coming soon" and no href.
         const navItems = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .locator('li');
@@ -862,14 +905,20 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
           .getByText('Home / Overview', { exact: true });
         await expect(current).toHaveAttribute('aria-current', 'page');
         expect(await current.evaluate((node) => node.tagName)).toBe('SPAN');
-        // Exactly one real navigation link: "My Journey" -> /client/my-journey.
+        // Exactly two real navigation links: "My Journey" ->
+        // /client/my-journey and "Bookings" -> /client/bookings (D-049 §7
+        // promoted the previously-inert "Bookings" label to a real link).
         const navLinks = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .getByRole('link');
-        await expect(navLinks).toHaveCount(1);
-        await expect(navLinks).toHaveAccessibleName('My Journey');
-        await expect(navLinks).toHaveAttribute('href', '/client/my-journey');
-        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(8);
+        await expect(navLinks).toHaveCount(2);
+        const myJourneyLink = navLinks.filter({ hasText: 'My Journey' });
+        await expect(myJourneyLink).toHaveAccessibleName('My Journey');
+        await expect(myJourneyLink).toHaveAttribute('href', '/client/my-journey');
+        const bookingsLink = navLinks.filter({ hasText: 'Bookings' });
+        await expect(bookingsLink).toHaveAccessibleName('Bookings');
+        await expect(bookingsLink).toHaveAttribute('href', '/client/bookings');
+        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(7);
 
         // Consultant card + support-guidance line (the converting TC is
         // auto-assigned during Lead -> Client conversion).
@@ -1172,16 +1221,25 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
       }
 
       // 3. ClientProfile before its Client / User (onDelete: Restrict).
+      // Retried (withCleanupRetry) — the tcAccount fixture's own downstream
+      // Client deleteMany depends on this having actually committed.
       if (clientIds.length > 0) {
-        await prisma.clientProfile.deleteMany({ where: { clientId: { in: clientIds } } });
+        await withCleanupRetry(() =>
+          prisma.clientProfile.deleteMany({ where: { clientId: { in: clientIds } } }),
+        );
         // 4. PortalInvitation.
-        await prisma.portalInvitation.deleteMany({ where: { clientId: { in: clientIds } } });
+        await withCleanupRetry(() =>
+          prisma.portalInvitation.deleteMany({ where: { clientId: { in: clientIds } } }),
+        );
       }
 
       // 5. The activated CLIENT users + the synthetic no-profile CLIENT
-      //    user (Account cascade-deletes with each).
+      //    user (Account cascade-deletes with each). Retried for the same
+      //    reason as step 3/4.
       if (allDisposableUserIds.length > 0) {
-        await prisma.user.deleteMany({ where: { id: { in: allDisposableUserIds } } });
+        await withCleanupRetry(() =>
+          prisma.user.deleteMany({ where: { id: { in: allDisposableUserIds } } }),
+        );
       }
 
       // 6. In-test residue check — by recorded id, no time predicate; only
