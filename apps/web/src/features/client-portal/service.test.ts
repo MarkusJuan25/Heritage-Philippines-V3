@@ -39,9 +39,11 @@ const assignmentsServiceMock = vi.hoisted(() => ({ getActiveConsultantNameForCli
 vi.mock('@/features/assignments/service', () => assignmentsServiceMock);
 
 import type { AuthenticatedUser } from '@/lib/auth/guards';
+import { BookingError } from '@/features/bookings/errors';
+import { ProposalError } from '@/features/proposals/errors';
 
 import { ClientPortalError } from './errors';
-import { getClientOverview } from './service';
+import { getClientJourneyProgress, getClientOverview } from './service';
 
 const CLIENT: AuthenticatedUser = {
   id: 'user-client-1',
@@ -251,5 +253,187 @@ describe('getClientOverview — assembled DTO', () => {
       expect(serialized).not.toContain(secret);
     }
     expect(overview.travelStatus.progressLine.state).toBe('AWAITING_FIRST_PROPOSAL');
+  });
+});
+
+// `getClientJourneyProgress` (D-050 §§2-4, 7) reuses only Contracts B/D and
+// the pure `deriveTravelStatus` — mocked identically to the suite above, plus
+// the real `ProposalError`/`BookingError` classes (not mocked) so a reused
+// contract's own ownership rejection can be constructed and asserted as
+// propagating unconverted, per D-050 §2/§7's "no read relies on another
+// read's already-performed check" discipline.
+describe('getClientJourneyProgress — authorization outcomes', () => {
+  it('rejects a non-CLIENT actor with ClientPortalError FORBIDDEN before either reused contract is called', async () => {
+    await expect(getClientJourneyProgress(STAFF, OWNED.clientId)).rejects.toMatchObject({
+      name: 'ClientPortalError',
+      code: 'FORBIDDEN',
+      status: 403,
+    });
+    expect(proposalsServiceMock.getClientProposalFacts).not.toHaveBeenCalled();
+    expect(bookingsServiceMock.getClientBookingFacts).not.toHaveBeenCalled();
+  });
+
+  it("propagates the proposal contract's own CLIENT_FORBIDDEN unconverted, never as a ClientPortalError or BookingError", async () => {
+    proposalsServiceMock.getClientProposalFacts.mockRejectedValue(
+      new ProposalError('CLIENT_FORBIDDEN', 'You do not have access to this client.'),
+    );
+    bookingsServiceMock.getClientBookingFacts.mockResolvedValue({
+      byStatus: { ...EMPTY_BY_STATUS },
+    });
+
+    await expect(getClientJourneyProgress(CLIENT, 'client-not-owned')).rejects.toBeInstanceOf(
+      ProposalError,
+    );
+    await expect(getClientJourneyProgress(CLIENT, 'client-not-owned')).rejects.toMatchObject({
+      name: 'ProposalError',
+      code: 'CLIENT_FORBIDDEN',
+    });
+  });
+
+  it("propagates the booking contract's own BOOKING_FORBIDDEN unconverted, never as a ClientPortalError or ProposalError", async () => {
+    proposalsServiceMock.getClientProposalFacts.mockResolvedValue({
+      currentVisibleTotal: 0,
+      awaitingResponse: 0,
+      accepted: 0,
+      acceptedWithoutClientVisibleBooking: 0,
+      respondedNonAccept: 0,
+    });
+    bookingsServiceMock.getClientBookingFacts.mockRejectedValue(
+      new BookingError('BOOKING_FORBIDDEN', 'Booking not found or not accessible.'),
+    );
+
+    await expect(getClientJourneyProgress(CLIENT, 'client-not-owned')).rejects.toBeInstanceOf(
+      BookingError,
+    );
+    await expect(getClientJourneyProgress(CLIENT, 'client-not-owned')).rejects.toMatchObject({
+      name: 'BookingError',
+      code: 'BOOKING_FORBIDDEN',
+    });
+  });
+
+  it('calls both reused contracts with the caller-supplied clientId on the success path, never short-circuiting either', async () => {
+    proposalsServiceMock.getClientProposalFacts.mockResolvedValue({
+      currentVisibleTotal: 1,
+      awaitingResponse: 1,
+      accepted: 0,
+      acceptedWithoutClientVisibleBooking: 0,
+      respondedNonAccept: 0,
+    });
+    bookingsServiceMock.getClientBookingFacts.mockResolvedValue({
+      byStatus: { ...EMPTY_BY_STATUS, CONFIRMED: 1 },
+    });
+
+    await getClientJourneyProgress(CLIENT, OWNED.clientId);
+
+    expect(proposalsServiceMock.getClientProposalFacts).toHaveBeenCalledTimes(1);
+    expect(proposalsServiceMock.getClientProposalFacts).toHaveBeenCalledWith(
+      CLIENT,
+      OWNED.clientId,
+    );
+    expect(bookingsServiceMock.getClientBookingFacts).toHaveBeenCalledTimes(1);
+    expect(bookingsServiceMock.getClientBookingFacts).toHaveBeenCalledWith(CLIENT, OWNED.clientId);
+    // Neither of getClientOverview's other four reads is this composite's
+    // concern (D-050 §3) — confirm none of them is called by this function.
+    expect(proposalsServiceMock.getClientProposalPreview).not.toHaveBeenCalled();
+    expect(bookingsServiceMock.getClientBookingPreview).not.toHaveBeenCalled();
+    expect(clientsServiceMock.getOwnClientForUser).not.toHaveBeenCalled();
+    expect(assignmentsServiceMock.getActiveConsultantNameForClient).not.toHaveBeenCalled();
+  });
+});
+
+describe('getClientJourneyProgress — composed DTO', () => {
+  it('composes proposalLine and progressLine identically to the shared deriveTravelStatus derivation', async () => {
+    proposalsServiceMock.getClientProposalFacts.mockResolvedValue({
+      currentVisibleTotal: 1,
+      awaitingResponse: 1,
+      accepted: 0,
+      acceptedWithoutClientVisibleBooking: 0,
+      respondedNonAccept: 0,
+    });
+    bookingsServiceMock.getClientBookingFacts.mockResolvedValue({
+      byStatus: { ...EMPTY_BY_STATUS, CONFIRMED: 2 },
+    });
+
+    const progress = await getClientJourneyProgress(CLIENT, OWNED.clientId);
+
+    expect(progress).toEqual({
+      proposalLine: {
+        state: 'PROPOSALS_AWAITING_YOU',
+        sentence: 'You have 1 proposal waiting for your response.',
+      },
+      progressLine: {
+        state: 'BOOKING_CONFIRMED',
+        sentence: 'At least one booking is confirmed.',
+      },
+    });
+  });
+
+  it('omits proposalLine when there is nothing awaiting and no non-accept response', async () => {
+    proposalsServiceMock.getClientProposalFacts.mockResolvedValue({
+      currentVisibleTotal: 1,
+      awaitingResponse: 0,
+      accepted: 1,
+      acceptedWithoutClientVisibleBooking: 0,
+      respondedNonAccept: 0,
+    });
+    bookingsServiceMock.getClientBookingFacts.mockResolvedValue({
+      byStatus: { ...EMPTY_BY_STATUS },
+    });
+
+    const progress = await getClientJourneyProgress(CLIENT, OWNED.clientId);
+    expect(progress.proposalLine).toBeNull();
+  });
+
+  it('falls through to AWAITING_FIRST_PROPOSAL with no proposal or booking activity of any kind', async () => {
+    proposalsServiceMock.getClientProposalFacts.mockResolvedValue({
+      currentVisibleTotal: 0,
+      awaitingResponse: 0,
+      accepted: 0,
+      acceptedWithoutClientVisibleBooking: 0,
+      respondedNonAccept: 0,
+    });
+    bookingsServiceMock.getClientBookingFacts.mockResolvedValue({
+      byStatus: { ...EMPTY_BY_STATUS },
+    });
+
+    const progress = await getClientJourneyProgress(CLIENT, OWNED.clientId);
+    expect(progress.progressLine).toEqual({
+      state: 'AWAITING_FIRST_PROPOSAL',
+      sentence: "We're preparing your first proposal.",
+    });
+  });
+
+  it('returns exactly the two-field allow-list, with no BookingStatusHistory-shaped or database-identifier key anywhere', async () => {
+    proposalsServiceMock.getClientProposalFacts.mockResolvedValue({
+      currentVisibleTotal: 0,
+      awaitingResponse: 0,
+      accepted: 0,
+      acceptedWithoutClientVisibleBooking: 0,
+      respondedNonAccept: 0,
+    });
+    bookingsServiceMock.getClientBookingFacts.mockResolvedValue({
+      byStatus: { ...EMPTY_BY_STATUS },
+    });
+
+    const progress = await getClientJourneyProgress(CLIENT, OWNED.clientId);
+
+    expect(Object.keys(progress).sort()).toEqual(['progressLine', 'proposalLine']);
+    expect(Object.keys(progress.progressLine).sort()).toEqual(['sentence', 'state']);
+
+    const serialized = JSON.stringify(progress);
+    for (const forbiddenKey of [
+      'previousStatus',
+      'newStatus',
+      'changedByUserId',
+      'bookingId',
+      'clientId',
+      'proposalVersionId',
+      'proposalId',
+      'internalNotes',
+      'totalAmount',
+      'currencyCode',
+    ]) {
+      expect(serialized).not.toContain(forbiddenKey);
+    }
   });
 });

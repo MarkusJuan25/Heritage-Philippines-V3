@@ -10,7 +10,7 @@ import { getOwnClientForUser } from '@/features/clients/service';
 import { getClientProposalFacts, getClientProposalPreview } from '@/features/proposals/service';
 
 import { ClientPortalError } from './errors';
-import type { ClientOverview } from './schemas';
+import type { ClientOverview, ClientOverviewTravelStatus } from './schemas';
 import { deriveTravelStatus, progressLineSentence, proposalLineSentence } from './travel-status';
 
 // The Client Home / Overview composition (docs/HERITAGE_V3_DECISIONS_LOG.md
@@ -100,5 +100,61 @@ export async function getClientOverview(actor: AuthenticatedUser): Promise<Clien
       },
     },
     consultant: consultant ? { name: consultant.name } : null,
+  };
+}
+
+/**
+ * The Client My Journey progress composite (docs/HERITAGE_V3_DECISIONS_LOG.md
+ * D-050 §§2, 3, 4). Reuses the existing D-040 §6 `deriveTravelStatus`
+ * derivation and its two already-independently-self-authorizing Contracts B
+ * (`getClientProposalFacts`) and D (`getClientBookingFacts`) — never a new
+ * derivation, never a new field. Composition-only, exactly like
+ * `getClientOverview` above: no repository.ts, no Prisma import, no
+ * mutation, no consultant/identity/preview reads (§3 — this route's own
+ * heading and paginated proposal list already make those redundant).
+ *
+ * - A non-CLIENT actor is rejected with `ClientPortalError('FORBIDDEN')`
+ *   before either reused read starts (D-050 §2's defense-in-depth gate,
+ *   mirroring `getClientOverview`'s identical gate above) — never a
+ *   `ProposalError` or a `BookingError`.
+ * - `getClientProposalFacts` and `getClientBookingFacts` retain their own
+ *   independent role and ownership checks completely unchanged: each still
+ *   calls its own private `assertClientPortalAccess(actor, clientId)` before
+ *   its own repository query. Neither call's outcome is assumed from the
+ *   other's, or from this function's own top-level gate having passed
+ *   (D-050 §2/§7) — an ownership rejection from whichever reused contract
+ *   runs first (`ProposalError('CLIENT_FORBIDDEN')` or
+ *   `BookingError('BOOKING_FORBIDDEN')`) propagates unconverted and
+ *   unsuppressed.
+ * - `clientId` is always the caller's own server-resolved owned id (D-050
+ *   §2) — never re-resolved here, and never read from a request path,
+ *   query, or component prop.
+ */
+export async function getClientJourneyProgress(
+  actor: AuthenticatedUser,
+  clientId: string,
+): Promise<ClientOverviewTravelStatus> {
+  if (actor.role !== 'CLIENT') {
+    throw new ClientPortalError('FORBIDDEN', FORBIDDEN_MESSAGE);
+  }
+
+  const [proposalFacts, bookingFacts] = await Promise.all([
+    getClientProposalFacts(actor, clientId),
+    getClientBookingFacts(actor, clientId),
+  ]);
+
+  const derived = deriveTravelStatus(proposalFacts, bookingFacts);
+
+  return {
+    proposalLine: derived.proposalLine
+      ? {
+          state: derived.proposalLine,
+          sentence: proposalLineSentence(derived.proposalLine, proposalFacts),
+        }
+      : null,
+    progressLine: {
+      state: derived.progressLine,
+      sentence: progressLineSentence(derived.progressLine),
+    },
   };
 }
