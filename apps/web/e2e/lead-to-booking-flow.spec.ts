@@ -33,8 +33,9 @@ function formatDatetimeLocal(date: Date): string {
  * again — a targeted remedy for a stalled refresh, never an arbitrary
  * sleep. The final attempt gets a longer budget and its failure surfaces
  * normally. Mirrors the reviewed helper of the same name in
- * `client-overview.spec.ts` (D-040); applied here solely to the
- * NEW -> QUALIFIED -> "Convert to Client" wait below, per D-042.
+ * `client-overview.spec.ts` (D-040); applied to the NEW -> QUALIFIED ->
+ * "Convert to Client" wait below (per D-042) and to the post-navigation
+ * Clients-list Search field wait (D-049 Stage 4).
  */
 async function expectAfterRefresh(
   page: Page,
@@ -315,6 +316,19 @@ test('completes the full Lead → Client → Proposal → Booking journey throug
   // 6. Confirm navigation and access to the resulting Client.
   await page.getByRole('link', { name: 'Clients', exact: true }).click();
   await page.waitForURL((url) => url.pathname === '/admin/clients');
+  // /admin/clients is a Server Component that awaits a real listClients()
+  // query before any content exists, and this is a client-side Next.js
+  // <Link> transition (no full document reload) — waitForURL's own
+  // load-based sync does not guarantee that RSC render has actually
+  // streamed in yet. Same targeted remedy expectAfterRefresh already
+  // applies above to the NEW -> QUALIFIED -> "Convert to Client" wait
+  // (D-049 Stage 4 cross-tier investigation: confirmed directly as the
+  // cause of an otherwise symptomless getByLabel('Search') timeout here).
+  await expectAfterRefresh(
+    page,
+    () => page.getByLabel('Search'),
+    'Clients list Search field after navigating from the Clients nav link',
+  );
   await page.getByLabel('Search').fill(leadFullName);
   await page.getByRole('button', { name: 'Apply filters' }).click();
   // ClientTable renders both a mobile-card and a desktop-table copy of

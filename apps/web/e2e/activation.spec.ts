@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+import type { Locator, Page } from '@playwright/test';
 import { generateRandomString } from 'better-auth/crypto';
 
 import { expect, test } from './support/fixtures';
@@ -44,6 +45,39 @@ function extractTrailingId(url: string): string {
     throw new Error(`Could not extract a UUID from URL: ${url}`);
   }
   return id;
+}
+
+/**
+ * Waits for a locator that only appears after a client-side RSC
+ * `router.refresh()` resolves, or after a client-side Next.js <Link>
+ * transition whose destination is a Server Component awaiting a real
+ * database query before it can render at all. If it does not show within
+ * the per-attempt budget, reloads the page (forcing a fresh server render)
+ * and tries again — a targeted remedy for a stalled refresh, never an
+ * arbitrary sleep. The final attempt gets a longer budget and its failure
+ * surfaces normally. Mirrors the reviewed helper of the same name in
+ * `client-overview.spec.ts` / `lead-to-booking-flow.spec.ts` (D-040/D-042);
+ * added here for the post-navigation Clients-list Search field wait
+ * (D-049 Stage 4).
+ */
+async function expectAfterRefresh(
+  page: Page,
+  makeLocator: () => Locator,
+  description: string,
+  attempts = 3,
+): Promise<void> {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await expect(makeLocator(), description).toBeVisible({
+        timeout: attempt < attempts ? 20_000 : 45_000,
+      });
+      return;
+    } catch (error) {
+      if (attempt === attempts) throw error;
+      await page.reload({ waitUntil: 'commit', timeout: 45_000 });
+      await page.waitForTimeout(2500);
+    }
+  }
 }
 
 // --- Runtime narrowing for the RPC bridge's `unknown` transported results
@@ -391,6 +425,18 @@ test.describe('portal activation — live evidence (D-037 Stage 5e)', () => {
 
       await page.getByRole('link', { name: 'Clients', exact: true }).click();
       await page.waitForURL((url) => url.pathname === '/admin/clients');
+      // /admin/clients is a Server Component that awaits a real
+      // listClients() query before any content exists, and this is a
+      // client-side Next.js <Link> transition (no full document reload) —
+      // waitForURL's own load-based sync does not guarantee that RSC
+      // render has actually streamed in yet (D-049 Stage 4 cross-tier
+      // investigation: confirmed directly as the cause of an otherwise
+      // symptomless getByLabel('Search') timeout here).
+      await expectAfterRefresh(
+        page,
+        () => page.getByLabel('Search'),
+        'Clients list Search field after navigating from the Clients nav link',
+      );
       await page.getByLabel('Search').fill(leadFullName);
       await page.getByRole('button', { name: 'Apply filters' }).click();
       await page.locator('a:visible', { hasText: leadFullName }).click();

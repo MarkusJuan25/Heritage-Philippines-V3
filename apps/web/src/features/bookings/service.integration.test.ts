@@ -1547,4 +1547,356 @@ describe.skipIf(!hasTestDatabaseUrl)('bookings service integration (real databas
       });
     });
   });
+
+  // --- D-049 §§2, 4-8: client-scoped Bookings list/detail reads (Stage 2)
+  // — real database. Mirrors the D-040 Contracts D/E block immediately
+  // above: its own fully self-contained local fixtures (not shared with the
+  // outer describe's arrays), reusing the outer `tcActor` only as the
+  // status-history actor, exactly as that block does. ---
+  describe('getClientBookingListPage / getClientBookingDetail (D-049) — real database', () => {
+    let getClientBookingListPage: (typeof import('./service'))['getClientBookingListPage'];
+    let getClientBookingDetail: (typeof import('./service'))['getClientBookingDetail'];
+    const localUserIds: string[] = [];
+    const localClientIds: string[] = [];
+    const localProfileIds: string[] = [];
+    const localProposalIds: string[] = [];
+    const localBookingIds: string[] = [];
+    let clientActor: AuthenticatedUser;
+    let ownedClientId: string;
+    let otherClientId: string;
+
+    // The 12 owned, non-DRAFT bookings used for the pagination proof, in
+    // creation-index order (0 = oldest). `createdAt` is set explicitly and
+    // strictly increasing (one minute apart) rather than left to
+    // `@default(now())`, so `createdAt desc` ordering is unambiguous and
+    // never depends on the random `id` tie-breaker or on two rows landing
+    // in the same database timestamp during a fast test run.
+    const ownedBookingReferences: string[] = [];
+    let richBooking: { id: string; bookingReference: string; proposalVersionId: string };
+    let draftBookingReference: string;
+    let otherClientBookingReference: string;
+    const NONEXISTENT_REFERENCE = `HPB-${'F'.repeat(20)}`;
+
+    async function seedBooking(
+      clientId: string,
+      status: string,
+      createdAt: Date,
+      overrides: {
+        internalNotes?: string;
+        clientVisibleNotes?: string | null;
+        totalAmount?: string;
+        currencyCode?: string;
+        destination?: string | null;
+        tourPackageName?: string | null;
+        travelerCount?: number | null;
+        includedServices?: string | null;
+        excludedServices?: string | null;
+        specialRequests?: string | null;
+      } = {},
+    ): Promise<{ id: string; bookingReference: string; proposalVersionId: string }> {
+      const proposalId = randomUUID();
+      const versionId = randomUUID();
+      const bookingId = randomUUID();
+      const bookingReference = `HPB-${randomUUID().replace(/-/g, '').toUpperCase().slice(0, 20)}`;
+      await prisma!.proposal.create({ data: { id: proposalId, clientId } });
+      localProposalIds.push(proposalId);
+      await prisma!.proposalVersion.create({
+        data: {
+          id: versionId,
+          proposalId,
+          versionNumber: 1,
+          content: `content ${randomUUID()}`,
+          createdByUserId: tcActor.id,
+          clientVisibleAt: new Date(),
+        },
+      });
+      await prisma!.booking.create({
+        data: {
+          id: bookingId,
+          bookingReference,
+          clientId,
+          proposalVersionId: versionId,
+          status: status as never,
+          createdAt,
+          internalNotes: overrides.internalNotes ?? `internal ${randomUUID()}`,
+          clientVisibleNotes: overrides.clientVisibleNotes ?? null,
+          totalAmount: overrides.totalAmount ?? '888888.88',
+          currencyCode: overrides.currencyCode ?? 'PHP',
+          destination: overrides.destination ?? 'Cebu',
+          tourPackageName: overrides.tourPackageName ?? 'City Tour',
+          travelerCount: overrides.travelerCount ?? null,
+          includedServices: overrides.includedServices ?? null,
+          excludedServices: overrides.excludedServices ?? null,
+          specialRequests: overrides.specialRequests ?? null,
+          statusHistory: {
+            create: {
+              id: randomUUID(),
+              previousStatus: null,
+              newStatus: status as never,
+              changedByUserId: tcActor.id,
+            },
+          },
+        },
+      });
+      localBookingIds.push(bookingId);
+      return { id: bookingId, bookingReference, proposalVersionId: versionId };
+    }
+
+    beforeAll(async () => {
+      ({ getClientBookingListPage, getClientBookingDetail } = await import('./service'));
+
+      const userId = randomUUID();
+      ownedClientId = randomUUID();
+      otherClientId = randomUUID();
+      const profileId = randomUUID();
+      const email = `bookings-list-portal-${randomUUID()}@example.test`;
+      await prisma!.user.create({
+        data: { id: userId, name: 'Portal Client', email, role: 'CLIENT', isActive: true },
+      });
+      localUserIds.push(userId);
+      await prisma!.client.create({ data: { id: ownedClientId, fullName: 'Owned', email } });
+      await prisma!.client.create({
+        data: {
+          id: otherClientId,
+          fullName: 'Other',
+          email: `bookings-list-portal-other-${randomUUID()}@example.test`,
+        },
+      });
+      localClientIds.push(ownedClientId, otherClientId);
+      await prisma!.clientProfile.create({
+        data: { id: profileId, userId, clientId: ownedClientId },
+      });
+      localProfileIds.push(profileId);
+      clientActor = { id: userId, email, name: 'Portal Client', role: 'CLIENT' };
+
+      // 12 owned CONFIRMED bookings, oldest first, one minute apart, so
+      // `createdAt desc` gives a fully deterministic newest-first order:
+      // index 11 (newest) first, index 0 (oldest) last. Page size is fixed
+      // at 10 (D-049 §4), so page 1 = indices 11..2 and page 2 = indices
+      // 1..0.
+      const base = new Date('2026-01-01T00:00:00.000Z').getTime();
+      for (let i = 0; i < 12; i += 1) {
+        const createdAt = new Date(base + i * 60_000);
+        // Booking index 0 (the oldest — lands on page 2) doubles as the
+        // "rich" detail-view fixture: every D-049 §5-approved field is set
+        // to a distinctive, greppable value, alongside every excluded field
+        // (internalNotes, totalAmount, currencyCode), so the identifier and
+        // excluded-field leakage scan below has real content to search for.
+        const booking = await seedBooking(ownedClientId, 'CONFIRMED', createdAt, {
+          internalNotes: 'STAFF-ONLY-SECRET-internal-note',
+          clientVisibleNotes: i === 0 ? 'Welcome pack included' : null,
+          totalAmount: '777777.77',
+          currencyCode: 'PHP',
+          destination: 'Cebu',
+          tourPackageName: 'Island Hopping',
+          travelerCount: i === 0 ? 4 : null,
+          includedServices: i === 0 ? 'Hotel, breakfast, guide' : null,
+          excludedServices: i === 0 ? 'Airfare, travel insurance' : null,
+          specialRequests: i === 0 ? 'Ground floor room requested' : null,
+        });
+        ownedBookingReferences[i] = booking.bookingReference;
+        if (i === 0) {
+          richBooking = booking;
+        }
+      }
+
+      const draft = await seedBooking(ownedClientId, 'DRAFT', new Date(base + 999 * 60_000));
+      draftBookingReference = draft.bookingReference;
+
+      const otherBooking = await seedBooking(
+        otherClientId,
+        'CONFIRMED',
+        new Date(base + 1000 * 60_000),
+      );
+      otherClientBookingReference = otherBooking.bookingReference;
+    }, 30000);
+
+    afterAll(async () => {
+      if (!prisma) return;
+      await prisma.bookingStatusHistory.deleteMany({
+        where: { bookingId: { in: localBookingIds } },
+      });
+      await prisma.booking.deleteMany({ where: { id: { in: localBookingIds } } });
+      await prisma.proposalVersion.deleteMany({ where: { proposalId: { in: localProposalIds } } });
+      await prisma.proposal.deleteMany({ where: { id: { in: localProposalIds } } });
+      await prisma.clientProfile.deleteMany({ where: { id: { in: localProfileIds } } });
+      await prisma.client.deleteMany({ where: { id: { in: localClientIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: localUserIds } } });
+    }, 20000);
+
+    it('page 1 returns exactly the 10 newest owned non-DRAFT bookings, newest first, with hasNext true', async () => {
+      const result = await getClientBookingListPage(clientActor, ownedClientId, 1);
+      expect(result.kind).toBe('page');
+      if (result.kind !== 'page') return;
+
+      expect(result.items).toHaveLength(10);
+      expect(result.hasNext).toBe(true);
+      // Newest first: index 11 down to index 2.
+      const expectedOrder = Array.from({ length: 10 }, (_, k) => ownedBookingReferences[11 - k]);
+      expect(result.items.map((item) => item.bookingReference)).toEqual(expectedOrder);
+      expect(result.items.some((item) => item.bookingReference === draftBookingReference)).toBe(
+        false,
+      );
+      expect(
+        result.items.some((item) => item.bookingReference === otherClientBookingReference),
+      ).toBe(false);
+    });
+
+    it('page 2 returns the remaining 2 disjoint bookings (indices 1 and 0), with hasNext false', async () => {
+      const page1 = await getClientBookingListPage(clientActor, ownedClientId, 1);
+      const page2 = await getClientBookingListPage(clientActor, ownedClientId, 2);
+      expect(page2.kind).toBe('page');
+      if (page1.kind !== 'page' || page2.kind !== 'page') return;
+
+      expect(page2.items).toHaveLength(2);
+      expect(page2.hasNext).toBe(false);
+      expect(page2.items.map((item) => item.bookingReference)).toEqual([
+        ownedBookingReferences[1],
+        ownedBookingReferences[0],
+      ]);
+
+      // Disjoint: no reference appears on both pages.
+      const page1Refs = new Set(page1.items.map((item) => item.bookingReference));
+      for (const item of page2.items) {
+        expect(page1Refs.has(item.bookingReference)).toBe(false);
+      }
+    });
+
+    it('redirects for a page beyond the real last page, using the actual database row count (not a stale estimate)', async () => {
+      // The count-before-offset call ORDER is proven at the unit level
+      // (service.test.ts, mocked); this proves the count reflects REAL
+      // rows: 12 owned non-DRAFT bookings / page size 10 = last page 2, so
+      // page 3 must redirect.
+      const result = await getClientBookingListPage(clientActor, ownedClientId, 3);
+      expect(result).toEqual({ kind: 'redirect' });
+    });
+
+    it('redirects for a page far beyond the last page without erroring on an unbounded offset', async () => {
+      const result = await getClientBookingListPage(clientActor, ownedClientId, 500);
+      expect(result).toEqual({ kind: 'redirect' });
+    });
+
+    it("never returns another client's booking through the owning client's list, at any page", async () => {
+      const page1 = await getClientBookingListPage(clientActor, ownedClientId, 1);
+      const page2 = await getClientBookingListPage(clientActor, ownedClientId, 2);
+      const all = [
+        ...(page1.kind === 'page' ? page1.items : []),
+        ...(page2.kind === 'page' ? page2.items : []),
+      ];
+      expect(all.some((item) => item.bookingReference === otherClientBookingReference)).toBe(false);
+    });
+
+    it('a nonexistent bookingReference resolves to null', async () => {
+      const result = await getClientBookingDetail(
+        clientActor,
+        ownedClientId,
+        NONEXISTENT_REFERENCE,
+      );
+      expect(result).toBeNull();
+    });
+
+    it("the owning client's own DRAFT booking resolves to null (DRAFT is never client-visible, even to its owner)", async () => {
+      const result = await getClientBookingDetail(
+        clientActor,
+        ownedClientId,
+        draftBookingReference,
+      );
+      expect(result).toBeNull();
+    });
+
+    it("another client's booking resolves to null through the owning client's detail read — never reachable", async () => {
+      const result = await getClientBookingDetail(
+        clientActor,
+        ownedClientId,
+        otherClientBookingReference,
+      );
+      expect(result).toBeNull();
+    });
+
+    it("resolves the owning client's own booking with the exact D-049 §5 detail allow-list", async () => {
+      const result = await getClientBookingDetail(
+        clientActor,
+        ownedClientId,
+        richBooking.bookingReference,
+      );
+      expect(result).not.toBeNull();
+      if (!result) return;
+
+      expect(Object.keys(result).sort()).toEqual(
+        [
+          'bookingReference',
+          'clientVisibleNotes',
+          'destination',
+          'excludedServices',
+          'includedServices',
+          'specialRequests',
+          'statusLabel',
+          'tourPackageName',
+          'travelEndDate',
+          'travelStartDate',
+          'travelerCount',
+        ].sort(),
+      );
+      expect(result.bookingReference).toBe(richBooking.bookingReference);
+      expect(result.statusLabel).toBe('Confirmed');
+      expect(result.travelerCount).toBe(4);
+      expect(result.includedServices).toBe('Hotel, breakfast, guide');
+      expect(result.excludedServices).toBe('Airfare, travel insurance');
+      expect(result.specialRequests).toBe('Ground floor room requested');
+      expect(result.clientVisibleNotes).toBe('Welcome pack included');
+    });
+
+    it('rejects a CLIENT actor asking for a client they do not own with BOOKING_FORBIDDEN, for both the list and detail reads', async () => {
+      await expect(getClientBookingListPage(clientActor, otherClientId, 1)).rejects.toMatchObject({
+        name: 'BookingError',
+        code: 'BOOKING_FORBIDDEN',
+      });
+      await expect(
+        getClientBookingDetail(clientActor, otherClientId, otherClientBookingReference),
+      ).rejects.toMatchObject({ name: 'BookingError', code: 'BOOKING_FORBIDDEN' });
+    });
+
+    it('rejects a staff actor with ROLE_NOT_PERMITTED, for both the list and detail reads', async () => {
+      await expect(getClientBookingListPage(adminActor, ownedClientId, 1)).rejects.toMatchObject({
+        code: 'ROLE_NOT_PERMITTED',
+      });
+      await expect(
+        getClientBookingDetail(adminActor, ownedClientId, richBooking.bookingReference),
+      ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED' });
+    });
+
+    it(
+      'D-049 §8 identifier and excluded-field leakage scan: the exact seeded plaintext ' +
+        'Booking.id, clientId, proposalVersionId, staff identity, internalNotes, and financial ' +
+        'field values are absent from both the list and detail results',
+      async () => {
+        const page1 = await getClientBookingListPage(clientActor, ownedClientId, 1);
+        const detail = await getClientBookingDetail(
+          clientActor,
+          ownedClientId,
+          richBooking.bookingReference,
+        );
+        const serialized = JSON.stringify({ page1, detail });
+
+        // Exact plaintext values actually seeded above — never a generic
+        // UUID regex (D-049 §8).
+        expect(serialized).not.toContain(richBooking.id);
+        expect(serialized).not.toContain(ownedClientId);
+        expect(serialized).not.toContain(otherClientId);
+        expect(serialized).not.toContain(richBooking.proposalVersionId);
+        expect(serialized).not.toContain(tcActor.id);
+        expect(serialized).not.toContain(tcActor.email);
+        expect(serialized).not.toContain(clientActor.id);
+
+        // Excluded fields (D-049 §5, §6): internalNotes and every financial
+        // field, plus no BookingStatusHistory shape (status timeline) at
+        // all — only the single current `statusLabel` string.
+        expect(serialized).not.toContain('STAFF-ONLY-SECRET-internal-note');
+        expect(serialized).not.toContain('777777.77');
+        expect(serialized).not.toContain('previousStatus');
+        expect(serialized).not.toContain('newStatus');
+        expect(serialized).not.toContain('changedByUserId');
+      },
+    );
+  });
 });
