@@ -634,6 +634,9 @@ test('D-047 §15: an activated client reads, responds to (Accept/Decline/Request
     let htmlA_page1 = '';
     let flightA_page1 = '';
     let htmlA_afterResponses = '';
+    // D-050 §7 — the /client/my-journey composite, captured before any
+    // response is submitted (proposal-only scenario).
+    let htmlA_beforeResponses = '';
     try {
       const a = await contextA.newPage();
 
@@ -703,6 +706,31 @@ test('D-047 §15: an activated client reads, responds to (Accept/Decline/Request
         await renderedFillerIndices(a),
         'page 1 renders exactly fillers 1..7, newest first',
       ).toEqual(page1FillerIndices);
+
+      // --- D-050 §7: the journey-progress composite, at this deterministic
+      //     pre-response point (proposal-only scenario) — 12 current-visible
+      //     proposals (3 admin + 9 fillers), none yet responded to, no
+      //     booking of any kind. proposalLine PROPOSALS_AWAITING_YOU (12),
+      //     progressLine PROPOSAL_IN_REVIEW. Rendered above the proposal
+      //     list, inside the same single <main> landmark. ---
+      await expect(a.getByRole('heading', { level: 2, name: 'Your travel status' })).toBeVisible(
+        SLOW,
+      );
+      await expect(a.getByText('You have 12 proposals waiting for your response.')).toBeVisible(
+        SLOW,
+      );
+      await expect(a.getByText("You're at the proposal-review stage.")).toBeVisible(SLOW);
+      // Render order: the composite heading precedes the first proposal card.
+      const mainLandmarkText = await a.locator('main').innerText();
+      const firstAdminMarker = provisionedA.targets[0]!.contentMarker.slice(0, 40);
+      expect(
+        mainLandmarkText.indexOf('Your travel status'),
+        'the composite must render above the proposal list',
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        mainLandmarkText.indexOf('Your travel status') < mainLandmarkText.indexOf(firstAdminMarker),
+      ).toBe(true);
+      htmlA_beforeResponses = await a.content();
 
       // --- XSS canary: markup-looking proposal content renders as literal
       //     text and is never interpreted or executed. ---
@@ -918,7 +946,7 @@ test('D-047 §15: an activated client reads, responds to (Accept/Decline/Request
     // 9. Identifier-absence + privacy (exact captured strings; never a UUID
     //    regex; the opaque encrypted Server Action reference is never a
     //    match for a plaintext id).
-    const surfacesA = [htmlA_page1, flightA_page1, htmlA_afterResponses];
+    const surfacesA = [htmlA_page1, flightA_page1, htmlA_afterResponses, htmlA_beforeResponses];
     const aSecrets = compact([
       provisionedA.clientId,
       provisionedA.profileId,
