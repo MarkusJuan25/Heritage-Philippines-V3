@@ -2,6 +2,9 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 
 import { getCurrentSession, getCurrentUser } from '@/lib/auth/guards';
+import { ClientPortalError } from '@/features/client-portal/errors';
+import type { ClientOverviewTravelStatus } from '@/features/client-portal/schemas';
+import { getClientJourneyProgress } from '@/features/client-portal/service';
 import { ClientError } from '@/features/clients/errors';
 import { getOwnClientForUser } from '@/features/clients/service';
 import { ProposalError } from '@/features/proposals/errors';
@@ -15,6 +18,7 @@ import {
   type ClientProposalReviewRender,
 } from '@/features/proposals/service';
 
+import { JourneyProgressSection } from './_components/JourneyProgressSection';
 import { ProposalReviewList } from './_components/ProposalReviewList';
 import styles from '../client.module.css';
 
@@ -47,9 +51,11 @@ export const revalidate = 0;
 //
 // It reads exactly one optional URL query, `page=N` (no database
 // identifier, §5), through `parseProposalReviewPageParam`. The owned
-// `clientId` is resolved from the session identity alone via Contract A;
-// the read is re-checked with `canAccessClient` inside the proposals
-// service. D-045 catch: Contract A `null` (no ClientProfile) and a
+// `clientId` is resolved from the session identity alone via Contract A —
+// exactly once, per D-050 §2 — and reused verbatim for both the existing
+// proposal-page read and the new journey-progress composition below; the
+// read is re-checked with `canAccessClient` inside the proposals service.
+// D-045 catch: Contract A `null` (no ClientProfile) and a
 // `ROLE_NOT_PERMITTED` from Contract A (`ClientError`) or the read service
 // (`ProposalError`) resolve to `null` (the layout owns the panel); every
 // other value rethrows to `error.tsx`. `redirect('/login')` is raised
@@ -60,6 +66,20 @@ export const revalidate = 0;
 // The rendered DTO is the identifier-free `ClientProposalReviewRender`
 // (§4): no `Proposal` / `ProposalVersion` / `ProposalAcceptance` id,
 // `ClientProfile.id`, `clientId`, or session value is present in it.
+//
+// D-050 §§2, 5, 7: `getClientJourneyProgress(user, owned.clientId)` runs
+// alongside the existing proposal-page read via `Promise.all` — it retains
+// its own independent `ClientPortalError('FORBIDDEN')` role gate and the
+// reused proposal/booking contracts' own independent ownership checks
+// completely unchanged; neither read's outcome is assumed from the other's.
+// The catch above is extended, not replaced, to additionally map that
+// `ClientPortalError('FORBIDDEN')` to the same `null` outcome. A
+// `ProposalError('CLIENT_FORBIDDEN')`, a `BookingError('BOOKING_FORBIDDEN')`,
+// or any other unexpected error from the new composition is NOT mapped to
+// `null` — it propagates to `error.tsx` exactly as any other unexpected
+// error already does. The composite renders via `JourneyProgressSection`
+// above `ProposalReviewList`, reusing the existing D-040 §6 sentences —
+// no new field, no new status, no new dependency.
 export default async function ClientMyJourneyPage({
   searchParams,
 }: {
@@ -75,6 +95,7 @@ export default async function ClientMyJourneyPage({
   const page = parseProposalReviewPageParam(rawPage);
 
   let render: ClientProposalReviewRender | null = null;
+  let progress: ClientOverviewTravelStatus | null = null;
   let responseActions: ClientProposalResponseAction[] = [];
   try {
     const owned = await getOwnClientForUser(user);
@@ -82,12 +103,16 @@ export default async function ClientMyJourneyPage({
       return null;
     }
 
-    const result = await getClientProposalReviewPage(user, owned.clientId, page);
+    const [result, journeyProgress] = await Promise.all([
+      getClientProposalReviewPage(user, owned.clientId, page),
+      getClientJourneyProgress(user, owned.clientId),
+    ]);
 
     if (result.kind === 'redirect') {
       redirect('/client/my-journey');
     }
 
+    progress = journeyProgress;
     render = result.render;
     responseActions = result.serverModel.cards.map((serverCard) => {
       const respond: ClientProposalResponseAction = async (_state, formData) => {
@@ -139,16 +164,20 @@ export default async function ClientMyJourneyPage({
     ) {
       return null;
     }
+    if (error instanceof ClientPortalError && error.code === 'FORBIDDEN') {
+      return null;
+    }
     throw error;
   }
 
-  if (render === null) {
+  if (render === null || progress === null) {
     return null;
   }
 
   return (
     <div className={styles.overview}>
       <h1 className={styles.pageHeading}>My Journey</h1>
+      <JourneyProgressSection progress={progress} />
       <ProposalReviewList render={render} responseActions={responseActions} />
     </div>
   );
