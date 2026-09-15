@@ -77,7 +77,9 @@ const originalRateLimitSecret = process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET;
 describe.skipIf(!hasTestDatabaseUrl)('client-portal overview integration (real database)', () => {
   let prisma: (typeof import('@/lib/db'))['prisma'] | undefined;
   let getClientOverview: (typeof import('./service'))['getClientOverview'];
+  let getClientJourneyProgress: (typeof import('./service'))['getClientJourneyProgress'];
   let ClientPortalError: (typeof import('./errors'))['ClientPortalError'];
+  let getOwnClientForUser: (typeof import('@/features/clients/service'))['getOwnClientForUser'];
 
   let didSetBetterAuthSecret = false;
   let didSetBetterAuthUrl = false;
@@ -275,6 +277,10 @@ describe.skipIf(!hasTestDatabaseUrl)('client-portal overview integration (real d
   const aClientVisNotes = `CLIENT_VIS_NOTES_A_${randomUUID()}`;
   let aBookingRefConfirmed: string;
   let aBookingRefCancelled: string;
+  // D-050 §7 — the exact ProposalVersion.id already produced by the
+  // existing seed call below, captured (not re-seeded) for the exact-value
+  // identifier-absence scan.
+  let aVersionIdConfirmed: string;
 
   let noProfileActor: AuthenticatedUser;
 
@@ -415,8 +421,9 @@ describe.skipIf(!hasTestDatabaseUrl)('client-portal overview integration (real d
     }
 
     ({ prisma } = await import('@/lib/db'));
-    ({ getClientOverview } = await import('./service'));
+    ({ getClientOverview, getClientJourneyProgress } = await import('./service'));
     ({ ClientPortalError } = await import('./errors'));
+    ({ getOwnClientForUser } = await import('@/features/clients/service'));
 
     const rows = await prisma.$queryRaw<{ current_database: string }[]>`SELECT current_database()`;
     if (rows[0]?.current_database !== REQUIRED_TEST_DATABASE_NAME) {
@@ -452,6 +459,7 @@ describe.skipIf(!hasTestDatabaseUrl)('client-portal overview integration (real d
       withMoney: true,
     });
     aBookingRefConfirmed = a1.bookingReference!;
+    aVersionIdConfirmed = a1.currentVersionId;
     await seedProposalForClient(clientA.clientId, { acceptance: null }); // awaiting #1
     await seedProposalForClient(clientA.clientId, { acceptance: 'ACCEPT', bookingStatus: 'DRAFT' }); // acwcvb
     const a4 = await seedProposalForClient(clientA.clientId, {
@@ -694,5 +702,97 @@ describe.skipIf(!hasTestDatabaseUrl)('client-portal overview integration (real d
         expect(overview.travelStatus.progressLine.state).toBe(spec.progressLine);
       });
     }
+  });
+
+  // D-050 §7 — real-PostgreSQL integration coverage for `getClientJourneyProgress`,
+  // reusing every fixture already seeded above (clientA, clientB, the fifteen
+  // scenario actors) with no new seed and no new teardown. This proves the
+  // COMPOSITION itself (not merely the already-independently-tested
+  // `getClientProposalFacts`/`getClientBookingFacts` contracts) produces the
+  // correct combined result for a second caller.
+  describe('getClientJourneyProgress — composite (D-050)', () => {
+    it('rejects a staff actor with FORBIDDEN before either reused contract runs, mirroring getClientOverview', async () => {
+      await expect(getClientJourneyProgress(adminActor, clientA.clientId)).rejects.toBeInstanceOf(
+        ClientPortalError,
+      );
+      await expect(getClientJourneyProgress(tcActor, clientA.clientId)).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+      });
+    });
+
+    it("matches the Home Overview's own travelStatus exactly for Client A — the same composition, reused by a second caller", async () => {
+      const overview = await getClientOverview(clientA.actor);
+      const progress = await getClientJourneyProgress(clientA.actor, clientA.clientId);
+      expect(progress).toEqual(overview.travelStatus);
+    });
+
+    it('returns exactly the two-key allow-list { proposalLine, progressLine }', async () => {
+      const progress = await getClientJourneyProgress(clientA.actor, clientA.clientId);
+      expect(Object.keys(progress).sort()).toEqual(['progressLine', 'proposalLine']);
+      expect(Object.keys(progress.progressLine).sort()).toEqual(['sentence', 'state']);
+    });
+
+    describe('absolute cross-client isolation', () => {
+      it("Client A's composite contains none of Client B's identity or booking references, and vice versa", async () => {
+        const a = JSON.stringify(await getClientJourneyProgress(clientA.actor, clientA.clientId));
+        const b = JSON.stringify(await getClientJourneyProgress(clientB.actor, clientB.clientId));
+
+        expect(a).not.toContain(clientB.clientId);
+        expect(a).not.toContain(clientB.userId);
+        expect(a).not.toContain(clientB.fullName);
+        expect(a).not.toContain(clientB.email);
+
+        expect(b).not.toContain(clientA.clientId);
+        expect(b).not.toContain(clientA.userId);
+        expect(b).not.toContain(clientA.fullName);
+        expect(b).not.toContain(clientA.email);
+        expect(b).not.toContain(aBookingRefConfirmed);
+        expect(b).not.toContain(aBookingRefCancelled);
+      });
+    });
+
+    describe('composed DTO minimization', () => {
+      it('leaks no internal id, notes, money, currency, proposal content, or booking reference of any kind', async () => {
+        const serialized = JSON.stringify(
+          await getClientJourneyProgress(clientA.actor, clientA.clientId),
+        );
+
+        for (const secret of [
+          clientA.clientId,
+          clientA.userId,
+          clientA.profileId,
+          clientA.notesCanary!,
+          aContentMarker,
+          aInternalNotes,
+          aClientVisNotes,
+          '123456.78',
+          'PHP',
+          // Unlike getClientOverview's booking preview, this composite has no
+          // booking field of any kind — the client-facing reference itself
+          // must also be absent here (D-050 §4).
+          aBookingRefConfirmed,
+          aBookingRefCancelled,
+          ...createdProposalIds,
+          ...createdBookingIds,
+          aVersionIdConfirmed,
+        ]) {
+          expect(serialized).not.toContain(secret);
+        }
+      });
+    });
+
+    it('composes the identical fifteen D-040 §6.4 scenario states as getClientOverview, proving the composition — not merely each already-tested contract', async () => {
+      for (const spec of SCENARIOS) {
+        const actor = scenarioActors.get(spec.n)!;
+        const owned = await getOwnClientForUser(actor);
+        const progress = await getClientJourneyProgress(actor, owned!.clientId);
+        expect(progress.proposalLine?.state ?? null, `scenario ${spec.n} proposalLine`).toBe(
+          spec.proposalLine,
+        );
+        expect(progress.progressLine.state, `scenario ${spec.n} progressLine`).toBe(
+          spec.progressLine,
+        );
+      }
+    });
   });
 });

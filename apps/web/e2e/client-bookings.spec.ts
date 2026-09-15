@@ -786,6 +786,81 @@ test('D-049 §8: an activated client browses their paginated Bookings list, open
       await a.getByRole('link', { name: 'Next' }).focus();
       await expect(a.getByRole('link', { name: 'Next' })).toBeFocused();
 
+      // --- D-050 §7: the journey-progress composite on /client/my-journey,
+      //     proposal-plus-booking scenario — Client A's 11 non-DRAFT
+      //     bookings are all PENDING_CONFIRMATION (the pagination fixture
+      //     above), and all 12 of Client A's proposals (11 + the DRAFT-
+      //     booking one) were externally recorded ACCEPT, never DECLINE /
+      //     REQUEST_CHANGES and never left awaiting — so proposalLine is
+      //     null and progressLine is the peak active-booking state,
+      //     BOOKING_PENDING_CONFIRMATION. Reuses this already-authenticated
+      //     Client A session; no new provisioning. ---
+      const mjResponse = await a.goto('/client/my-journey', {
+        waitUntil: 'commit',
+        timeout: 60_000,
+      });
+      expect(mjResponse, 'the /client/my-journey navigation must yield a response').not.toBeNull();
+      expect(mjResponse!.status()).toBe(200);
+      await expect(a.getByRole('heading', { level: 2, name: 'Your travel status' })).toBeVisible(
+        SLOW,
+      );
+      await expect(
+        a.getByText('At least one booking is awaiting confirmation by our team.'),
+      ).toBeVisible(SLOW);
+      // proposalLine is null: neither of its two possible sentences renders.
+      await expect(a.getByText('waiting for your response', { exact: false })).toHaveCount(0);
+      await expect(
+        a.getByText("We've recorded your response to your proposal.", { exact: false }),
+      ).toHaveCount(0);
+
+      const mjHtml = await a.content();
+      const mjFlight = extractInlineFlight(mjHtml);
+      const mjMainText = await a.locator('main').innerText();
+      // Render order: the composite heading precedes the proposal list
+      // (every one of Client A's proposals here was externally recorded
+      // ACCEPT, so each renders its read-model "You accepted this on ..."
+      // line — the local literal mirrors client-proposal-review.spec.ts's
+      // own RESPONDED_PREFIX.ACCEPT, per this codebase's established
+      // per-file-copy convention rather than a cross-spec-file import).
+      const respondedMarkerIndex = mjMainText.indexOf('You accepted this on');
+      expect(respondedMarkerIndex, 'at least one responded proposal card renders').toBeGreaterThan(
+        -1,
+      );
+      expect(
+        mjMainText.indexOf('Your travel status') < respondedMarkerIndex,
+        'the composite must render above the proposal list',
+      ).toBe(true);
+
+      // Exact-value identifier absence (never a UUID-shape regex): every one
+      // of Client A's own Booking.id / bookingReference / proposalVersionId
+      // values, plus Client B's clientId and the staff actor's identity.
+      const clientAOwnRows = allBookingRows.filter((row) => row.clientId === clientA.clientId);
+      assertAbsent(
+        [mjHtml, mjFlight],
+        [
+          ...clientAOwnRows.map((row) => row.id),
+          ...clientAOwnRows.map((row) => row.bookingReference),
+          ...clientAOwnRows.map((row) => row.proposalVersionId),
+          clientA.clientId,
+          clientB.clientId,
+          tcAccount.userId,
+          tcAccount.email,
+        ],
+        '/client/my-journey composite (proposal-plus-booking)',
+      );
+      assertAbsent(
+        [mjHtml, mjFlight],
+        [
+          'internalNotes',
+          'BookingStatusHistory',
+          'previousStatus',
+          'changedByUserId',
+          'totalAmount',
+          'currencyCode',
+        ],
+        '/client/my-journey composite (excluded-field names)',
+      );
+
       // Loading and unexpected-error states are not asserted here: the
       // loading skeleton is not reliably observable against a local
       // Postgres instance fast enough for Playwright to capture it, and
