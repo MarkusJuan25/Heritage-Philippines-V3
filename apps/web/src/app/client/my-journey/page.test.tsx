@@ -47,6 +47,13 @@ vi.mock('@/features/proposals/service', () => ({
   },
 }));
 
+const { getClientJourneyProgressMock } = vi.hoisted(() => ({
+  getClientJourneyProgressMock: vi.fn(),
+}));
+vi.mock('@/features/client-portal/service', () => ({
+  getClientJourneyProgress: getClientJourneyProgressMock,
+}));
+
 const { revalidatePathMock } = vi.hoisted(() => ({ revalidatePathMock: vi.fn() }));
 vi.mock('next/cache', () => ({ revalidatePath: revalidatePathMock }));
 
@@ -54,6 +61,14 @@ const { reviewListPropsSpy } = vi.hoisted(() => ({ reviewListPropsSpy: vi.fn() }
 vi.mock('./_components/ProposalReviewList', () => ({
   ProposalReviewList: (props: unknown) => {
     reviewListPropsSpy(props);
+    return null;
+  },
+}));
+
+const { journeyProgressPropsSpy } = vi.hoisted(() => ({ journeyProgressPropsSpy: vi.fn() }));
+vi.mock('./_components/JourneyProgressSection', () => ({
+  JourneyProgressSection: (props: unknown) => {
+    journeyProgressPropsSpy(props);
     return null;
   },
 }));
@@ -68,6 +83,9 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn(), refresh: vi.fn() }),
 }));
 
+import { BookingError } from '@/features/bookings/errors';
+import { ClientPortalError } from '@/features/client-portal/errors';
+import type { ClientOverviewTravelStatus } from '@/features/client-portal/schemas';
 import { ClientError } from '@/features/clients/errors';
 import { ProposalError } from '@/features/proposals/errors';
 import type { ClientProposalResponseAction } from '@/features/proposals/service';
@@ -75,6 +93,14 @@ import type { ClientProposalResponseAction } from '@/features/proposals/service'
 import ClientMyJourneyPage from './page';
 
 const SESSION = { user: { id: 'user-client-1', role: 'CLIENT' }, sessionId: 'session-xyz' };
+
+const DEFAULT_PROGRESS: ClientOverviewTravelStatus = {
+  proposalLine: null,
+  progressLine: {
+    state: 'AWAITING_FIRST_PROPOSAL',
+    sentence: "We're preparing your first proposal.",
+  },
+};
 
 function lastReviewListProps() {
   return reviewListPropsSpy.mock.calls.at(-1)![0] as {
@@ -158,6 +184,7 @@ describe('ClientMyJourneyPage', () => {
     getCurrentSessionMock.mockResolvedValue(SESSION);
     getOwnClientForUserMock.mockResolvedValue(OWNED);
     getClientProposalReviewPageMock.mockResolvedValue(pageResult());
+    getClientJourneyProgressMock.mockResolvedValue(DEFAULT_PROGRESS);
     submitClientProposalResponseMock.mockResolvedValue({ responseType: 'ACCEPT' });
   });
 
@@ -167,6 +194,7 @@ describe('ClientMyJourneyPage', () => {
     await expect(callPage()).rejects.toThrow('REDIRECT:/login');
     expect(getOwnClientForUserMock).not.toHaveBeenCalled();
     expect(getClientProposalReviewPageMock).not.toHaveBeenCalled();
+    expect(getClientJourneyProgressMock).not.toHaveBeenCalled();
   });
 
   it('resolves the owned clientId from Contract A alone and passes it (never a query value) to the read', async () => {
@@ -191,6 +219,7 @@ describe('ClientMyJourneyPage', () => {
 
     expect(await callPage()).toBeNull();
     expect(getClientProposalReviewPageMock).not.toHaveBeenCalled();
+    expect(getClientJourneyProgressMock).not.toHaveBeenCalled();
   });
 
   it('returns null for a ROLE_NOT_PERMITTED raised by Contract A (ClientError) — non-CLIENT concurrent execution', async () => {
@@ -231,6 +260,67 @@ describe('ClientMyJourneyPage', () => {
     expect(redirectMock).toHaveBeenCalledWith('/client/my-journey');
   });
 
+  // D-050 §§2, 5, 7 — the new journey-progress composition, added alongside
+  // the existing proposal-page read via Promise.all.
+  describe('journey-progress composition (D-050)', () => {
+    it('passes the server-resolved owned clientId (never a query value) — the only clientId getClientJourneyProgress ever receives', async () => {
+      await callPage({ page: '2', clientId: 'attacker-supplied' });
+
+      expect(getClientJourneyProgressMock).toHaveBeenCalledTimes(1);
+      expect(getClientJourneyProgressMock).toHaveBeenCalledWith(CLIENT_USER, 'client-1');
+    });
+
+    it('renders the progress composite above the existing proposal list', async () => {
+      render((await callPage())!);
+
+      expect(journeyProgressPropsSpy).toHaveBeenCalledTimes(1);
+      expect(reviewListPropsSpy).toHaveBeenCalledTimes(1);
+      const progressOrder = journeyProgressPropsSpy.mock.invocationCallOrder[0]!;
+      const listOrder = reviewListPropsSpy.mock.invocationCallOrder[0]!;
+      expect(progressOrder).toBeLessThan(listOrder);
+    });
+
+    it('passes the resolved progress DTO through to JourneyProgressSection unchanged', async () => {
+      render((await callPage())!);
+
+      expect(journeyProgressPropsSpy).toHaveBeenCalledWith({ progress: DEFAULT_PROGRESS });
+    });
+
+    it("maps the new composition's ClientPortalError('FORBIDDEN') to the existing null/layout-owned state", async () => {
+      getClientJourneyProgressMock.mockRejectedValue(
+        new ClientPortalError(
+          'FORBIDDEN',
+          'This area is for Heritage Philippines client accounts.',
+        ),
+      );
+
+      expect(await callPage()).toBeNull();
+      expect(reviewListPropsSpy).not.toHaveBeenCalled();
+    });
+
+    it('rethrows a ProposalError CLIENT_FORBIDDEN from getClientJourneyProgress — never mapped to null', async () => {
+      getClientJourneyProgressMock.mockRejectedValue(
+        new ProposalError('CLIENT_FORBIDDEN', 'denied'),
+      );
+
+      await expect(callPage()).rejects.toBeInstanceOf(ProposalError);
+    });
+
+    it('rethrows a BookingError BOOKING_FORBIDDEN from getClientJourneyProgress — never mapped to null', async () => {
+      getClientJourneyProgressMock.mockRejectedValue(
+        new BookingError('BOOKING_FORBIDDEN', 'Booking not found or not accessible.'),
+      );
+
+      await expect(callPage()).rejects.toBeInstanceOf(BookingError);
+    });
+
+    it('rethrows an unexpected error from getClientJourneyProgress to the segment error boundary', async () => {
+      getClientJourneyProgressMock.mockRejectedValue(new Error('db exploded'));
+
+      await expect(callPage()).rejects.toThrow('db exploded');
+    });
+  });
+
   it('renders the page-1 heading, threads the render DTO + an index-aligned action per card to the list, and adds no <main>', async () => {
     getClientProposalReviewPageMock.mockResolvedValue(pageResult());
 
@@ -265,6 +355,7 @@ describe('ClientMyJourneyPage — per-card response Server Action (D-047 §6)', 
     getCurrentSessionMock.mockResolvedValue(SESSION);
     getOwnClientForUserMock.mockResolvedValue(OWNED);
     getClientProposalReviewPageMock.mockResolvedValue(pageResult());
+    getClientJourneyProgressMock.mockResolvedValue(DEFAULT_PROGRESS);
     submitClientProposalResponseMock.mockResolvedValue({ responseType: 'ACCEPT' });
   });
 
