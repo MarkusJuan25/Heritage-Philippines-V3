@@ -156,6 +156,7 @@ export async function findActiveParticipant(
 }
 
 export type ClientConversationRow = {
+  id: string;
   category: ConversationCategory;
   createdAt: Date;
   messages: Array<{
@@ -175,6 +176,17 @@ export type ClientConversationRow = {
  * service layer maps that to the exact `"You"`/staff-name `authorLabel`
  * D-051 §9 requires — this repository layer returns only raw, domain-
  * shaped data, never a presentation label (.claude/rules/backend.md).
+ *
+ * The top-level `id` (D-051 Stage 4 client companion-model correction) is
+ * the ONLY identifier this query selects — never `Message.id`, never any
+ * other field beyond what D-051 §9's own client-facing allow-list already
+ * required. It exists solely so the service layer can build the D-047-
+ * style server-only `serverModel` a future `/client/support` Server
+ * Component needs to closure-capture each Conversation's `id` into its own
+ * inline reply Server Action (D-051 §15) — this repository function
+ * itself makes no decision about what is safe to render; `service.ts`'s
+ * own `render`/`serverModel` split is what keeps this `id` out of the
+ * client-facing DTO.
  */
 export async function listConversationsForClient(
   db: Prisma.TransactionClient,
@@ -183,6 +195,7 @@ export async function listConversationsForClient(
   return db.conversation.findMany({
     where: { clientId },
     select: {
+      id: true,
       category: true,
       createdAt: true,
       messages: {
