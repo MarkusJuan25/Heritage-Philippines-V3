@@ -1,6 +1,8 @@
 import styles from '../client.module.css';
 
-// D-040 §7: one of the nine later-phase navigation labels. A visible
+// D-040 §7: one of the six remaining later-phase navigation labels (of
+// the ten canonical labels, four — Home / Overview, My Journey, Bookings,
+// and Support & Messages — are now real routes; D-051 §10). A visible
 // plain-text <li> — a <span> label plus a visible <span> reading
 // "Coming soon". It has NO `href`, NO `<a>`, NO `<button>`, NO `onClick`,
 // NO `tabindex` (not even "-1"), and NO `role`. It is not keyboard-

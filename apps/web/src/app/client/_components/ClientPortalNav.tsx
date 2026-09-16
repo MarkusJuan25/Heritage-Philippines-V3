@@ -14,41 +14,47 @@ import styles from '../client.module.css';
 //   Documents · Visa Center · Regional Tours · Support & Messages ·
 //   Profile · Settings
 //
-// D-047 §2 promoted the previously-inert "My Journey" label to a real
-// in-app link, and D-049 §7 does the same for "Bookings" (`/client/bookings`).
-// There are now three real client-portal routes sharing this nav, so
-// "Home / Overview" (`/client`), "My Journey", and "Bookings" are each
-// rendered active-aware: the label whose href matches the current path is
-// a non-link `<span aria-current="page">` (D-040 §7's "not a link to
-// itself"), and every other real item is an ordinary in-app `<Link>` — so
-// there is exactly one `aria-current="page"` at any time. No new
-// "Proposals" label is added and the ten-label set/order is unchanged.
-// The remaining seven later-phase labels stay inert `ClientPortalNavItem`s
-// (visible text plus a "Coming soon" marker; no href / anchor / button /
-// onClick / tabindex / role).
-const REAL_NAV_ITEMS = [
-  { label: 'Home / Overview', href: '/client' },
-  { label: 'My Journey', href: '/client/my-journey' },
-  { label: 'Bookings', href: '/client/bookings' },
-] as const;
+// D-047 §2 promoted "My Journey", D-049 §7 promoted "Bookings", and D-051
+// §10 promotes "Support & Messages" (`/client/support`) — the first
+// promotion whose label is NOT immediately adjacent to the already-real
+// items in canonical order (four inert labels — Payments & Receipts,
+// Documents, Visa Center, Regional Tours — sit between "Bookings" and
+// "Support & Messages" in the canonical list). The previous
+// two-array-concatenation rendering (`REAL_NAV_ITEMS.map()` then
+// `LATER_PHASE_LABELS.map()`) relied on every promoted label already being
+// the first remaining element of the inert array, which coincidentally
+// preserved order for the first two promotions but can no longer preserve
+// "the ten-label set and order... unchanged" (D-051 §10) once a
+// non-adjacent label is promoted. This is therefore a single ordered list
+// of ten entries, each tagged `real` or `inert`, rendered by one `.map()`
+// — interleaving real and inert items in their true canonical position,
+// rather than rendering every real item before every inert one. Each real
+// item's href-matching-current-path behavior (a non-link
+// `<span aria-current="page">` vs. an ordinary in-app `<Link>`) and every
+// inert item's rendering (`ClientPortalNavItem`, unchanged) are otherwise
+// byte-for-byte the same as before this restructure.
+type NavEntry = { kind: 'real'; label: string; href: string } | { kind: 'inert'; label: string };
 
-const LATER_PHASE_LABELS = [
-  'Payments & Receipts',
-  'Documents',
-  'Visa Center',
-  'Regional Tours',
-  'Support & Messages',
-  'Profile',
-  'Settings',
-] as const;
+const NAV_ITEMS: readonly NavEntry[] = [
+  { kind: 'real', label: 'Home / Overview', href: '/client' },
+  { kind: 'real', label: 'My Journey', href: '/client/my-journey' },
+  { kind: 'real', label: 'Bookings', href: '/client/bookings' },
+  { kind: 'inert', label: 'Payments & Receipts' },
+  { kind: 'inert', label: 'Documents' },
+  { kind: 'inert', label: 'Visa Center' },
+  { kind: 'inert', label: 'Regional Tours' },
+  { kind: 'real', label: 'Support & Messages', href: '/client/support' },
+  { kind: 'inert', label: 'Profile' },
+  { kind: 'inert', label: 'Settings' },
+];
 
 // D-040 §7: the portal navigation collapses into a real mobile drawer
 // (toggled by `MobileNavToggle`) — not a shrunk sidebar. The <ul> is
 // always in the DOM (so the label set is server-rendered and the
 // keyboard-tab walk is stable); CSS shows it inline at >= 48rem and, below
 // that, only while `open`. Within this <nav> the focusable controls are the
-// mobile toggle and whichever of the two real nav items is not the current
-// page; none of the eight inert items is focusable.
+// mobile toggle and whichever of the four real nav items is not the
+// current page; none of the six inert items is focusable.
 export function ClientPortalNav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
@@ -60,22 +66,23 @@ export function ClientPortalNav() {
         id={CLIENT_PORTAL_NAV_LIST_ID}
         className={open ? `${styles.navList} ${styles.navListOpen}` : styles.navList}
       >
-        {REAL_NAV_ITEMS.map(({ label, href }) => (
-          <li key={label} className={styles.navCurrent}>
-            {pathname === href ? (
-              <span className={styles.navCurrentLabel} aria-current="page">
-                {label}
-              </span>
-            ) : (
-              <Link className={styles.navLink} href={href}>
-                {label}
-              </Link>
-            )}
-          </li>
-        ))}
-        {LATER_PHASE_LABELS.map((label) => (
-          <ClientPortalNavItem key={label} label={label} />
-        ))}
+        {NAV_ITEMS.map((item) =>
+          item.kind === 'inert' ? (
+            <ClientPortalNavItem key={item.label} label={item.label} />
+          ) : (
+            <li key={item.label} className={styles.navCurrent}>
+              {pathname === item.href ? (
+                <span className={styles.navCurrentLabel} aria-current="page">
+                  {item.label}
+                </span>
+              ) : (
+                <Link className={styles.navLink} href={item.href}>
+                  {item.label}
+                </Link>
+              )}
+            </li>
+          ),
+        )}
       </ul>
     </nav>
   );
