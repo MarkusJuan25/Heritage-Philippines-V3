@@ -1,0 +1,183 @@
+.pageHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.errorState {
+  padding: 1.5rem;
+  border: 1px dashed #c0c0c0;
+  border-radius: 0.5rem;
+  text-align: center;
+  border-color: #c0392b;
+  color: #922b21;
+}
+
+.emptyState {
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px dashed #c0c0c0;
+  border-radius: 0.5rem;
+  color: #666;
+}
+
+.conversationList {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.conversationCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.conversationCardHeading {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.conversationCardMeta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.messageList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.messageItem {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid #d0d0d0;
+}
+
+.messageMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #555;
+}
+
+.messageAuthor {
+  font-weight: 600;
+}
+
+.messageTimestamp {
+  color: #777;
+}
+
+/* A visible, textual badge for each message's visibility — never color
+   alone (.claude/rules/frontend.md's accessibility requirements) — so
+   both values are always explicitly labelled, not merely inferred from
+   the absence of a badge. */
+.visibilityBadge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.clientVisibleBadge {
+  color: #1a7a3a;
+  border-color: #1a7a3a;
+  background: #eaf7ef;
+}
+
+.internalNoteBadge {
+  color: #8a5a00;
+  border-color: #8a5a00;
+  background: #fdf3e2;
+}
+
+/* Message bodies are plain text only (D-051 §9/§11): preserve the
+   author's own line breaks, wrap long unbroken strings rather than
+   overflow. */
+.messageBody {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.replyForm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.legend {
+  padding: 0;
+  font-weight: 600;
+}
+
+.formField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.visibilityOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.formAlert {
+  padding: 0.75rem 1rem;
+  border: 1px solid #c0392b;
+  border-radius: 0.5rem;
+  color: #922b21;
+  margin: 0;
+}
+
+.formSuccessAlert {
+  padding: 0.75rem 1rem;
+  border: 1px solid #1a7a3a;
+  border-radius: 0.5rem;
+  color: #1a7a3a;
+  margin: 0;
+}
+
+.pending {
+  margin: 0;
+  color: #555;
+}
+
+.submit {
+  align-self: flex-start;
+}

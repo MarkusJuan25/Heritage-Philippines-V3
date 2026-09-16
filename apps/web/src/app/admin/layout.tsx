@@ -36,6 +36,18 @@ const PROPOSAL_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_
 // discipline.
 const BOOKING_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
 
+// D-051 §10's Conversation navigation visibility rule: "its own nav link
+// in `admin/layout.tsx` visible to ADMIN_MANAGER and TRAVEL_CONSULTANT
+// unconditionally by role" — the same role set as
+// Clients/Proposals/Bookings, kept as this feature's own dedicated
+// constant rather than reusing any of them, matching this codebase's
+// established per-feature-constant discipline. FINANCE_ACCOUNTING and
+// VISA_DOCUMENTATION are deliberately not given a nav link here (D-051
+// §10), even though the `/admin/conversations` page itself admits them —
+// neither can access any Conversation without the deferred participant-
+// management capability (D-051 §5).
+const CONVERSATION_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
+
 // Layer 2 of D-023 §2's defense-in-depth authorization: independently
 // resolves the real, database-backed authenticated user via the existing
 // getCurrentUser() guard — never trusting proxy.ts's cookie-presence-only
@@ -115,6 +127,11 @@ export default async function AdminLayout({
             {BOOKING_MANAGEMENT_ROLES.includes(user.role) ? (
               <li>
                 <Link href="/admin/bookings">Bookings</Link>
+              </li>
+            ) : null}
+            {CONVERSATION_MANAGEMENT_ROLES.includes(user.role) ? (
+              <li>
+                <Link href="/admin/conversations">Conversations</Link>
               </li>
             ) : null}
           </ul>
