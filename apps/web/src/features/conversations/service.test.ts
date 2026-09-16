@@ -265,10 +265,11 @@ describe('listConversationsForClient', () => {
     });
   });
 
-  it('maps rows to the exact identifier-free allow-list, labeling the client author "You"', async () => {
+  it('maps rows to { render, serverModel }, with render matching the exact identifier-free allow-list and labeling the client author "You"', async () => {
     authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
     repositoryMocks.listConversationsForClient.mockResolvedValue([
       {
+        id: CONVERSATION_ID,
         category: 'GENERAL_INQUIRY',
         createdAt: new Date('2026-09-01T00:00:00.000Z'),
         messages: [
@@ -288,7 +289,7 @@ describe('listConversationsForClient', () => {
 
     const result = await listConversationsForClient(CLIENT, CLIENT_ID);
 
-    expect(result).toEqual([
+    expect(result.render).toEqual([
       {
         category: 'GENERAL_INQUIRY',
         createdAt: new Date('2026-09-01T00:00:00.000Z'),
@@ -302,10 +303,80 @@ describe('listConversationsForClient', () => {
         ],
       },
     ]);
-    // D-051 §9 — no identifier field anywhere in the composed result.
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain(CLIENT_ID);
-    expect(serialized).not.toContain(CONVERSATION_ID);
+    expect(result.serverModel).toEqual([{ id: CONVERSATION_ID }]);
+  });
+
+  it('never includes Conversation.id, clientId, Message.id, or any other excluded identifier in render — only in serverModel (D-051 §9/§15)', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+    repositoryMocks.listConversationsForClient.mockResolvedValue([
+      {
+        id: CONVERSATION_ID,
+        category: 'GENERAL_INQUIRY',
+        createdAt: new Date('2026-09-01T00:00:00.000Z'),
+        messages: [
+          {
+            body: 'Hi there',
+            createdAt: new Date('2026-09-01T00:00:00.000Z'),
+            authorStaffUser: null,
+          },
+        ],
+      },
+    ]);
+
+    const result = await listConversationsForClient(CLIENT, CLIENT_ID);
+
+    expect(result.render[0]).not.toHaveProperty('id');
+    expect(result.render[0]).not.toHaveProperty('clientId');
+    expect(result.render[0]!.messages[0]).not.toHaveProperty('id');
+    // D-051 §9 — no identifier value of any kind anywhere in `render`.
+    const serializedRender = JSON.stringify(result.render);
+    expect(serializedRender).not.toContain(CLIENT_ID);
+    expect(serializedRender).not.toContain(CONVERSATION_ID);
+    // The identifier legitimately lives in `serverModel` only.
+    expect(JSON.stringify(result.serverModel)).toContain(CONVERSATION_ID);
+  });
+
+  it('keeps render and serverModel index-aligned across multiple conversations, in the order the repository returned them', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+    repositoryMocks.listConversationsForClient.mockResolvedValue([
+      {
+        id: 'conversation-1',
+        category: 'GENERAL_INQUIRY',
+        createdAt: new Date('2026-09-01T00:00:00.000Z'),
+        messages: [],
+      },
+      {
+        id: 'conversation-2',
+        category: 'BOOKING',
+        createdAt: new Date('2026-09-02T00:00:00.000Z'),
+        messages: [],
+      },
+      {
+        id: 'conversation-3',
+        category: 'PAYMENT',
+        createdAt: new Date('2026-09-03T00:00:00.000Z'),
+        messages: [],
+      },
+    ]);
+
+    const result = await listConversationsForClient(CLIENT, CLIENT_ID);
+
+    expect(result.render).toHaveLength(3);
+    expect(result.serverModel).toHaveLength(3);
+    expect(result.serverModel).toEqual([
+      { id: 'conversation-1' },
+      { id: 'conversation-2' },
+      { id: 'conversation-3' },
+    ]);
+    // Each render entry's category is the one identifying trait available
+    // to cross-check alignment against the mocked input order (render
+    // itself carries no id) — confirms index i of each array describes
+    // the same source row for every i, not just the first.
+    expect(result.render.map((entry) => entry.category)).toEqual([
+      'GENERAL_INQUIRY',
+      'BOOKING',
+      'PAYMENT',
+    ]);
   });
 });
 

@@ -201,10 +201,28 @@ describe('listConversationsForClient', () => {
     const call = findMany.mock.calls[0]![0];
     expect(call.where).toEqual({ clientId: CLIENT_ID });
     expect(call.select.messages.where).toEqual({ visibility: 'CLIENT_VISIBLE' });
-    // D-051 §9 — no identifier field selected anywhere in this query shape.
-    expect(call.select).not.toHaveProperty('id');
+    // D-051 §9 — the nested message shape itself carries no identifier
+    // field anywhere; the top-level Conversation.id (asserted separately
+    // below) exists solely for the service layer's server-only companion
+    // model, never the render DTO.
     expect(call.select.messages.select).not.toHaveProperty('id');
     expect(call.select.messages.select).not.toHaveProperty('authorClientProfileId');
+  });
+
+  it('selects only the top-level Conversation.id in addition to the pre-existing fields — never Message.id or any other new field (D-051 §15 Stage 4 client companion-model correction)', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const db = { conversation: { findMany } } as unknown as Prisma.TransactionClient;
+
+    await listConversationsForClient(db, CLIENT_ID);
+
+    const call = findMany.mock.calls[0]![0];
+    expect(call.select.id).toBe(true);
+    expect(Object.keys(call.select).sort()).toEqual(['category', 'createdAt', 'id', 'messages']);
+    expect(Object.keys(call.select.messages.select).sort()).toEqual([
+      'authorStaffUser',
+      'body',
+      'createdAt',
+    ]);
   });
 });
 

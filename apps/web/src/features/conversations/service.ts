@@ -224,18 +224,48 @@ export async function replyAsClient(
   });
 }
 
+// D-051 §15's server-only companion to `ClientConversationSummary` —
+// index-aligned with `render` (below), carrying only each Conversation's
+// own `id`. Exists solely so a future `/client/support` Server Component
+// (D-051 Stage 4) can closure-capture that id into its own inline reply
+// Server Action, exactly mirroring `features/proposals/service.ts`'s
+// identical `ClientProposalReviewServerCard`/`ClientProposalReviewServerModel`
+// split for the structurally identical problem. This type is NEVER passed
+// to a Client Component and NEVER included in `render` — D-051 §9's/§15's
+// identifier-exposure prohibition holds by construction, since no code
+// path this service exposes ever renders a `ClientConversationServerModel`
+// value.
+export type ClientConversationServerCard = { id: string };
+
+export type ClientConversationServerModel = ClientConversationServerCard[];
+
+export type ClientConversationListResult = {
+  render: ClientConversationSummary[];
+  serverModel: ClientConversationServerModel;
+};
+
 /**
- * D-051 §9 — the client-facing Conversation list, shaped to the exact
- * identifier-free allow-list: `category`, `createdAt`, and each message's
- * `body`/`createdAt`/`authorLabel` only. `INTERNAL_NOTE` messages are
- * already excluded at the repository's own query level (D-051 §8) — this
- * function only maps the remaining domain-shaped rows to their exact
- * client-facing presentation, never re-deciding what is included.
+ * D-051 §9/§15 — the client-facing Conversation list, split into two
+ * index-aligned structures built from the same fetched `rows`: `render`
+ * (D-051 §9's exact identifier-free allow-list — `category`, `createdAt`,
+ * and each message's `body`/`createdAt`/`authorLabel` only; byte-for-byte
+ * the same shape this function has always returned) and `serverModel`
+ * (D-051 §15's server-only companion, carrying only each Conversation's
+ * own `id`). Both are produced by their own `.map()` call over the
+ * identical `rows` array, in the exact order the repository returned it —
+ * `Array.prototype.map` guarantees index correspondence with its source
+ * array, so `render[i]` and `serverModel[i]` always describe the same
+ * Conversation; `rows` itself is never filtered, sorted, or otherwise
+ * reordered between the two calls, so the two arrays cannot drift apart.
+ * `INTERNAL_NOTE` messages are already excluded at the repository's own
+ * query level (D-051 §8) — this function only maps the remaining domain-
+ * shaped rows to their exact client-facing presentation (and, separately,
+ * to the server-only companion), never re-deciding what is included.
  */
 export async function listConversationsForClient(
   actor: AuthenticatedUser,
   clientId: string,
-): Promise<ClientConversationSummary[]> {
+): Promise<ClientConversationListResult> {
   if (actor.role !== 'CLIENT') {
     throw new ConversationError('ROLE_NOT_PERMITTED', ROLE_NOT_PERMITTED_MESSAGE);
   }
@@ -247,7 +277,7 @@ export async function listConversationsForClient(
 
   const rows = await repository.listConversationsForClient(prisma, clientId);
 
-  return rows.map((row) => ({
+  const render: ClientConversationSummary[] = rows.map((row) => ({
     category: row.category,
     createdAt: row.createdAt,
     messages: row.messages.map((message) => ({
@@ -256,6 +286,9 @@ export async function listConversationsForClient(
       authorLabel: toClientAuthorLabel(message.authorStaffUser),
     })),
   }));
+  const serverModel: ClientConversationServerModel = rows.map((row) => ({ id: row.id }));
+
+  return { render, serverModel };
 }
 
 // --- Staff-side (D-051 §3, §5, §6, §16) ---
