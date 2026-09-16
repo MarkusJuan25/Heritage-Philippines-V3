@@ -3,8 +3,8 @@
 import { useActionState, useEffect, useId, useRef, useState } from 'react';
 import { useFormStatus } from 'react-dom';
 
+import { MESSAGE_BODY_MAX_LENGTH } from '@/features/conversations/constants';
 import type { ConversationErrorCode } from '@/features/conversations/errors';
-import { MESSAGE_BODY_MAX_LENGTH } from '@/features/conversations/schemas';
 import type { MessageVisibility } from '@/generated/prisma/client';
 
 import styles from '../conversations.module.css';

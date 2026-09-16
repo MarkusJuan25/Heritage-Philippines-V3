@@ -2,6 +2,15 @@ import { z } from 'zod';
 
 import { ConversationCategory, MessageVisibility } from '@/generated/prisma/client';
 
+import { MESSAGE_BODY_MAX_LENGTH } from './constants';
+
+// Re-exported for every existing import site (e.g. `schemas.test.ts`) —
+// the value itself lives solely in `./constants.ts`, a dependency-free
+// module a `'use client'` component can import directly without pulling
+// in this file's own runtime value-import of `@/generated/prisma/client`
+// below (see `constants.ts`'s doc comment for the full rationale).
+export { MESSAGE_BODY_MAX_LENGTH };
+
 // D-051 §16's message-body validation: required non-whitespace content,
 // mirroring D-027 §1's `contentSchema` "content is required" non-empty
 // rule (features/proposals/schemas.ts). D-051 §16 confirms no established
@@ -15,13 +24,11 @@ import { ConversationCategory, MessageVisibility } from '@/generated/prisma/clie
 // mechanism (a Zod service-layer `.max()` ceiling, never a bare,
 // unvalidated `String`)," with only "its exact figure a Stage 2
 // implementation-time decision this entry does not fix." The 5,000-
-// character figure below is that authorized Stage 2 implementation-time
-// decision — it is NOT claimed to be a pre-existing repository or
-// database limit, and no such limit exists; D-051 §16 itself both
-// requires and authorizes Stage 2 to choose it. Non-empty-after-trim
-// validation is preserved in full, applied before the ceiling.
-export const MESSAGE_BODY_MAX_LENGTH = 5000;
-
+// character figure (`./constants.ts`) is that authorized Stage 2
+// implementation-time decision — it is NOT claimed to be a pre-existing
+// repository or database limit, and no such limit exists; D-051 §16
+// itself both requires and authorizes Stage 2 to choose it. Non-empty-
+// after-trim validation is preserved in full, applied before the ceiling.
 export const messageBodySchema = z
   .string()
   .trim()
