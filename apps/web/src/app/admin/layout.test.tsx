@@ -166,6 +166,33 @@ describe('AdminLayout', () => {
     },
   );
 
+  it.each(['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'])(
+    'renders a Conversations navigation link to /admin/conversations for role %s (D-051 §10)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.getByRole('link', { name: 'Conversations' })).toHaveAttribute(
+        'href',
+        '/admin/conversations',
+      );
+    },
+  );
+
+  it.each(['FINANCE_ACCOUNTING', 'VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR'])(
+    'never renders a Conversations navigation link for excluded staff role %s (D-051 §10)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.queryByRole('link', { name: 'Conversations' })).not.toBeInTheDocument();
+    },
+  );
+
   it('renders Dashboard as the first navigation item, before Leads (D-029 §2)', async () => {
     getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role: 'ADMIN_MANAGER' });
 
