@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Page } from '@playwright/test';
 import { generateRandomString } from 'better-auth/crypto';
 
+import { e2eIdentityHeaders, newIdentifiedContext } from './support/browser-identity';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient } from './support/test-database';
 
@@ -22,6 +23,13 @@ import { createE2EPrismaRpcClient } from './support/test-database';
 // token) — like activation.spec.ts, trace/screenshot/video are disabled at
 // file scope, stricter than playwright.config.ts's inherited defaults.
 test.use({ trace: 'off', screenshot: 'off', video: 'off' });
+
+// D-051 Stage 5B: deterministic, documentation-only client identities so
+// this spec's sign-ins (the fixture TC on the default context here, and the
+// two client contexts below) are not all counted in one shared Better Auth
+// rate-limit bucket with every other spec's sign-ins (see
+// e2e/support/browser-identity.ts). Index 0 = this default context.
+test.use({ extraHTTPHeaders: e2eIdentityHeaders('client-proposal-review', 0) });
 
 // D-046 / D-047 §15: zero-retry, stop-on-first-attempt-failure. No
 // `test.describe.configure({ retries })` override — the config default
@@ -630,7 +638,7 @@ test('D-047 §15: an activated client reads, responds to (Accept/Decline/Request
 
     // 7. The main signed-in Client A journey.
     await page.waitForTimeout(3000);
-    const contextA = await browser.newContext();
+    const contextA = await newIdentifiedContext(browser, 'client-proposal-review', 1);
     let htmlA_page1 = '';
     let flightA_page1 = '';
     let htmlA_afterResponses = '';
@@ -904,7 +912,7 @@ test('D-047 §15: an activated client reads, responds to (Accept/Decline/Request
 
     // 8. Client B — sees ONLY B's proposal; never A's content or ids.
     await page.waitForTimeout(3000);
-    const contextB = await browser.newContext();
+    const contextB = await newIdentifiedContext(browser, 'client-proposal-review', 2);
     let htmlB = '';
     let flightB = '';
     try {

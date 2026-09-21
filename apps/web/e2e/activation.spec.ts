@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Locator, Page } from '@playwright/test';
 import { generateRandomString } from 'better-auth/crypto';
 
+import { e2eIdentityHeaders } from './support/browser-identity';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/test-database';
 
@@ -316,6 +317,14 @@ async function cleanupActivationChain(
 // inside a describe group, since honoring it there would require forcing
 // a new worker.
 test.use({ trace: 'off', screenshot: 'off', video: 'off' });
+
+// D-051 Stage 5B: a deterministic, documentation-only client identity for
+// this spec's default browser context (the fixture TC's login), so its
+// sign-in is not counted in the same Better Auth rate-limit bucket as every
+// other spec's sign-ins (see e2e/support/browser-identity.ts). The activation
+// limiter ignores forwarding headers unconditionally, so this changes
+// nothing about its `unknown-source` bucket.
+test.use({ extraHTTPHeaders: e2eIdentityHeaders('activation', 0) });
 
 test.describe('portal activation — live evidence (D-037 Stage 5e)', () => {
   test('activation surfaces set Cache-Control: no-store and Referrer-Policy: no-referrer over real HTTP', async ({
