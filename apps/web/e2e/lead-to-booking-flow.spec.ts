@@ -2,8 +2,15 @@ import { randomUUID } from 'node:crypto';
 
 import type { Locator, Page } from '@playwright/test';
 
+import { e2eIdentityHeaders } from './support/browser-identity';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/test-database';
+
+// D-051 Stage 5B: a deterministic, documentation-only client identity for
+// this spec's default browser context (the fixture TC's login), so its
+// sign-in is not counted in the same Better Auth rate-limit bucket as every
+// other spec's sign-ins (see e2e/support/browser-identity.ts).
+test.use({ extraHTTPHeaders: e2eIdentityHeaders('lead-to-booking-flow', 0) });
 
 // D-033: the canonical real-Chromium, real-database, real-admin-surface
 // journey. Exactly one test-created TRAVEL_CONSULTANT throughout — no

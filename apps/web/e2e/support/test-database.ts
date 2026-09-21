@@ -195,6 +195,16 @@ const RPC_ALLOWED_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   // of a count, and no strict absence check for the shared `unknown-source`
   // SOURCE bucket.
   rateLimitBucket: new Set(['findMany', 'deleteMany']),
+  // D-051 §13 (Stage 5B): read + cleanup only, for the client-support E2E
+  // spec's own residue verification and identifier-recovery needs — never
+  // `create`/`update`/`upsert`. Every Conversation, ConversationParticipant,
+  // and Message this suite exercises is produced exclusively through the
+  // real browser UI and the real, unmodified conversations service
+  // (createConversationAsClient/createConversationAsStaff/replyAsClient/
+  // replyAsStaff) — never seeded or mutated through this bridge.
+  conversation: new Set(['findMany', 'deleteMany']),
+  conversationParticipant: new Set(['findMany', 'deleteMany']),
+  message: new Set(['findMany', 'deleteMany']),
 };
 
 // --- D-047 §15 (Stage 6): strict scalar-only validators for the only two
@@ -397,6 +407,20 @@ export type E2EPrismaRpcClient = {
   rateLimitBucket: {
     findMany: RpcMethod<Prisma.RateLimitBucketFindManyArgs>;
     deleteMany: RpcMethod<Prisma.RateLimitBucketDeleteManyArgs>;
+  };
+  // D-051 §13 (Stage 5B): read + cleanup only — see RPC_ALLOWED_OPERATIONS's
+  // own identical comment above for the full rationale.
+  conversation: {
+    findMany: RpcMethod<Prisma.ConversationFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.ConversationDeleteManyArgs>;
+  };
+  conversationParticipant: {
+    findMany: RpcMethod<Prisma.ConversationParticipantFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.ConversationParticipantDeleteManyArgs>;
+  };
+  message: {
+    findMany: RpcMethod<Prisma.MessageFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.MessageDeleteManyArgs>;
   };
   $disconnect: () => Promise<void>;
 };

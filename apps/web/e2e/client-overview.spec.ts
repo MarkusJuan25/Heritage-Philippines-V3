@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Locator, Page } from '@playwright/test';
 import { generateRandomString, hashPassword } from 'better-auth/crypto';
 
+import { e2eIdentityHeaders, newIdentifiedContext } from './support/browser-identity';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient } from './support/test-database';
 
@@ -23,6 +24,15 @@ import { createE2EPrismaRpcClient } from './support/test-database';
 // inside test.describe (Playwright's runner rejects a project-config
 // override placed inside a describe group).
 test.use({ trace: 'off', screenshot: 'off', video: 'off' });
+
+// D-051 Stage 5B: deterministic, documentation-only client identities so
+// this spec's sign-ins (the fixture TC on the default context here, the
+// no-profile CLIENT, and each of the two overview clients below) are not
+// all counted in one shared Better Auth rate-limit bucket with every other
+// spec's sign-ins — a confirmed cause of a real 429 on this spec's
+// no-profile sign-in (see e2e/support/browser-identity.ts). Index 0 = this
+// default context.
+test.use({ extraHTTPHeaders: e2eIdentityHeaders('client-overview', 0) });
 
 // One whole-test retry: this spec drives ~40 sequential admin-UI steps
 // plus two full portal activations on a single long-lived isolated
@@ -677,19 +687,122 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
         },
       },
     });
-    const noProfileContext = await browser.newContext();
+    const noProfileContext = await newIdentifiedContext(browser, 'client-overview', 1);
     try {
       const noProfilePage = await noProfileContext.newPage();
+      // Passive, diagnostic-only observation of the sign-in response (D-051
+      // Stage 5B diagnostic preparation). This listener changes no
+      // behavior: it never routes, delays, or alters a request or
+      // response. From a matching response it keeps exactly two numbers —
+      // the HTTP status and, only if it is purely numeric, the
+      // `x-retry-after` value — and nothing else: no body, no other
+      // header, no URL, no cookie.
+      const signInObservation: { status?: number; retryAfterSeconds?: number } = {};
+      noProfilePage.on('response', (response) => {
+        let responsePathname: string;
+        try {
+          responsePathname = new URL(response.url()).pathname;
+        } catch {
+          return;
+        }
+        if (
+          responsePathname !== '/api/auth/sign-in/email' ||
+          response.request().method() !== 'POST'
+        ) {
+          return;
+        }
+        signInObservation.status = response.status();
+        const retryAfterHeader = response.headers()['x-retry-after'];
+        if (retryAfterHeader !== undefined && /^\d{1,6}$/.test(retryAfterHeader)) {
+          signInObservation.retryAfterSeconds = Number(retryAfterHeader);
+        }
+      });
       await noProfilePage.goto('/login');
       await noProfilePage.getByLabel('Email').fill(noProfileEmail);
       await noProfilePage.getByLabel('Password').fill(noProfilePassword);
-      await noProfilePage.getByRole('button', { name: 'Sign in' }).click();
       // /login -> /dashboard -> (CLIENT) /client -> the no-profile panel.
       // `waitUntil: 'commit'` so a slow `load` cannot mask an arrived URL.
-      await noProfilePage.waitForURL((url) => url.pathname === '/client', {
-        timeout: 60_000,
-        waitUntil: 'commit',
-      });
+      // The wait for the target `/client` URL is registered before the
+      // click that triggers the redirect chain — a Promise.all-style
+      // sequence mirroring this file's own established `conversionResponse`
+      // pattern (see `provisionClient` above) — so the navigation listener
+      // is already active before submission, rather than attached only
+      // after it (D-051 Stage 5B correction). One sign-in submission only;
+      // no internal retry, no added sleep, no timeout increase from the
+      // existing 60-second budget.
+      try {
+        await Promise.all([
+          noProfilePage.waitForURL((url) => url.pathname === '/client', {
+            timeout: 60_000,
+            waitUntil: 'commit',
+          }),
+          noProfilePage.getByRole('button', { name: 'Sign in' }).click(),
+        ]);
+      } catch (error) {
+        // Safe diagnostics only, appended to the thrown error — never
+        // cookies, request/response bodies, headers other than the numeric
+        // `x-retry-after`, complete URLs, query values, credentials, form
+        // values, HTML, or other user-visible private data. Every value
+        // below is a pathname, a number, a boolean, a fixed label, or the
+        // login form's own fixed error copy (length-capped and redacted if
+        // it ever contained a test credential).
+        const observedUrl = new URL(noProfilePage.url());
+        const pathname = observedUrl.pathname;
+        // Only WHETHER a query string is present — a native (pre-hydration)
+        // form submission would leave one — never its content.
+        const hasQueryString = observedUrl.search.length > 0;
+        let stateLabel: 'login form' | 'dashboard content' | 'client layout' | 'unknown' =
+          'unknown';
+        if (pathname === '/login') {
+          stateLabel = 'login form';
+        } else if (pathname === '/dashboard') {
+          stateLabel = 'dashboard content';
+        } else if (pathname === '/client') {
+          stateLabel = 'client layout';
+        }
+        const statusLabel =
+          signInObservation.status !== undefined
+            ? String(signInObservation.status)
+            : 'none observed';
+        const retryAfterLabel =
+          signInObservation.retryAfterSeconds !== undefined
+            ? String(signInObservation.retryAfterSeconds)
+            : 'none observed';
+        // The login form's own `<p role="alert">` (login/page.tsx), scoped
+        // to <main> so Next's route-announcer live region — which sits
+        // outside <main> and announces page titles — can never be read
+        // here. Best-effort: a failed probe must never mask the original
+        // navigation failure.
+        let alertLabel = 'none present';
+        try {
+          const loginAlert = noProfilePage.locator('main').getByRole('alert');
+          if ((await loginAlert.count()) > 0) {
+            const fullAlertText = (
+              (await loginAlert.first().textContent({ timeout: 1_000 })) ?? ''
+            ).trim();
+            // Redaction is decided on the FULL text, before any truncation,
+            // so a credential can never survive as a truncated fragment.
+            if (
+              fullAlertText.includes(noProfileEmail) ||
+              fullAlertText.includes(noProfilePassword)
+            ) {
+              alertLabel = '[redacted]';
+            } else {
+              const cappedAlertText = fullAlertText.slice(0, 120);
+              alertLabel =
+                cappedAlertText.length > 0
+                  ? cappedAlertText.replace(/[^\x20-\x7E]/g, '?')
+                  : 'empty';
+            }
+          }
+        } catch {
+          alertLabel = 'unreadable';
+        }
+        throw new Error(
+          `No-profile CLIENT sign-in did not reach /client. Observed pathname: "${pathname}"; observed stage: "${stateLabel}"; sign-in response status: ${statusLabel}; x-retry-after seconds: ${retryAfterLabel}; login alert: "${alertLabel}"; query string present: ${hasQueryString}.`,
+          { cause: error },
+        );
+      }
       await expect(noProfilePage.locator('main')).toHaveCount(1, SLOW);
       await expect(
         noProfilePage.getByRole('heading', { level: 1, name: COPY.noProfileH1 }),
@@ -830,7 +943,12 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
       html: string;
       flight: string;
     }> {
-      const context = await browser.newContext();
+      // A distinct identity per overview client (A = 2, B = 3).
+      const context = await newIdentifiedContext(
+        browser,
+        'client-overview',
+        client.label === 'A' ? 2 : 3,
+      );
       try {
         const clientPage = await context.newPage();
 
@@ -888,9 +1006,10 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
 
         // Navigation — ten labels verbatim. On `/client`, "Home / Overview" is
         // the current item (a non-link <span aria-current="page">); "My
-        // Journey" (D-047 §2) and "Bookings" (D-049 §7) are the two real
-        // in-app <Link>s; the remaining seven later-phase items are inert
-        // with a visible "Coming soon" and no href.
+        // Journey" (D-047 §2), "Bookings" (D-049 §7), and "Support &
+        // Messages" (D-051 §10, Stage 4) are the three real in-app <Link>s;
+        // the remaining six later-phase items are inert with a visible
+        // "Coming soon" and no href.
         const navItems = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .locator('li');
@@ -905,20 +1024,26 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
           .getByText('Home / Overview', { exact: true });
         await expect(current).toHaveAttribute('aria-current', 'page');
         expect(await current.evaluate((node) => node.tagName)).toBe('SPAN');
-        // Exactly two real navigation links: "My Journey" ->
-        // /client/my-journey and "Bookings" -> /client/bookings (D-049 §7
-        // promoted the previously-inert "Bookings" label to a real link).
+        // Exactly three real navigation links: "My Journey" ->
+        // /client/my-journey, "Bookings" -> /client/bookings (D-049 §7
+        // promoted the previously-inert "Bookings" label to a real link),
+        // and "Support & Messages" -> /client/support (D-051 §10, Stage 4,
+        // promoted the previously-inert "Support & Messages" label to a
+        // real link).
         const navLinks = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .getByRole('link');
-        await expect(navLinks).toHaveCount(2);
+        await expect(navLinks).toHaveCount(3);
         const myJourneyLink = navLinks.filter({ hasText: 'My Journey' });
         await expect(myJourneyLink).toHaveAccessibleName('My Journey');
         await expect(myJourneyLink).toHaveAttribute('href', '/client/my-journey');
         const bookingsLink = navLinks.filter({ hasText: 'Bookings' });
         await expect(bookingsLink).toHaveAccessibleName('Bookings');
         await expect(bookingsLink).toHaveAttribute('href', '/client/bookings');
-        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(7);
+        const supportLink = navLinks.filter({ hasText: 'Support & Messages' });
+        await expect(supportLink).toHaveAccessibleName('Support & Messages');
+        await expect(supportLink).toHaveAttribute('href', '/client/support');
+        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(6);
 
         // Consultant card + support-guidance line (the converting TC is
         // auto-assigned during Lead -> Client conversion).

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Page } from '@playwright/test';
 import { generateRandomString } from 'better-auth/crypto';
 
+import { e2eIdentityHeaders, newIdentifiedContext } from './support/browser-identity';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient } from './support/test-database';
 
@@ -43,6 +44,13 @@ import { createE2EPrismaRpcClient } from './support/test-database';
 // `proposalVersionId`, staff identity, and the literal field-name strings
 // themselves from rendered output.
 test.use({ trace: 'off', screenshot: 'off', video: 'off' });
+
+// D-051 Stage 5B: deterministic, documentation-only client identities so
+// this spec's sign-ins (the fixture TC on the default context here, and the
+// two client contexts below) are not all counted in one shared Better Auth
+// rate-limit bucket with every other spec's sign-ins (see
+// e2e/support/browser-identity.ts). Index 0 = this default context.
+test.use({ extraHTTPHeaders: e2eIdentityHeaders('client-bookings', 0) });
 
 // D-046 / D-049 §8: zero-retry, stop-on-first-attempt-failure. No
 // `test.describe.configure({ retries })` override — the config default
@@ -554,7 +562,7 @@ test('D-049 §8: an activated client browses their paginated Bookings list, open
     //    /login -> /dashboard -> /client chain under connection-pool
     //    pressure (identical, already-reviewed technique to
     //    client-proposal-review.spec.ts).
-    const contextA = await browser.newContext();
+    const contextA = await newIdentifiedContext(browser, 'client-bookings', 1);
     try {
       const a = await contextA.newPage();
       let signedIn = false;
@@ -874,7 +882,7 @@ test('D-049 §8: an activated client browses their paginated Bookings list, open
     }
 
     // --- Empty state: Client C, zero bookings ---
-    const contextC = await browser.newContext();
+    const contextC = await newIdentifiedContext(browser, 'client-bookings', 2);
     try {
       const c = await contextC.newPage();
       let signedIn = false;
