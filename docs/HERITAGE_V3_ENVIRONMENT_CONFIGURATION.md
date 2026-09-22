@@ -224,6 +224,7 @@ Three workflow files implement the Phase 1 deployment-pipeline-skeleton checklis
 - As dependencies are added (database, storage, email), the health check — or an equivalent readiness check — should be extended to verify those connections, rather than only confirming the Node process started. That extension is future work, not part of this documentation task.
 - Post-deployment smoke testing exercises the core paths relevant to that release (`.claude/rules/validation-deployment.md`) — at minimum, once they exist: login, the specific feature shipped, and any flow it could plausibly affect.
 - Staging verification is a prerequisite for production deployment, never skipped, per `.claude/rules/validation-deployment.md`'s "Staging Before Production" rule.
+- The D-053 §§7-8 (`docs/HERITAGE_V3_DECISIONS_LOG.md`) real-infrastructure gate-evidence format and exact deployed-commit/workflow-run pinning procedure a future D-053 A9 completion-gate run must follow are defined in full in Section 22 below — a prerequisite this document did not previously specify.
 
 ## 17. Rollback Expectations
 
@@ -231,6 +232,7 @@ Three workflow files implement the Phase 1 deployment-pipeline-skeleton checklis
 - Because `NEXT_PUBLIC_*` values are compiled into a specific build (Section 3, Section 6), rolling back means redeploying the **previous release's build**, not just reverting a runtime environment-variable value — a shared runtime config cannot "undo" something baked into an already-shipped bundle.
 - Any migration applied alongside a release is designed, where possible, so the previous release's code can still run against the post-migration schema — i.e., migrations are additive/backward-compatible (Section 13) specifically so a code rollback doesn't require an accompanying destructive schema rollback.
 - Rollback is triggered by a named decision-maker (the same ownership group as Section 4/18), not performed unilaterally mid-incident by whoever happens to be online, except where an agreed incident-response process (future work) says otherwise.
+- **D-053 A6 rollback evidence (Phase 5 staging readiness).** Before D-053's own A6 stage (`docs/HERITAGE_V3_DECISIONS_LOG.md` §11, Stage 6 — the first deployment behind the public staging ingress) can be considered successful, its own evidence must additionally identify: the previous deployable release by its exact immutable identity where one exists (the prior deployed commit SHA and, if applicable, workflow-run ID — never a branch name or relative description, mirroring Section 22.2's pinning requirement); the specific rollback trigger (what observed condition would cause a rollback) and the named decision-maker authorized to invoke it, per this section's existing rule above; and an explicit distinction between an **application rollback** (redeploying the previous release's build, per this section's second bullet) and a **destructive database rollback** (reverting a migration or restoring data), since the two carry entirely different risk and are never conflated. This document does not itself invent a Hostinger rollback command, script, or deployment mechanism — none exists yet — and no such mechanism may be assumed until D-053's own Stage 6 defines the real, reviewed implementation.
 
 ## 18. Configuration-Change Review
 
@@ -271,6 +273,89 @@ D-052 (`docs/HERITAGE_V3_DECISIONS_LOG.md`, the Client Regional Tours contract, 
 - **Validation and normalization (D-052 §5).** A value is treated as **unavailable** when it is not a string, is empty or whitespace-only, contains inner whitespace, an ASCII control character, or a backslash, fails to parse as a URL (including a scheme-less or protocol-relative value), uses any scheme other than exactly `https:`, embeds a username or password, or has no hostname. Anything else is normalized to its **origin** — scheme, host, and any non-default port (a default `:443` is dropped); a supplied path, query, or fragment is **ignored, not rejected** — and the **fixed `/tour` catalogue path is appended in application code**. The result never carries credentials, another path, a query, or a fragment, and never targets V2's separate `/packages` planner.
 - **Unavailable behavior.** A missing, empty, or invalid value never throws and never breaks any other part of the application: the Regional Tours page shows calm "not available" copy and **no link**. The configured value is never echoed in rendered output, logs, or errors, because a misconfigured value can carry credentials. V3 performs no reachability or availability check against V2.
 - **Per-environment value.** This document does not decide, and no file in this repository hardcodes, which V2 origin any environment uses; each environment's value is set through its real deployment environment (Sections 3 and 18). Automated tests use only a reserved, non-routable `.test` origin.
+
+## 22. D-053 Staging Deployment-Readiness Evidence Procedures
+
+D-053 (`docs/HERITAGE_V3_DECISIONS_LOG.md`, the Phase 5 Staging Readiness Contract, accepted September 22, 2026) Stage 3 (§11, "A8") operationalizes that contract's §7 ("Required evidence formats") and §8 ("Exact deployed-commit SHA and workflow-run pinning") into the reusable procedures below, so a future D-053 Stage 5 (A3/A4) gate-verification entry and Stage 7 (A9) completion-gate entry can each be written directly against a fixed format without inventing new format decisions at that time (D-053 §11's own Stage 3 acceptance criterion). **This section documents a format only. It does not itself verify, narrow, or claim satisfaction of any D-039 §9 gate. No real staging host, staging database, or staging secret is configured, and the existing provider-neutral deployment-workflow skeleton is not yet capable of performing a real migration, deployment, or post-deployment verification, as of this section's writing** (Section 2 above).
+
+### 22.1 D-039 §9 Gate-Evidence Record Format
+
+Every future verification of D-039 §9 gate (a), (b), or — if separately pursued later — (c) (`docs/HERITAGE_V3_DECISIONS_LOG.md`, originally recorded at D-037 §12 and re-narrowed at D-038 §6, restated unweakened by D-052 §13 and D-053 §4) must be recorded as its own decision-log entry (never a chat message, a checklist tick, code comment, or an unlogged claim), and that entry must include every field below. An entry missing any required field is incomplete and does not close the gate.
+
+- **Gate identifier.** The exact gate under verification — "D-039 §9 gate (a)", "gate (b)", or, only if separately pursued, "gate (c)" — never a paraphrase.
+- **Verification date.** The exact calendar date the evidence was actually obtained (not the date the entry is drafted or merged, if different).
+- **Environment.** The exact environment the evidence concerns (e.g., `staging`) — evidence from one environment is never treated as covering another.
+- **Hostinger plan/product and configuration inspected.** The exact Hostinger plan or product name, and the specific configuration surface actually inspected (e.g., a named reverse-proxy setting, a named logging/retention setting) — never a generic "Hostinger" reference.
+- **Evidence source and verification method.** Exactly how the evidence was obtained: e.g., a specific Hostinger documentation page or support-ticket reference, a specific configuration file/panel setting inspected, or a specific, described diagnostic verification step performed against the real provisioned host.
+- **Gate (a) — trusted-source-header behavior** additionally requires:
+  - the specific trusted-source-header configuration inspected (the exact header name and hop-trust setting, if any);
+  - the specific proxy-hop/trust boundary inspected (how many hops, which layer sets or forwards the header);
+  - the confirmed behavior, **or** the confirmed absence of a trusted-header configuration;
+  - if no trusted source is available or confirmed, an explicit acknowledgement that activation POST traffic remains under the single shared `"unknown-source"` SOURCE-dimension rate-limit bucket this repository's rate limiter already falls back to by design (`docs/HERITAGE_V3_ENVIRONMENT_CONFIGURATION.md` §20; `docs/HERITAGE_V3_DECISIONS_LOG.md` D-037 §12/D-038 §6) — never silently omitted.
+- **Gate (b) — request-body logging** additionally requires:
+  - the exact confirmation source (Hostinger's own official documentation, a specific support correspondence, or a specific inspected proxy/origin logging configuration setting);
+  - an explicit confirmation, one way or the other, of whether request bodies for `/api/activation/continue` and `/api/activation/activate` specifically are logged or retained by any proxy/origin layer.
+- **Evidence references.** Durable references, sufficient for later review (a support-ticket ID, a documentation URL, a configuration-panel screenshot's storage location with enough surrounding context to be meaningful) — but **never** a raw secret, activation token, session cookie, database credential, connection string, or any sensitive request/response body copied into the repository. A reference that would require a secret to resolve is not itself a secret and may be cited.
+- **Outcome.** Exactly one of: `VERIFIED`, `NOT VERIFIED`, or `BLOCKED` — never an unstated or implied outcome.
+- **Unresolved items.** The exact list of anything left unresolved by this specific verification attempt, however small.
+- **"What was not verified" (mandatory).** An explicit, affirmative statement of what this evidence does **not** establish, so a narrow confirmation (e.g., "gate (a)'s header behavior for these two routes") is never later over-read as broader infrastructure, security, or production readiness than what was actually checked — mirroring this repository's own established "never assume, verify" and "state what was not performed" convention (`docs/HERITAGE_V3_DECISIONS_LOG.md` D-038 §3, D-039 §9).
+
+**Binding rules for this format (never weakened by a future entry):**
+- A chat statement, an unlogged verbal claim, a screenshot without the surrounding configuration context, an assumption, a repository-code inspection, or an application/unit/integration/E2E test result — alone or in any combination — **cannot** close gate (a) or gate (b). Only real-infrastructure evidence gathered per this format can.
+- Partial evidence (any field above incomplete, or an outcome of `NOT VERIFIED` or `BLOCKED`) does **not** authorize exposing activation through the public staging ingress, regardless of how much of the gate has been separately confirmed — D-053 §4's public-exposure boundary is unaffected by partial progress on either gate.
+- No entry produced under this format may claim a gate is verified before real evidence meeting every required field above actually exists. **This section itself makes no such claim for any gate today.**
+
+### 22.2 Deployment-Commit and Workflow-Run Pinning Procedure (for D-053 A9)
+
+The future D-053 Stage 7 (A9) completion-gate decision-log entry (`docs/HERITAGE_V3_DECISIONS_LOG.md` §11) must cite every item below, exactly, as its evidence of which application version the recorded test ran against:
+
+- **Deployed commit SHA.** The full 40-character SHA from `git rev-parse HEAD` on `main`, for the exact commit that was actually deployed — never a branch name, "latest main," a PR number alone, or a relative description (e.g. "the current main at the time").
+- **Proof the cited SHA is the real deployed one.** The entry must show the cited SHA is the deployment workflow's own actual head SHA for that run — read from the workflow run's own recorded head commit, not merely asserted as "the latest local or remote `main`" at some point before or after the deployment, which could have moved.
+- **Workflow-run identity.** The exact `deploy-staging.yml` GitHub Actions run ID, and its canonical workflow-run URL.
+- **Workflow-run detail.** The triggering event, the branch/ref deployed, the run's start and completion timestamps, and its final status and conclusion.
+- **Step outcomes.** The final result of each of the three steps D-053 §11 Stage 6 (A6) makes real: the migration step, the deployment step, and the database-aware `GET /api/health` verification step (Section 2 above; D-053 §11 Stage 2/A7) — each reported individually, not summarized as a single pass/fail.
+- **Test-to-deployment correspondence.** An explicit confirmation that the A9 activate/view-proposal/respond test recorded in that same entry was executed against that exact deployed commit and workflow run — not a different or later deployment.
+- **Optional durable tag.** If a git tag is additionally applied for durable reference (D-053 §8's example, `staging-verify-<date>`), the entry cites the exact tag name and the exact commit SHA it resolves to, and states explicitly that **the tag is optional and can never substitute for** the required deployed-SHA and workflow-run evidence above — a tag alone is never sufficient.
+- **Repeated runs never blended.** If the deployment or the A9 verification is ever repeated (for any reason — a failed first attempt, a later re-verification, a new commit), the repeat requires its **own new** evidence entry identifying its own new SHA and workflow run. An earlier entry's evidence is never silently overwritten, edited in place, or blended with a later run's evidence — each run's record stands on its own, mirroring this repository's append-only decision-log convention.
+
+**Binding rules for this procedure:** a branch name, "latest main," a PR number alone, a relative description ("the version that was live last week"), a local (non-CI) build, or a screenshot with no cited run ID or SHA are each, individually and in combination, **insufficient** deployment identity for this entry. And — mirroring §7's identical rule above — **no secret, database URL/connection string, raw activation token, session cookie, private client information, or raw protected request/response body may ever be recorded** in this or any decision-log entry.
+
+### 22.3 Future Evidence Template
+
+The template below is provided so a future Stage 5 (gate-verification) or Stage 7/A9 entry can be populated directly, without re-deriving the format above. Every placeholder is deliberately unresolved and must never be read as claiming current infrastructure, a real verification, or a real deployment exists — none does as of this section's own writing.
+
+```text
+Gate-evidence entry (D-039 §9 gate — Section 22.1 format)
+- Gate identifier:        D-039 §9 gate (<a | b | c>)
+- Verification date:      <YYYY-MM-DD>
+- Environment:             <staging | ...>
+- Hostinger plan/product:  <exact-product-name>
+- Configuration inspected: <exact configuration surface>
+- Evidence source/method:  <exact source and how it was obtained>
+- Gate (a) only — trusted-header config:      <exact header/hop configuration, or "none configured">
+- Gate (a) only — proxy-hop/trust boundary:   <exact boundary inspected>
+- Gate (a) only — unknown-source fallback ack: <acknowledged, if no trusted source exists>
+- Gate (b) only — confirmation source:        <docs | support correspondence | inspected config>
+- Gate (b) only — request-body logging:       <confirmed disabled | confirmed enabled | not confirmed>
+- Evidence references:     <durable reference(s); no secrets/tokens/credentials>
+- Outcome:                 <VERIFIED | NOT VERIFIED | BLOCKED>
+- Unresolved items:        <exact list, or "none">
+- What was NOT verified:   <mandatory, explicit statement>
+
+Deployment-pinning entry (D-053 A9 — Section 22.2 format)
+- Deployed commit SHA:     <40-character-sha>
+- Proof of workflow head:  <how the run's own head SHA was confirmed to equal the SHA above>
+- Workflow-run ID:         <workflow-run-id>
+- Workflow-run URL:        <workflow-run-url>
+- Event / branch / ref:    <event>, <ref>
+- Start / completion time: <start timestamp> / <completion timestamp>
+- Status / conclusion:     <status> / <conclusion>
+- Migration step result:   <result>
+- Deployment step result:  <result>
+- Health-check step result:<result>
+- Test-to-deployment match: <explicit confirmation>
+- Durable tag (optional):  <tag name, or "none"> resolving to <40-character-sha, or "n/a">
+```
 
 ---
 
