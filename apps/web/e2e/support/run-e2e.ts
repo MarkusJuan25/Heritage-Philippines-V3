@@ -28,6 +28,19 @@ const E2E_PORT = 3100;
 const E2E_RPC_PORT = 3101;
 const E2E_HOST = '127.0.0.1';
 
+// D-052 §12 Stage 4: a reserved, non-routable RFC 2606 `.test` origin,
+// defined once here and never taken from a developer's environment —
+// INHERITED_ENV_KEYS below deliberately does not include
+// APP_V2_PUBLIC_SITE_URL, so without this explicit override the isolated
+// server would see it unset (Regional Tours "unavailable" state). Mirrored
+// as a literal in playwright.config.ts's own webServer.env for parity,
+// since that file independently constructs its own env object rather than
+// importing this one; verify-artifact-safety.ts's own probe never renders
+// `/client/regional-tours`, so its own child-env builder needs no matching
+// addition (confirmed by inspection of artifact-safety-probe.spec.ts,
+// which only ever visits /activate and /api/activation/continue).
+const E2E_APP_V2_PUBLIC_SITE_URL = 'https://regional-tours.test';
+
 // Preserve only the defined inherited variables genuinely needed for
 // executable resolution/runtime — never blindly spread the full parent
 // environment, which would otherwise carry the developer's own
@@ -90,6 +103,7 @@ function buildChildEnv(
     // file.
     ACTIVATION_RATE_LIMIT_HMAC_SECRET: activationRateLimitHmacSecret,
     NODE_ENV: 'production',
+    APP_V2_PUBLIC_SITE_URL: E2E_APP_V2_PUBLIC_SITE_URL,
   } satisfies Record<string, string> as NodeJS.ProcessEnv;
 }
 
