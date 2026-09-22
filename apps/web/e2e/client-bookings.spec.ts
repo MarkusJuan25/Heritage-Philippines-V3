@@ -789,7 +789,7 @@ test('D-049 §8: an activated client browses their paginated Bookings list, open
       // --- Keyboard reachability: the pagination/back links are real,
       //     focusable in-app anchors (not exhaustively re-walking every
       //     control the shared ClientPortalNav test suite already covers
-      //     for its own three real nav items). ---
+      //     for its own five real nav items). ---
       await a.goto('/client/bookings', { waitUntil: 'commit' });
       await a.getByRole('link', { name: 'Next' }).focus();
       await expect(a.getByRole('link', { name: 'Next' })).toBeFocused();
