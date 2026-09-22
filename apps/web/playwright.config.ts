@@ -10,6 +10,13 @@ const E2E_PORT = 3100;
 const E2E_HOST = '127.0.0.1';
 const BASE_URL = `http://${E2E_HOST}:${E2E_PORT}`;
 
+// D-052 §12 Stage 4 — mirrors run-e2e.ts's own literal exactly (must match
+// client-overview.spec.ts's REGIONAL_TOURS_RESERVED_ORIGIN). Defined again
+// here, rather than imported, because this file independently constructs
+// its own webServer.env object below and run-e2e.ts's own child env is not
+// a module this file otherwise depends on.
+const E2E_APP_V2_PUBLIC_SITE_URL = 'https://regional-tours.test';
+
 // D-033 §5: the same canonical validator run-e2e.ts, fixtures.ts, and the
 // spec's own direct-assertion code all use — re-validated here
 // independently in case `playwright test` is ever invoked directly,
@@ -71,6 +78,7 @@ export default defineConfig({
       BETTER_AUTH_SECRET: betterAuthSecret,
       ACTIVATION_RATE_LIMIT_HMAC_SECRET: activationRateLimitHmacSecret,
       NODE_ENV: 'production',
+      APP_V2_PUBLIC_SITE_URL: E2E_APP_V2_PUBLIC_SITE_URL,
     },
   },
 });

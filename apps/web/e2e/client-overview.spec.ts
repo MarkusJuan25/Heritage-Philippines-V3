@@ -300,6 +300,16 @@ const NAV_LABELS = [
   'Settings',
 ] as const;
 
+// D-052 Stage 4 — the reserved, non-routable RFC 2606 `.test` origin this
+// isolated E2E run's own environment supplies for `APP_V2_PUBLIC_SITE_URL`
+// (run-e2e.ts's `buildChildEnv`, mirrored in playwright.config.ts's own
+// `webServer.env`) — defined once here and never taken from a developer's
+// environment. The catalogue link is asserted, never clicked, and no
+// browser request may ever reach it (see the `regionalToursOutboundRequests`
+// listener below).
+const REGIONAL_TOURS_RESERVED_ORIGIN = 'https://regional-tours.test';
+const REGIONAL_TOURS_CATALOGUE_HREF = `${REGIONAL_TOURS_RESERVED_ORIGIN}/tour`;
+
 function supportGuidanceWithConsultant(consultantName: string): string {
   return `Support & Messages is planned for a later phase. Until then, ${consultantName}, your Heritage Philippines travel consultant, is your point of contact.`;
 }
@@ -942,6 +952,8 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
     async function signInAndCaptureOverview(client: ProvisionedClient): Promise<{
       html: string;
       flight: string;
+      regionalToursHtml: string;
+      regionalToursFlight: string;
     }> {
       // A distinct identity per overview client (A = 2, B = 3).
       const context = await newIdentifiedContext(
@@ -951,6 +963,18 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
       );
       try {
         const clientPage = await context.newPage();
+
+        // D-052 Stage 4 — registered before any navigation so it observes
+        // every request this client's page ever makes, not only those near
+        // the Regional Tours section below. The outbound catalogue link is
+        // never clicked; this is a defense-in-depth confirmation that
+        // nothing else (a prefetch, a stray fetch) ever reaches it either.
+        const regionalToursOutboundRequests: string[] = [];
+        clientPage.on('request', (req) => {
+          if (req.url().startsWith(REGIONAL_TOURS_RESERVED_ORIGIN)) {
+            regionalToursOutboundRequests.push(req.url());
+          }
+        });
 
         // Sign in, tolerating a transient stall in the sign-in POST or the
         // /login -> /dashboard -> /client chain when the isolated server's
@@ -1123,7 +1147,108 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
         assertFrameworkRscVary(clientResponse!.headers()['vary'], 'authenticated GET /client');
 
         const html = await clientPage.content();
-        return { html, flight: extractInlineFlight(html) };
+
+        // D-052 Stage 4 — real in-app navigation via the nav link itself
+        // (never a raw `.goto`, so this also proves the link that was just
+        // asserted above actually works), the exact available-state copy
+        // and outbound-link attributes, the current-page span, this
+        // route's own private/no-store + no-referrer headers, its own
+        // unauthenticated redirect, and the §9(ii) loading-fallback
+        // observability check. Identifier containment (Client.id,
+        // ClientProfile.id, User.id) is covered by folding this page's own
+        // html/flight into `surfacesA`/`surfacesB` below, reusing the
+        // existing cross-client and self-containment assertions verbatim
+        // rather than duplicating that logic.
+        await regionalToursLink.click();
+        await clientPage.waitForURL((url) => url.pathname === '/client/regional-tours', {
+          timeout: 30_000,
+          waitUntil: 'commit',
+        });
+
+        await expect(clientPage.locator('main')).toHaveCount(1, SLOW);
+        await expect(clientPage.getByRole('heading')).toHaveCount(1);
+        await expect(
+          clientPage.getByRole('heading', { level: 1, name: 'Regional Tours' }),
+        ).toBeVisible(SLOW);
+        await expect(
+          clientPage.getByText(
+            'Browse the Heritage Philippines tour catalogue on our public website. The catalogue is separate from your client portal.',
+            { exact: true },
+          ),
+        ).toBeVisible();
+        // The inherited overview-worded `client/loading.tsx` (a
+        // `role="status"` region) must never become observable for this
+        // synchronous, no-awaited-work route (D-052 §9(ii)); by the time
+        // `waitForURL` above resolved, Next.js had already rendered
+        // whatever it was ever going to render for this navigation.
+        await expect(clientPage.getByRole('status')).toHaveCount(0);
+
+        const catalogueLink = clientPage.getByRole('link', {
+          name: 'View the tour catalogue (opens in a new tab)',
+        });
+        await expect(catalogueLink).toHaveAttribute('href', REGIONAL_TOURS_CATALOGUE_HREF);
+        await expect(catalogueLink).toHaveAttribute('target', '_blank');
+        await expect(catalogueLink).toHaveAttribute('rel', 'noopener noreferrer');
+
+        // The nav's current-page span swaps to Regional Tours; every other
+        // real item remains an ordinary link — four, not five, since the
+        // current item is never itself a link.
+        const regionalToursNavItems = clientPage
+          .getByRole('navigation', { name: 'Client portal' })
+          .locator('li');
+        await expect(regionalToursNavItems).toHaveCount(10);
+        const regionalToursCurrent = clientPage
+          .getByRole('navigation', { name: 'Client portal' })
+          .getByText('Regional Tours', { exact: true });
+        await expect(regionalToursCurrent).toHaveAttribute('aria-current', 'page');
+        expect(await regionalToursCurrent.evaluate((node) => node.tagName)).toBe('SPAN');
+        expect(regionalToursCurrent.locator('xpath=ancestor::a')).toHaveCount(0);
+        const regionalToursNavLinks = clientPage
+          .getByRole('navigation', { name: 'Client portal' })
+          .getByRole('link');
+        await expect(regionalToursNavLinks).toHaveCount(4);
+        await expect(regionalToursNavLinks.filter({ hasText: 'Home / Overview' })).toHaveAttribute(
+          'href',
+          '/client',
+        );
+
+        // Own response headers (D-052 §8/§11) — a fresh, authenticated,
+        // context-scoped GET (same session cookies), mirroring the
+        // `/client` header check above.
+        const regionalToursResponse = await context.request.get('/client/regional-tours');
+        expect(regionalToursResponse.status()).toBe(200);
+        assertPrivateNoStoreCacheControl(
+          regionalToursResponse.headers()['cache-control'],
+          'authenticated GET /client/regional-tours',
+        );
+        expect(regionalToursResponse.headers()['referrer-policy']).toBe('no-referrer');
+
+        // Unauthenticated GET must redirect to /login, exactly like every
+        // other `/client/*` route (D-052 §8 — the existing four-layer
+        // model covers this route without any configuration change).
+        const anonRegionalToursResponse = await request.get('/client/regional-tours', {
+          maxRedirects: 0,
+        });
+        expect(
+          anonRegionalToursResponse.status(),
+          'unauthenticated GET /client/regional-tours must be a 3xx redirect',
+        ).toBeGreaterThanOrEqual(300);
+        expect(anonRegionalToursResponse.status()).toBeLessThan(400);
+        const anonRegionalToursLocation = anonRegionalToursResponse.headers()['location'] ?? '';
+        expect(
+          anonRegionalToursLocation.endsWith('/login'),
+          `redirect location "${anonRegionalToursLocation}" must end "/login"`,
+        ).toBe(true);
+
+        const regionalToursHtml = await clientPage.content();
+        const regionalToursFlight = extractInlineFlight(regionalToursHtml);
+
+        expect(
+          regionalToursOutboundRequests,
+          'no browser request may ever reach the reserved regional-tours.test origin',
+        ).toEqual([]);
+
+        return { html, flight: extractInlineFlight(html), regionalToursHtml, regionalToursFlight };
       } finally {
         await context.close();
       }
@@ -1140,9 +1265,22 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
 
     // 8. Two-client HTML + inline Flight/RSC isolation (D-040 §8/§9), as
     //    boolean predicates against exact captured strings — never a UUID
-    //    regex.
-    const surfacesA = [outputA.html, outputA.flight];
-    const surfacesB = [outputB.html, outputB.flight];
+    //    regex. Each client's Regional Tours html/flight (D-052 §8/§11,
+    //    Stage 4) is folded in here too, so every existing cross-client and
+    //    self-containment assertion below also covers that route without
+    //    duplicating any assertion logic.
+    const surfacesA = [
+      outputA.html,
+      outputA.flight,
+      outputA.regionalToursHtml,
+      outputA.regionalToursFlight,
+    ];
+    const surfacesB = [
+      outputB.html,
+      outputB.flight,
+      outputB.regionalToursHtml,
+      outputB.regionalToursFlight,
+    ];
 
     function assertAbsent(surfaces: string[], values: string[], context: string): void {
       for (const surface of surfaces) {
