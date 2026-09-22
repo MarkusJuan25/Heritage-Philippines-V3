@@ -1202,7 +1202,7 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
           .getByText('Regional Tours', { exact: true });
         await expect(regionalToursCurrent).toHaveAttribute('aria-current', 'page');
         expect(await regionalToursCurrent.evaluate((node) => node.tagName)).toBe('SPAN');
-        expect(regionalToursCurrent.locator('xpath=ancestor::a')).toHaveCount(0);
+        await expect(regionalToursCurrent.locator('xpath=ancestor::a')).toHaveCount(0);
         const regionalToursNavLinks = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .getByRole('link');
