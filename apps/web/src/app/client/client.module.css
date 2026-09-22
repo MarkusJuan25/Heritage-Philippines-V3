@@ -83,10 +83,10 @@
   color: #333;
 }
 
-/* The visible "Coming soon" marker on each of the six remaining inert
-   items (four of the original ten canonical labels — Home / Overview, My
-   Journey, Bookings, and Support & Messages — are now real routes;
-   D-051 §10). */
+/* The visible "Coming soon" marker on each of the five remaining inert
+   items (five of the original ten canonical labels — Home / Overview, My
+   Journey, Bookings, Regional Tours, and Support & Messages — are now
+   real routes; D-051 §10, D-052 §4). */
 .navItemBadge {
   font-size: 0.75rem;
   color: #666;

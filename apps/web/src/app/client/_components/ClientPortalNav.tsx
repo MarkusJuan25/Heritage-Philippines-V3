@@ -14,12 +14,17 @@ import styles from '../client.module.css';
 //   Documents · Visa Center · Regional Tours · Support & Messages ·
 //   Profile · Settings
 //
-// D-047 §2 promoted "My Journey", D-049 §7 promoted "Bookings", and D-051
-// §10 promotes "Support & Messages" (`/client/support`) — the first
+// D-047 §2 promoted "My Journey", D-049 §7 promoted "Bookings", D-051
+// §10 promoted "Support & Messages" (`/client/support`) — the first
 // promotion whose label is NOT immediately adjacent to the already-real
 // items in canonical order (four inert labels — Payments & Receipts,
-// Documents, Visa Center, Regional Tours — sit between "Bookings" and
-// "Support & Messages" in the canonical list). The previous
+// Documents, Visa Center, Regional Tours — sat between "Bookings" and
+// "Support & Messages" in the canonical list) — and D-052 §4 promotes
+// "Regional Tours" (`/client/regional-tours`) at its existing canonical
+// position, so exactly five labels are real (Home / Overview, My
+// Journey, Bookings, Regional Tours, Support & Messages) and exactly five
+// remain inert (Payments & Receipts, Documents, Visa Center, Profile,
+// Settings). The previous
 // two-array-concatenation rendering (`REAL_NAV_ITEMS.map()` then
 // `LATER_PHASE_LABELS.map()`) relied on every promoted label already being
 // the first remaining element of the inert array, which coincidentally
@@ -42,7 +47,7 @@ const NAV_ITEMS: readonly NavEntry[] = [
   { kind: 'inert', label: 'Payments & Receipts' },
   { kind: 'inert', label: 'Documents' },
   { kind: 'inert', label: 'Visa Center' },
-  { kind: 'inert', label: 'Regional Tours' },
+  { kind: 'real', label: 'Regional Tours', href: '/client/regional-tours' },
   { kind: 'real', label: 'Support & Messages', href: '/client/support' },
   { kind: 'inert', label: 'Profile' },
   { kind: 'inert', label: 'Settings' },
@@ -53,8 +58,8 @@ const NAV_ITEMS: readonly NavEntry[] = [
 // always in the DOM (so the label set is server-rendered and the
 // keyboard-tab walk is stable); CSS shows it inline at >= 48rem and, below
 // that, only while `open`. Within this <nav> the focusable controls are the
-// mobile toggle and whichever of the four real nav items is not the
-// current page; none of the six inert items is focusable.
+// mobile toggle and whichever of the five real nav items is not the
+// current page; none of the five inert items is focusable.
 export function ClientPortalNav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
