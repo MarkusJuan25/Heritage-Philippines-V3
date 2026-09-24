@@ -121,14 +121,43 @@ function eligibleProposalVersion(
   };
 }
 
+// A P2002 in the exact shape `@prisma/adapter-pg` reports it (verified
+// against real PostgreSQL — see lib/prisma-errors.ts): no `meta.target`;
+// the model under `meta.modelName` and the columns under
+// `meta.driverAdapterError.cause.constraint.fields`, double-quoted when
+// mixed-case, exactly as Postgres prints them.
+function adapterUniqueMeta(modelName: string, fields: string[]) {
+  return {
+    modelName,
+    driverAdapterError: {
+      name: 'DriverAdapterError',
+      cause: {
+        originalCode: '23505',
+        kind: 'UniqueConstraintViolation',
+        constraint: { fields: fields.map((f) => (/[A-Z]/.test(f) ? `"${f}"` : f)) },
+      },
+    },
+  };
+}
+
+// The commit-time form of a write conflict: a raw DriverAdapterError, not a
+// PrismaClientKnownRequestError.
+function rawAdapterWriteConflict(): Error {
+  return Object.assign(new Error('TransactionWriteConflict'), {
+    name: 'DriverAdapterError',
+    cause: { originalCode: '40001', kind: 'TransactionWriteConflict' },
+  });
+}
+
 function conflictError(
   code: 'P2034' | 'P2002' | 'P2004',
-  target?: string[],
+  fields?: string[],
+  modelName = 'Booking',
 ): Prisma.PrismaClientKnownRequestError {
   return new Prisma.PrismaClientKnownRequestError('Simulated database conflict', {
     code,
     clientVersion: '7.8.0',
-    meta: target ? { target } : undefined,
+    meta: fields ? adapterUniqueMeta(modelName, fields) : undefined,
   });
 }
 
@@ -327,6 +356,29 @@ describe('createBooking', () => {
     await expect(
       createBooking(ADMIN_MANAGER, { proposalVersionId: PROPOSAL_VERSION_ID }),
     ).rejects.toMatchObject({ code: 'BOOKING_CONFLICT', status: 409 });
+  });
+
+  it('retries the commit-time raw adapter write conflict and maps it to BOOKING_CONFLICT once retries are exhausted', async () => {
+    transactionMock.mockImplementation(async () => {
+      throw rawAdapterWriteConflict();
+    });
+
+    await expect(
+      createBooking(ADMIN_MANAGER, { proposalVersionId: PROPOSAL_VERSION_ID }),
+    ).rejects.toMatchObject({ code: 'BOOKING_CONFLICT', status: 409 });
+    expect(transactionMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('never treats a proposalVersionId unique violation on another model as the idempotent Booking race', async () => {
+    repositoryMocks.createBookingWithInitialHistory.mockRejectedValueOnce(
+      conflictError('P2002', ['proposalVersionId'], 'ProposalAcceptance'),
+    );
+
+    await expect(
+      createBooking(ADMIN_MANAGER, { proposalVersionId: PROPOSAL_VERSION_ID }),
+    ).rejects.toMatchObject({ code: 'BOOKING_CONFLICT', status: 409 });
+    // Only the in-transaction lookup ran; no post-conflict re-read.
+    expect(repositoryMocks.findBookingByProposalVersionIdForActor).toHaveBeenCalledTimes(1);
   });
 
   it('rethrows an unrelated, unexpected error unchanged rather than mapping it to BOOKING_CONFLICT', async () => {

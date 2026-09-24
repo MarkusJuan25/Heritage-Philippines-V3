@@ -15,6 +15,8 @@ vi.mock('next/headers', () => ({
   headers: vi.fn(async () => new Headers()),
 }));
 
+import { SerializableRetriesExhaustedError } from '@/lib/prisma-errors';
+
 import { getCurrentSession, getCurrentUser, withRole, type AuthenticatedUser } from './guards';
 
 const CLIENT_USER = {
@@ -110,6 +112,29 @@ describe('withRole', () => {
     await expect(response.json()).resolves.toEqual({
       error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' },
     });
+  });
+
+  it('maps exhausted serializable retries to a safe 409 CONFLICT envelope, never the wrapped database error', async () => {
+    getSessionMock.mockResolvedValue({ user: ADMIN_USER });
+    const handler = vi.fn(async () => {
+      throw new SerializableRetriesExhaustedError(
+        3,
+        new Error('could not serialize access due to concurrent update'),
+      );
+    });
+
+    const response = await withRole(undefined, handler)(request(), staticContext());
+
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: {
+        code: 'CONFLICT',
+        message:
+          'This change conflicted with another change made at the same time. Please try again.',
+      },
+    });
+    expect(JSON.stringify(body)).not.toMatch(/serialize|concurrent update/);
   });
 
   it('forwards a dynamic route context (e.g. { params: Promise<{ id: string }> }) to the handler alongside user', async () => {

@@ -4,6 +4,8 @@ import { z } from 'zod';
 const { getServerEnvMock } = vi.hoisted(() => ({ getServerEnvMock: vi.fn() }));
 vi.mock('@/lib/env', () => ({ getServerEnv: getServerEnvMock }));
 
+import { SerializableRetriesExhaustedError } from '@/lib/prisma-errors';
+
 import { ActivationError } from './errors';
 import {
   MAX_BODY_BYTES,
@@ -353,6 +355,25 @@ describe('runActivationAction', () => {
       error: {
         code: 'ACTIVATION_NOT_POSSIBLE',
         message: 'This invitation link is no longer valid.',
+      },
+    });
+  });
+
+  it('translates exhausted serializable retries into a safe 409 CONFLICT with the activation security headers', async () => {
+    const response = await runActivationAction(
+      async () => {
+        throw new SerializableRetriesExhaustedError(3, new Error('could not serialize access'));
+      },
+      (result) => jsonResponse(result, 200),
+    );
+    expect(response.status).toBe(409);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'CONFLICT',
+        message:
+          'This request conflicted with another change made at the same time. Please try again.',
       },
     });
   });

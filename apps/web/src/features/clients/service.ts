@@ -1,6 +1,7 @@
-import { Prisma, type LeadStatus } from '@/generated/prisma/client';
+import type { LeadStatus } from '@/generated/prisma/client';
 import { normalizeEmail, normalizePhone } from '@/lib/contact-normalization';
 import { prisma } from '@/lib/db';
+import { isResidualDatabaseConflict } from '@/lib/prisma-errors';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -53,8 +54,8 @@ function notFoundOrForbidden(clientActor: ClientActor): ClientError {
     : new ClientError('CLIENT_FORBIDDEN', 'You do not have access to this client.');
 }
 
-// P2034: a SERIALIZABLE conflict that survived every retry in
-// runSerializableWithRetry (D-031 F-01 — updateClient's own transaction was
+// Exhausted serializable retries (SerializableRetriesExhaustedError,
+// lib/prisma-errors.ts; D-031 F-01 — updateClient's own transaction was
 // previously a plain, non-retrying prisma.$transaction, so this conflict
 // code was never reachable here before). P2002/P2004: a database-level
 // uniqueness/CHECK conflict this service did not anticipate — a
@@ -62,10 +63,7 @@ function notFoundOrForbidden(clientActor: ClientActor): ClientError {
 // features/bookings/service.ts's identical `isKnownConflict`/
 // `isOtherKnownConflict` precedent.
 function isKnownConflict(error: unknown): boolean {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    (error.code === 'P2034' || error.code === 'P2002' || error.code === 'P2004')
-  );
+  return isResidualDatabaseConflict(error);
 }
 
 // D-025 §6's exact, closed duplicate-match shape — deliberately this

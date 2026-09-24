@@ -190,14 +190,43 @@ function assignmentRecord(
   };
 }
 
+// A P2002 in the exact shape `@prisma/adapter-pg` reports it (verified
+// against real PostgreSQL — see lib/prisma-errors.ts): no `meta.target`;
+// the model under `meta.modelName` and the columns under
+// `meta.driverAdapterError.cause.constraint.fields`, double-quoted when
+// mixed-case, exactly as Postgres prints them.
+function adapterUniqueMeta(modelName: string, fields: string[]) {
+  return {
+    modelName,
+    driverAdapterError: {
+      name: 'DriverAdapterError',
+      cause: {
+        originalCode: '23505',
+        kind: 'UniqueConstraintViolation',
+        constraint: { fields: fields.map((f) => (/[A-Z]/.test(f) ? `"${f}"` : f)) },
+      },
+    },
+  };
+}
+
+// The commit-time form of a write conflict: a raw DriverAdapterError, not a
+// PrismaClientKnownRequestError.
+function rawAdapterWriteConflict(): Error {
+  return Object.assign(new Error('TransactionWriteConflict'), {
+    name: 'DriverAdapterError',
+    cause: { originalCode: '40001', kind: 'TransactionWriteConflict' },
+  });
+}
+
 function conflictError(
   code: 'P2034' | 'P2002' | 'P2004',
-  target?: string[],
+  fields?: string[],
+  modelName = 'ProposalVersion',
 ): Prisma.PrismaClientKnownRequestError {
   return new Prisma.PrismaClientKnownRequestError('Simulated database conflict', {
     code,
     clientVersion: '7.8.0',
-    meta: target ? { target } : undefined,
+    meta: fields ? adapterUniqueMeta(modelName, fields) : undefined,
   });
 }
 
@@ -661,6 +690,17 @@ describe('createProposal', () => {
     await expect(
       createProposal(TRAVEL_CONSULTANT, { clientId: CLIENT_ID, content: 'Day 1.' }),
     ).rejects.toMatchObject({ code: 'PROPOSAL_CONFLICT', status: 409 });
+  });
+
+  it('retries the commit-time raw adapter write conflict and maps it to PROPOSAL_CONFLICT once retries are exhausted', async () => {
+    transactionMock.mockImplementation(async () => {
+      throw rawAdapterWriteConflict();
+    });
+
+    await expect(
+      createProposal(TRAVEL_CONSULTANT, { clientId: CLIENT_ID, content: 'Day 1.' }),
+    ).rejects.toMatchObject({ code: 'PROPOSAL_CONFLICT', status: 409 });
+    expect(transactionMock).toHaveBeenCalledTimes(3);
   });
 
   it('rethrows an unrelated, unexpected error unchanged', async () => {
@@ -1307,7 +1347,7 @@ describe('recordProposalResponse', () => {
 
   it('translates a concurrent proposalVersionId unique-conflict race into PROPOSAL_RESPONSE_ALREADY_RECORDED, never exposing the raw Prisma error or treating it as success', async () => {
     repositoryMocks.createExternalProposalAcceptance.mockRejectedValue(
-      conflictError('P2002', ['proposalVersionId']),
+      conflictError('P2002', ['proposalVersionId'], 'ProposalAcceptance'),
     );
 
     await expect(
@@ -2126,7 +2166,7 @@ describe('submitClientProposalResponse (D-047 §7)', () => {
   it('a P2002 unique-race on proposalVersionId maps to PROPOSAL_RESPONSE_ALREADY_RECORDED (never an idempotent success)', async () => {
     repositoryMocks.createPortalProposalAcceptance.mockReset();
     repositoryMocks.createPortalProposalAcceptance.mockRejectedValue(
-      conflictError('P2002', ['proposalVersionId']),
+      conflictError('P2002', ['proposalVersionId'], 'ProposalAcceptance'),
     );
 
     await expect(submitClientProposalResponse(submitInput())).rejects.toMatchObject({
@@ -2137,7 +2177,9 @@ describe('submitClientProposalResponse (D-047 §7)', () => {
 
   it('every other residual P2002 / P2004 / exhausted P2034 maps to PROPOSAL_CONFLICT', async () => {
     for (const error of [
-      conflictError('P2002', ['proposal_acceptance_pkey']),
+      // Same column name, different model: never the acceptance race.
+      conflictError('P2002', ['proposalVersionId'], 'Booking'),
+      conflictError('P2002', ['id'], 'ProposalAcceptance'),
       conflictError('P2004'),
       conflictError('P2034'),
     ]) {

@@ -29,6 +29,7 @@ const repositoryMocks = vi.hoisted(() => ({
 vi.mock('./repository', () => repositoryMocks);
 
 import { Prisma } from '@/generated/prisma/client';
+import { SerializableRetriesExhaustedError } from '@/lib/prisma-errors';
 import { prisma } from '@/lib/db';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -363,8 +364,9 @@ describe('changeStaffRole', () => {
       throw serializationConflictError();
     });
 
+    // The typed error withRole (lib/auth/guards.ts) maps to a safe 409.
     await expect(changeStaffRole(ACTOR, 'target-id', 'FINANCE_ACCOUNTING')).rejects.toBeInstanceOf(
-      Prisma.PrismaClientKnownRequestError,
+      SerializableRetriesExhaustedError,
     );
     expect(transactionMock).toHaveBeenCalledTimes(3);
   });

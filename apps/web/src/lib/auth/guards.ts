@@ -1,6 +1,8 @@
 import { headers } from 'next/headers';
 import { NextResponse } from 'next/server';
 
+import { isSerializableRetriesExhausted } from '@/lib/prisma-errors';
+
 import { auth } from './auth';
 import { authorize } from './authorize';
 import type { AppRole } from './roles';
@@ -162,6 +164,24 @@ export function withRole<Params extends RouteParams = Record<string, never>>(
             },
           },
           { status: error.status },
+        );
+      }
+
+      // A write conflict that outlasted every bounded retry in
+      // lib/serializable-transaction.ts, reaching a feature with no
+      // conflict mapping of its own (e.g. staff, invitations): a safe,
+      // retryable 409, never the database detail it wraps.
+      if (isSerializableRetriesExhausted(error)) {
+        console.warn('Write conflict persisted after bounded retries in a role-guarded route.');
+        return NextResponse.json(
+          {
+            error: {
+              code: 'CONFLICT',
+              message:
+                'This change conflicted with another change made at the same time. Please try again.',
+            },
+          },
+          { status: 409 },
         );
       }
 
