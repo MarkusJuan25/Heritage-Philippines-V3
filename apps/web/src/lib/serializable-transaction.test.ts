@@ -9,9 +9,19 @@ vi.mock('@/lib/db', () => ({ prisma: { $transaction: transactionMock } }));
 
 import { Prisma } from '@/generated/prisma/client';
 
+import { SerializableRetriesExhaustedError } from './prisma-errors';
 import { runSerializableWithRetry } from './serializable-transaction';
 
 const TX_CLIENT = { marker: 'tx-client' };
+
+// The commit-time form observed from @prisma/adapter-pg: a raw
+// DriverAdapterError, not a PrismaClientKnownRequestError.
+function rawAdapterWriteConflict(): Error {
+  return Object.assign(new Error('TransactionWriteConflict'), {
+    name: 'DriverAdapterError',
+    cause: { originalCode: '40001', kind: 'TransactionWriteConflict' },
+  });
+}
 
 function serializationConflictError(): Prisma.PrismaClientKnownRequestError {
   return new Prisma.PrismaClientKnownRequestError(
@@ -55,13 +65,37 @@ describe('runSerializableWithRetry', () => {
     expect(transactionMock).toHaveBeenCalledTimes(3);
   });
 
-  it('gives up and rethrows the raw error after exhausting retries on repeated conflicts', async () => {
+  it('gives up after exactly three attempts with a typed SerializableRetriesExhaustedError carrying the last conflict as cause', async () => {
+    const last = serializationConflictError();
+    transactionMock
+      .mockRejectedValueOnce(serializationConflictError())
+      .mockRejectedValueOnce(serializationConflictError())
+      .mockRejectedValueOnce(last);
+
+    const error = await runSerializableWithRetry(async () => 'unreachable').catch((e) => e);
+
+    expect(error).toBeInstanceOf(SerializableRetriesExhaustedError);
+    expect(error.attempts).toBe(3);
+    expect(error.cause).toBe(last);
+    expect(transactionMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries the commit-time raw adapter write conflict and succeeds on a later attempt', async () => {
+    transactionMock
+      .mockRejectedValueOnce(rawAdapterWriteConflict())
+      .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(TX_CLIENT));
+
+    await expect(runSerializableWithRetry(async () => 'succeeded')).resolves.toBe('succeeded');
+    expect(transactionMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('exhausts on repeated raw adapter write conflicts, never rethrowing the raw adapter error', async () => {
     transactionMock.mockImplementation(async () => {
-      throw serializationConflictError();
+      throw rawAdapterWriteConflict();
     });
 
     await expect(runSerializableWithRetry(async () => 'unreachable')).rejects.toBeInstanceOf(
-      Prisma.PrismaClientKnownRequestError,
+      SerializableRetriesExhaustedError,
     );
     expect(transactionMock).toHaveBeenCalledTimes(3);
   });

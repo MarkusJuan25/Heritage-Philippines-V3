@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { Prisma, ProposalResponseType } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
+import { isResidualDatabaseConflict, isUniqueViolationOn } from '@/lib/prisma-errors';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -168,48 +169,18 @@ async function assertProposalAuthorAccess(
   }
 }
 
-// --- Conflict helpers (Section 10; mirrors
-// features/bookings/service.ts's identical uniqueConstraintTarget/
-// isUniqueConflictOn/isOtherKnownConflict trio exactly) ---
+// --- Conflict helpers (Section 10; built on lib/prisma-errors.ts's
+// verified adapter-error recognition, shared with features/bookings) ---
 
-function uniqueConstraintTarget(error: Prisma.PrismaClientKnownRequestError): string {
-  const target = error.meta?.target;
-  if (Array.isArray(target)) return target.join(',');
-  return typeof target === 'string' ? target : '';
-}
-
-/**
- * True when `error` is a P2002 whose target names every one of `fields` —
- * a single field for a simple unique constraint (e.g. `proposalVersionId`
- * on `ProposalAcceptance`), or every field of a composite constraint (e.g.
- * both `proposalId` and `versionNumber` for `ProposalVersion`'s
- * `@@unique([proposalId, versionNumber])`). `.includes` (not exact
- * equality) mirrors `isUniqueConflictOn`'s established precedent, since a
- * driver-reported target may be either a joined field-name array or a raw
- * constraint-name string that still embeds each field name as a substring.
- */
-function isUniqueConflictOn(error: unknown, ...fields: string[]): boolean {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
-    return false;
-  }
-  const target = uniqueConstraintTarget(error);
-  return fields.every((field) => target.includes(field));
-}
-
-// P2034: a SERIALIZABLE conflict that survived every retry in
-// runSerializableWithRetry. P2002 (unmatched by a specific
-// isUniqueConflictOn check above)/P2004: the database's own unique
-// indexes/CHECK constraints (proposal_version_current_client_visible_key,
+// Exhausted serializable retries (SerializableRetriesExhaustedError), a
+// P2002 unmatched by a specific isUniqueViolationOn check below, or a
+// P2004: the database's own unique indexes/CHECK constraints
+// (proposal_version_current_client_visible_key,
 // proposal_version_content_nonblank, proposal_acceptance_response_path)
 // rejecting a write for a reason this service did not anticipate — a
-// defense-in-depth backstop, mirroring
-// features/bookings/service.ts's/features/assignments/service.ts's
-// identical `isOtherKnownConflict`/`isKnownConflict`.
+// defense-in-depth backstop, mapped to the safe PROPOSAL_CONFLICT.
 function isOtherKnownConflict(error: unknown): boolean {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    (error.code === 'P2034' || error.code === 'P2002' || error.code === 'P2004')
-  );
+  return isResidualDatabaseConflict(error);
 }
 
 // --- List (D-027 §3/§6's GET /api/proposals) ---
@@ -454,7 +425,7 @@ export async function createProposalRevision(
         return version;
       });
     } catch (error) {
-      if (isUniqueConflictOn(error, 'proposalId', 'versionNumber')) {
+      if (isUniqueViolationOn(error, 'ProposalVersion', ['proposalId', 'versionNumber'])) {
         if (attempt < MAX_REVISION_ATTEMPTS) {
           continue;
         }
@@ -744,7 +715,7 @@ export async function recordProposalResponse(
       return acceptance;
     });
   } catch (error) {
-    if (isUniqueConflictOn(error, 'proposalVersionId')) {
+    if (isUniqueViolationOn(error, 'ProposalAcceptance', ['proposalVersionId'])) {
       throw new ProposalError(
         'PROPOSAL_RESPONSE_ALREADY_RECORDED',
         PROPOSAL_RESPONSE_ALREADY_RECORDED_MESSAGE,
@@ -1234,7 +1205,7 @@ export async function submitClientProposalResponse(
       return { responseType: acceptance.responseType };
     });
   } catch (error) {
-    if (isUniqueConflictOn(error, 'proposalVersionId')) {
+    if (isUniqueViolationOn(error, 'ProposalAcceptance', ['proposalVersionId'])) {
       throw new ProposalError(
         'PROPOSAL_RESPONSE_ALREADY_RECORDED',
         PROPOSAL_RESPONSE_ALREADY_RECORDED_MESSAGE,

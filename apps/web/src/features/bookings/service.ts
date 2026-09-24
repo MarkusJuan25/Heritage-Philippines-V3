@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { Prisma } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
+import { isResidualDatabaseConflict, isUniqueViolationOn } from '@/lib/prisma-errors';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -77,32 +78,22 @@ function generateBookingReference(): string {
   return `${BOOKING_REFERENCE_PREFIX}${randomBytes(10).toString('hex').toUpperCase()}`;
 }
 
-function uniqueConstraintTarget(error: Prisma.PrismaClientKnownRequestError): string {
-  const target = error.meta?.target;
-  if (Array.isArray(target)) return target.join(',');
-  return typeof target === 'string' ? target : '';
+// A unique violation of exactly this Booking column — never a violation of
+// some other constraint that happens to share a column name (see
+// lib/prisma-errors.ts for the verified adapter shape this reads).
+function isBookingUniqueViolationOn(error: unknown, field: string): boolean {
+  return isUniqueViolationOn(error, 'Booking', [field]);
 }
 
-function isUniqueConflictOn(error: unknown, field: string): boolean {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    error.code === 'P2002' &&
-    uniqueConstraintTarget(error).includes(field)
-  );
-}
-
-// P2034: a SERIALIZABLE conflict that survived every retry in
-// runSerializableWithRetry. P2002 (unmatched by the two specific checks
-// above)/P2004: the database's own unique indexes / CHECK constraints (see
-// the Booking/BookingStatusHistory model doc comments in
+// Exhausted serializable retries (SerializableRetriesExhaustedError), a
+// P2002 unmatched by the two specific checks above, or a P2004: the
+// database's own unique indexes / CHECK constraints (see the
+// Booking/BookingStatusHistory model doc comments in
 // apps/web/prisma/schema.prisma) rejecting a write for a reason this
-// service did not anticipate — a defense-in-depth backstop, mirroring
-// features/assignments/service.ts's `isKnownConflict`.
+// service did not anticipate — a defense-in-depth backstop, mapped to the
+// safe BOOKING_CONFLICT.
 function isOtherKnownConflict(error: unknown): boolean {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    (error.code === 'P2034' || error.code === 'P2002' || error.code === 'P2004')
-  );
+  return isResidualDatabaseConflict(error);
 }
 
 const CONFLICT_MESSAGE =
@@ -191,8 +182,8 @@ async function attemptCreateBooking(
  * 5.1, 5.2, 9) — an explicit staff action, never automatic.
  *
  * Concurrency: each attempt runs inside `runSerializableWithRetry`, which
- * itself retries a Postgres serialization conflict (P2034) up to its own
- * bounded limit. Two additional, narrower conflicts are handled around
+ * itself retries a Postgres write conflict up to its own bounded limit.
+ * Two additional, narrower conflicts are handled around
  * that, each requiring a *fresh* transaction (a failed statement aborts the
  * Postgres transaction it ran in — Prisma's interactive transactions do not
  * use savepoints per statement — so retrying inside the same `tx` callback
@@ -208,7 +199,7 @@ async function attemptCreateBooking(
  *   Booking and return it as the idempotent result — the same outcome a
  *   non-concurrent idempotent replay produces.
  *
- * Any other residual conflict (P2034 that survived every retry, P2004, or
+ * Any other residual conflict (exhausted write-conflict retries, P2004, or
  * an unmatched P2002) maps to a controlled `BookingError('BOOKING_CONFLICT')`
  * — never a raw Prisma/PostgreSQL error reaching the route layer
  * (.claude/rules/backend.md's "Consistent Error Responses" / "No secret or
@@ -224,7 +215,7 @@ export async function createBooking(
     try {
       return await runSerializableWithRetry((tx) => attemptCreateBooking(tx, bookingActor, input));
     } catch (error) {
-      if (isUniqueConflictOn(error, 'bookingReference')) {
+      if (isBookingUniqueViolationOn(error, 'bookingReference')) {
         if (attempt < MAX_BOOKING_REFERENCE_ATTEMPTS) {
           continue;
         }
@@ -234,7 +225,7 @@ export async function createBooking(
         );
       }
 
-      if (isUniqueConflictOn(error, 'proposalVersionId')) {
+      if (isBookingUniqueViolationOn(error, 'proposalVersionId')) {
         const raced = await repository.findBookingByProposalVersionIdForActor(
           prisma,
           bookingActor,

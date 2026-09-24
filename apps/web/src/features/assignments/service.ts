@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { Prisma } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
+import { isResidualDatabaseConflict } from '@/lib/prisma-errors';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -16,18 +17,15 @@ import * as repository from './repository';
 import type { AssignmentRecord } from './repository';
 
 function isKnownConflict(error: unknown): boolean {
-  // P2034: a SERIALIZABLE conflict that survived every retry in
-  // runSerializableWithRetry. P2002/P2004: the database's own partial
+  // Exhausted serializable retries (SerializableRetriesExhaustedError,
+  // lib/prisma-errors.ts) or a raw write conflict. P2002/P2004: the database's own partial
   // unique index / CHECK constraint on staff_assignment (see the
   // StaffAssignment model's doc comment in apps/web/prisma/schema.prisma)
   // rejecting a write that would leave more than one active assignment, or
   // both/neither of leadId and clientId set — a defense-in-depth backstop
   // in case a write ever reaches the database outside this service's own
   // "read the active assignment, then write" transaction.
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    (error.code === 'P2034' || error.code === 'P2002' || error.code === 'P2004')
-  );
+  return isResidualDatabaseConflict(error);
 }
 
 /**

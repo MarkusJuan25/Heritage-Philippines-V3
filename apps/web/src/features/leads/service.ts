@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { LeadStatus, Prisma } from '@/generated/prisma/client';
 import { normalizeEmail, normalizePhone } from '@/lib/contact-normalization';
 import { prisma } from '@/lib/db';
+import { isResidualDatabaseConflict } from '@/lib/prisma-errors';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
 import type { AuthenticatedUser } from '@/lib/auth/guards';
 
@@ -55,15 +56,12 @@ function assertLeadActor(actor: AuthenticatedUser): LeadActor {
   throw new LeadError('ROLE_NOT_PERMITTED', 'This role is not permitted to manage leads.');
 }
 
-// P2034: a SERIALIZABLE conflict that survived every retry in
-// runSerializableWithRetry. P2002/P2004: a database-level uniqueness/CHECK
+// Exhausted serializable retries (SerializableRetriesExhaustedError,
+// lib/prisma-errors.ts) or a raw write conflict. P2002/P2004: a database-level uniqueness/CHECK
 // conflict this service did not anticipate — a defense-in-depth backstop,
 // mirroring features/bookings/service.ts's `isOtherKnownConflict`.
 function isKnownConflict(error: unknown): boolean {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    (error.code === 'P2034' || error.code === 'P2002' || error.code === 'P2004')
-  );
+  return isResidualDatabaseConflict(error);
 }
 
 function notFoundOrForbidden(leadActor: LeadActor): LeadError {

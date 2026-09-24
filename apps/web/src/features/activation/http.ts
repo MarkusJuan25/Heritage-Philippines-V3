@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { z } from 'zod';
 
 import { getServerEnv } from '@/lib/env';
+import { isSerializableRetriesExhausted } from '@/lib/prisma-errors';
 
 import { ActivationError } from './errors';
 
@@ -264,6 +265,22 @@ export async function runActivationAction<T>(
   } catch (error) {
     if (error instanceof ActivationError) {
       return activationErrorResponse(error);
+    }
+    // A write conflict that outlasted every bounded retry in
+    // lib/serializable-transaction.ts: a safe, retryable 409 in this
+    // feature's own envelope — these routes have no `withRole` wrapper to
+    // catch it.
+    if (isSerializableRetriesExhausted(error)) {
+      return jsonResponse(
+        {
+          error: {
+            code: 'CONFLICT',
+            message:
+              'This request conflicted with another change made at the same time. Please try again.',
+          },
+        },
+        409,
+      );
     }
     throw error;
   }
