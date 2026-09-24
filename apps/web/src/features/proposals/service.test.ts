@@ -219,7 +219,7 @@ function rawAdapterWriteConflict(): Error {
 }
 
 function conflictError(
-  code: 'P2034' | 'P2002' | 'P2004',
+  code: 'P2034' | 'P2002',
   fields?: string[],
   modelName = 'ProposalVersion',
 ): Prisma.PrismaClientKnownRequestError {
@@ -672,16 +672,6 @@ describe('createProposal', () => {
     expect(repositoryMocks.createProposalWithFirstVersion).toHaveBeenCalledTimes(2);
   });
 
-  it('maps a residual P2004 conflict to PROPOSAL_CONFLICT, never a raw Prisma error', async () => {
-    transactionMock.mockImplementation(async () => {
-      throw conflictError('P2004');
-    });
-
-    await expect(
-      createProposal(TRAVEL_CONSULTANT, { clientId: CLIENT_ID, content: 'Day 1.' }),
-    ).rejects.toMatchObject({ code: 'PROPOSAL_CONFLICT', status: 409 });
-  });
-
   it('maps an exhausted P2034 to PROPOSAL_CONFLICT', async () => {
     transactionMock.mockImplementation(async () => {
       throw conflictError('P2034');
@@ -1117,16 +1107,6 @@ describe('publishProposalVersion', () => {
     ).rejects.toMatchObject({ code: 'PROPOSAL_CONFLICT', status: 409 });
   });
 
-  it('maps a residual P2004 to PROPOSAL_CONFLICT', async () => {
-    transactionMock.mockImplementation(async () => {
-      throw conflictError('P2004');
-    });
-
-    await expect(
-      publishProposalVersion(TRAVEL_CONSULTANT, VERSION_ID, { expectedCurrentVersionId: null }),
-    ).rejects.toMatchObject({ code: 'PROPOSAL_CONFLICT' });
-  });
-
   it('maps an exhausted P2034 to PROPOSAL_CONFLICT', async () => {
     transactionMock.mockImplementation(async () => {
       throw conflictError('P2034');
@@ -1353,14 +1333,6 @@ describe('recordProposalResponse', () => {
     await expect(
       recordProposalResponse(ADMIN_MANAGER, VERSION_ID, VALID_INPUT),
     ).rejects.toMatchObject({ code: 'PROPOSAL_RESPONSE_ALREADY_RECORDED', status: 409 });
-  });
-
-  it('maps a residual P2004 to PROPOSAL_CONFLICT', async () => {
-    repositoryMocks.createExternalProposalAcceptance.mockRejectedValue(conflictError('P2004'));
-
-    await expect(
-      recordProposalResponse(ADMIN_MANAGER, VERSION_ID, VALID_INPUT),
-    ).rejects.toMatchObject({ code: 'PROPOSAL_CONFLICT', status: 409 });
   });
 
   it('maps an exhausted P2034 to PROPOSAL_CONFLICT', async () => {
@@ -2175,12 +2147,11 @@ describe('submitClientProposalResponse (D-047 §7)', () => {
     });
   });
 
-  it('every other residual P2002 / P2004 / exhausted P2034 maps to PROPOSAL_CONFLICT', async () => {
+  it('every other residual P2002 / exhausted P2034 maps to PROPOSAL_CONFLICT', async () => {
     for (const error of [
       // Same column name, different model: never the acceptance race.
       conflictError('P2002', ['proposalVersionId'], 'Booking'),
       conflictError('P2002', ['id'], 'ProposalAcceptance'),
-      conflictError('P2004'),
       conflictError('P2034'),
     ]) {
       repositoryMocks.createPortalProposalAcceptance.mockReset();

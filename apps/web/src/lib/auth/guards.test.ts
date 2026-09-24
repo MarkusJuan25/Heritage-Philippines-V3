@@ -114,6 +114,31 @@ describe('withRole', () => {
     });
   });
 
+  it('keeps an unrecognized CHECK violation generic: a 500 INTERNAL_ERROR that never carries the failing row or any adapter detail', async () => {
+    getSessionMock.mockResolvedValue({ user: ADMIN_USER });
+    const message = 'new row for relation "some_table" violates check constraint "some_check"';
+    const handler = vi.fn(async () => {
+      throw Object.assign(new Error(message), {
+        name: 'DriverAdapterError',
+        cause: {
+          originalCode: '23514',
+          originalMessage: message,
+          kind: 'postgres',
+          detail: 'Failing row contains (private-client-value).',
+        },
+      });
+    });
+
+    const response = await withRole(undefined, handler)(request(), staticContext());
+
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' },
+    });
+    expect(JSON.stringify(body)).not.toMatch(/Failing row|private-client-value|some_check|23514/);
+  });
+
   it('maps exhausted serializable retries to a safe 409 CONFLICT envelope, never the wrapped database error', async () => {
     getSessionMock.mockResolvedValue({ user: ADMIN_USER });
     const handler = vi.fn(async () => {

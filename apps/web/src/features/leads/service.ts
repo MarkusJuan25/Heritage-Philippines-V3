@@ -57,9 +57,13 @@ function assertLeadActor(actor: AuthenticatedUser): LeadActor {
 }
 
 // Exhausted serializable retries (SerializableRetriesExhaustedError,
-// lib/prisma-errors.ts) or a raw write conflict. P2002/P2004: a database-level uniqueness/CHECK
-// conflict this service did not anticipate — a defense-in-depth backstop,
-// mirroring features/bookings/service.ts's `isOtherKnownConflict`.
+// lib/prisma-errors.ts) or a raw write conflict. P2002: a database-level
+// uniqueness conflict this service did not anticipate — a defense-in-depth
+// backstop, mirroring features/bookings/service.ts's `isOtherKnownConflict`.
+// Any CHECK-constraint violation stays an unknown error (generic
+// response): every CHECK constraint on these tables is an integrity
+// backstop that only a code defect can reach, never a retryable conflict
+// (D-055).
 function isKnownConflict(error: unknown): boolean {
   return isResidualDatabaseConflict(error);
 }

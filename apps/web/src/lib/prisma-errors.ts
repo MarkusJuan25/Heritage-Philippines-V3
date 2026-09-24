@@ -20,6 +20,14 @@ import { Prisma } from '@/generated/prisma/client';
 //   from Postgres's own "Key (...)" detail — so a mixed-case column arrives
 //   still double-quoted (`'"userId"'`), exactly as Postgres prints it.
 //   `meta.modelName` names the Prisma model whose write failed.
+// - A CHECK-constraint violation (SQLSTATE 23514) does **not** arrive as
+//   Prisma's documented `P2004`: it arrives as a raw `DriverAdapterError`
+//   with `cause.kind: 'postgres'` and `cause.originalCode: '23514'`, whose
+//   `cause.detail` repeats the entire failing row (possibly personal data).
+//   It is deliberately recognized by nothing here, so it always propagates
+//   as an unknown error to the generic response: every CHECK constraint in
+//   this schema is an integrity backstop that only a code defect can reach,
+//   never a retryable conflict (D-055).
 //
 // Nothing else is treated as retryable or as a recognizable unique
 // violation: a deadlock (40P01), for example, is not mapped to a write
@@ -158,13 +166,10 @@ export function isUniqueViolationOn(
  * A residual database conflict a service maps to its own generic, safe
  * CONFLICT response: exhausted serializable retries, a write conflict
  * raised outside `runSerializableWithRetry`, a unique violation (`P2002`)
- * the caller did not handle more specifically, or a CHECK-constraint
- * rejection (`P2004`).
+ * the caller did not handle more specifically. A CHECK-constraint violation
+ * is never a residual conflict (see the file header; D-055).
  */
 export function isResidualDatabaseConflict(error: unknown): boolean {
   if (isSerializableRetriesExhausted(error) || isRetryableWriteConflict(error)) return true;
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    (error.code === 'P2002' || error.code === 'P2004')
-  );
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
