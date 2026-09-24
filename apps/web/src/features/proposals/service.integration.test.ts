@@ -284,6 +284,7 @@ describe.skipIf(!hasTestDatabaseUrl)('proposals service integration (real databa
         id: randomUUID(),
         assignedStaffId: staffId,
         assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
         clientId,
       },
     });

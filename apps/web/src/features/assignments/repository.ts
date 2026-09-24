@@ -112,21 +112,33 @@ export async function findActiveAssignmentForClient(
 }
 
 /**
- * The Booking's current active assignment, if any — see the Lead variant
- * above. Independent of any Client-level assignment: this scopes only by
- * `bookingId`, never by walking through the Booking's Client (blueprint
- * Section 4.2's "lead/client/booking assignments" names Booking as its own
- * assignment target, distinct from Client). The database's partial unique
- * index on (`bookingId`) `WHERE endedAt IS NULL` (see the StaffAssignment
- * model's doc comment in apps/web/prisma/schema.prisma) guarantees at most
- * one row can ever match.
+ * The Booking's current active **Travel Consultant** assignment, if any —
+ * see the Lead variant above. Independent of any Client-level assignment:
+ * this scopes only by `bookingId`, never by walking through the Booking's
+ * Client (blueprint Section 4.2's "lead/client/booking assignments" names
+ * Booking as its own assignment target, distinct from Client).
+ *
+ * **D-054 Stage 2 amendment (§16):** explicitly filters `role:
+ * 'TRAVEL_CONSULTANT'` — required, not optional, since that migration
+ * replaced the old bare-`bookingId` partial unique index with a role-aware
+ * one (`(bookingId, role)`), so a Booking can now also carry a concurrent,
+ * independent active `FINANCE_ACCOUNTING` assignment (Payments). Without
+ * this filter, `findFirst` could non-deterministically return that Finance
+ * row instead of (or as well as) the Travel Consultant one, and this
+ * function's only caller (`setAssignment`'s `'BOOKING'` case,
+ * `features/assignments/service.ts`) would then end the Finance
+ * assignment as an unintended side effect of reassigning the Travel
+ * Consultant. This function, and the `setAssignment`/`setBookingAssignment`
+ * control flow built on it, remain and must remain Travel-Consultant-only
+ * (D-015) — never touching, reading, or ending any other role's Booking
+ * assignment.
  */
 export async function findActiveAssignmentForBooking(
   db: Prisma.TransactionClient,
   bookingId: string,
 ): Promise<AssignmentRecord | null> {
   return db.staffAssignment.findFirst({
-    where: { bookingId, endedAt: null },
+    where: { bookingId, role: 'TRAVEL_CONSULTANT', endedAt: null },
     select: ASSIGNMENT_SELECT,
   });
 }
@@ -158,6 +170,7 @@ export async function createAssignment(
     id: string;
     assignedStaffId: string;
     assignedByUserId: string;
+    role: AppRole;
     leadId?: string;
     clientId?: string;
     bookingId?: string;
@@ -168,6 +181,7 @@ export async function createAssignment(
       id: input.id,
       assignedStaffId: input.assignedStaffId,
       assignedByUserId: input.assignedByUserId,
+      role: input.role,
       leadId: input.leadId,
       clientId: input.clientId,
       bookingId: input.bookingId,

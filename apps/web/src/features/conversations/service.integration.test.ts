@@ -364,6 +364,7 @@ describe.skipIf(!hasTestDatabaseUrl)('conversations service integration (real da
         id: randomUUID(),
         assignedStaffId: staffId,
         assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
         clientId,
       },
     });

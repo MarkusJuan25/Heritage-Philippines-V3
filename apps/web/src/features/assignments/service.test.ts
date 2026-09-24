@@ -249,6 +249,7 @@ describe('setLeadAssignment', () => {
       id: expect.any(String),
       assignedStaffId: STAFF_ID,
       assignedByUserId: ACTOR.id,
+      role: 'TRAVEL_CONSULTANT',
       leadId: LEAD_ID,
     });
     expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, {
@@ -310,6 +311,7 @@ describe('setLeadAssignment', () => {
       id: expect.any(String),
       assignedStaffId: STAFF_ID,
       assignedByUserId: ACTOR.id,
+      role: 'TRAVEL_CONSULTANT',
       leadId: LEAD_ID,
     });
     // Both the end and the create happened inside the single $transaction
@@ -467,6 +469,7 @@ describe('setClientAssignment / endClientAssignment (Client-target dispatch)', (
       id: expect.any(String),
       assignedStaffId: STAFF_ID,
       assignedByUserId: ACTOR.id,
+      role: 'TRAVEL_CONSULTANT',
       clientId: CLIENT_ID,
     });
     expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
@@ -524,6 +527,7 @@ describe('setBookingAssignment (Booking-target dispatch)', () => {
       id: expect.any(String),
       assignedStaffId: STAFF_ID,
       assignedByUserId: ACTOR.id,
+      role: 'TRAVEL_CONSULTANT',
       bookingId: BOOKING_ID,
     });
     expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(TX_CLIENT, {
@@ -669,6 +673,7 @@ describe('setBookingAssignment (Booking-target dispatch)', () => {
       id: expect.any(String),
       assignedStaffId: STAFF_ID,
       assignedByUserId: ACTOR.id,
+      role: 'TRAVEL_CONSULTANT',
       bookingId: BOOKING_ID,
     });
     // Both the end and the create happened inside the single $transaction

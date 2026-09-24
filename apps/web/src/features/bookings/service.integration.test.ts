@@ -337,6 +337,7 @@ describe.skipIf(!hasTestDatabaseUrl)('bookings service integration (real databas
         id: randomUUID(),
         assignedStaffId: tcActor.id,
         assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
         clientId: client.id,
       },
     });
@@ -586,6 +587,7 @@ describe.skipIf(!hasTestDatabaseUrl)('bookings service integration (real databas
         id: randomUUID(),
         assignedStaffId: tcActor.id,
         assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
         clientId: client.id,
       },
     });
@@ -1009,6 +1011,7 @@ describe.skipIf(!hasTestDatabaseUrl)('bookings service integration (real databas
         id: randomUUID(),
         assignedStaffId: otherTcActor.id,
         assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
         clientId: unrelatedClient.id,
       },
     });

@@ -306,7 +306,13 @@ describe.skipIf(!hasTestDatabaseUrl)('clients service integration (real database
     assignedByUserId: string,
   ) {
     return prisma!.staffAssignment.create({
-      data: { id: randomUUID(), assignedStaffId, assignedByUserId, clientId },
+      data: {
+        id: randomUUID(),
+        assignedStaffId,
+        assignedByUserId,
+        role: 'TRAVEL_CONSULTANT',
+        clientId,
+      },
     });
   }
 

@@ -1203,23 +1203,51 @@ model Client {
 //   CREATE UNIQUE INDEX "staff_assignment_active_client_key"
 //     ON "staff_assignment" ("clientId")
 //     WHERE "endedAt" IS NULL AND "clientId" IS NOT NULL;
-// Migration `20260716020734_booking_schema_foundation` adds the
-// equivalent index for `bookingId`:
+// Migration `20260716020734_booking_schema_foundation` originally added a
+// bare, role-agnostic equivalent index for `bookingId`:
 //   CREATE UNIQUE INDEX "staff_assignment_active_booking_key"
 //     ON "staff_assignment" ("bookingId")
 //     WHERE "endedAt" IS NULL AND "bookingId" IS NOT NULL;
 // The same migration also added the equivalent partial unique index for
-// it; `staff_assignment_active_visa_case_key` is applied on local
-// `heritage_v3_dev` and now enforces at most one active assignment per
-// VisaCase there:
+// VisaCase; `staff_assignment_active_visa_case_key` is applied on local
+// `heritage_v3_dev` and enforces at most one active assignment per VisaCase
+// there, unchanged by this entry:
 //   CREATE UNIQUE INDEX "staff_assignment_active_visa_case_key"
 //     ON "staff_assignment" ("visaCaseId")
 //     WHERE "endedAt" IS NULL AND "visaCaseId" IS NOT NULL;
-// Whether "at most one active assignment" should instead vary by an
-// assignment type/role (e.g. a Travel Consultant and a Finance user each
-// holding a concurrent active assignment on the same Client) is not defined
-// by the blueprint yet — flag it as an open decision before relying on
-// these indexes long-term; do not assume single-assignment permanently.
+// This doc comment previously flagged, as an open decision, "Whether 'at
+// most one active assignment' should instead vary by an assignment
+// type/role (e.g. a Travel Consultant and a Finance user each holding a
+// concurrent active assignment on the same Client)." D-054 ("Phase 4
+// Payments & Receipts Contract," docs/HERITAGE_V3_DECISIONS_LOG.md)
+// resolves this **for Booking only** — Finance/Accounting's own D-019/D-054
+// payment-plan-approval and confirm/reverse/refund operations require
+// simultaneous, independent, assignment-scoped access to the same Booking a
+// Travel Consultant is already assigned to (blueprint Section 11.3), which
+// the bare role-agnostic index above made structurally impossible. Migration
+// `20260923014639_payments_staff_assignment_role` (see D-054 §16):
+//   1. Adds this model's new `role Role` column below, backfilled from
+//      each existing row's `assignedStaff.role` at migration time, then
+//      made `NOT NULL` (every row's role is always determinable from its
+//      already-`NOT NULL` `assignedStaffId`, unlike `Booking.totalAmount`'s
+//      D-019 nullable-until-known precedent).
+//   2. Drops `staff_assignment_active_booking_key` and replaces it with:
+//        CREATE UNIQUE INDEX "staff_assignment_active_booking_role_key"
+//          ON "staff_assignment" ("bookingId", "role")
+//          WHERE "endedAt" IS NULL AND "bookingId" IS NOT NULL;
+//      allowing at most one active assignment **per Booking per role** —
+//      still exactly one active Travel Consultant per Booking (preserving
+//      D-015's existing `setBookingAssignment` replace-semantics
+//      unchanged, since that pathway only ever writes
+//      `role: TRAVEL_CONSULTANT`), now alongside at most one concurrently
+//      active Finance/Accounting assignment on that same Booking.
+//   3. Leaves `staff_assignment_active_lead_key`,
+//      `staff_assignment_active_client_key`, and
+//      `staff_assignment_active_visa_case_key` completely untouched — the
+//      identical open question for Lead/Client/VisaCase remains open,
+//      exactly as before, not silently resolved by this Booking-scoped
+//      change (D-054's own explicit "limit the proposal to what payments
+//      requires" scope boundary).
 //
 // Neither `assignedStaffId` nor `assignedByUserId` is schema-restricted to
 // staff roles below — a foreign key can't constrain another table's column
@@ -1234,6 +1262,19 @@ model StaffAssignment {
   // The staff member this assignment grants access to the target.
   assignedStaffId String
   assignedStaff   User   @relation("StaffAssignmentAssignee", fields: [assignedStaffId], references: [id], onDelete: Restrict)
+
+  // The capacity in which `assignedStaff` holds this specific assignment —
+  // a snapshot of their `User.role` at assignment-creation time (D-054),
+  // mirroring `ConversationParticipant.role`'s established "role in this
+  // specific context" pattern elsewhere in this schema, rather than a live
+  // join to `User.role` (which cannot participate in a partial unique
+  // index — see the model doc comment above for why this column exists).
+  // Added by D-054's Stage 2 migration; backfilled for every pre-existing
+  // row from `assignedStaff.role`, then made `NOT NULL`. Every future write
+  // must set it to the actual role the assignee is being assigned as, never
+  // left to silently diverge from `assignedStaff.role` at write time (the
+  // service layer's responsibility — a foreign key cannot enforce this).
+  role Role
 
   // The staff member who created this assignment. Blueprint Section 4.2
   // gives Admin / Manager the capability to manage lead/client/booking

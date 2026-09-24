@@ -264,6 +264,7 @@ describe.skipIf(!hasTestDatabaseUrl)('client-portal overview integration (real d
         id: randomUUID(),
         assignedStaffId: tcActor.id,
         assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
         clientId,
       },
     });
