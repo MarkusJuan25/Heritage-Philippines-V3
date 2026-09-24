@@ -79,7 +79,7 @@ function eligibleAssignee(
   return { id: STAFF_ID, role: 'TRAVEL_CONSULTANT', isActive: true, ...overrides };
 }
 
-function conflictError(code: 'P2034' | 'P2002' | 'P2004'): Prisma.PrismaClientKnownRequestError {
+function conflictError(code: 'P2034' | 'P2002'): Prisma.PrismaClientKnownRequestError {
   return new Prisma.PrismaClientKnownRequestError('Simulated database conflict', {
     code,
     clientVersion: '7.8.0',
@@ -701,7 +701,7 @@ describe('setBookingAssignment (Booking-target dispatch)', () => {
     });
   });
 
-  it.each(['P2034', 'P2002', 'P2004'] as const)(
+  it.each(['P2034', 'P2002'] as const)(
     'maps a %s conflict to ASSIGNMENT_CONFLICT, never a raw Prisma error',
     async (code) => {
       transactionMock.mockImplementation(async () => {

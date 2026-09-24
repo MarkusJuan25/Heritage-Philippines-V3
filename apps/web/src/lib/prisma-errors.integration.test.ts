@@ -13,8 +13,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // `./serializable-transaction` static import; everything real is imported
 // dynamically inside `beforeAll` only after `TEST_DATABASE_URL` has been
 // validated; the suite is skipped entirely when `TEST_DATABASE_URL` is
-// unset. Only `Client`, `User`, and `ClientProfile` rows this suite creates
-// (all tagged) are written, and all are removed in `afterAll`.
+// unset. Only `Client`, `User`, `ClientProfile`, and `Proposal` rows this
+// suite creates (all tagged) are written, and all are removed in `afterAll`.
 
 const REQUIRED_TEST_DATABASE_NAME = 'heritage_v3_test';
 const ALLOWED_TEST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
@@ -103,6 +103,9 @@ describe.skipIf(!hasTestDatabaseUrl)('prisma-errors integration (real database)'
     try {
       if (prisma) {
         try {
+          await prisma.proposal.deleteMany({
+            where: { client: { fullName: { startsWith: tag } } },
+          });
           await prisma.clientProfile.deleteMany({ where: { userId: { in: createdUserIds } } });
           await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
           await prisma.client.deleteMany({ where: { fullName: { startsWith: tag } } });
@@ -243,5 +246,49 @@ describe.skipIf(!hasTestDatabaseUrl)('prisma-errors integration (real database)'
     expect(errors.isUniqueViolationOn(error, 'ClientProfile', ['userId', 'clientId'])).toBe(false);
     expect(errors.isUniqueViolationOn(error, 'Booking', ['userId'])).toBe(false);
     expect(errors.isResidualDatabaseConflict(error)).toBe(true);
+  });
+
+  it('never retries a genuine CHECK violation or treats it as a conflict, so it stays a generic error (D-055)', async () => {
+    const userId = randomUUID();
+    await prisma!.user.create({
+      data: {
+        id: userId,
+        name: 'Integration',
+        email: `${tag}-check@example.test`,
+        role: 'TRAVEL_CONSULTANT',
+      },
+    });
+    createdUserIds.push(userId);
+    const clientId = randomUUID();
+    await prisma!.client.create({ data: { id: clientId, fullName: `${tag}-check` } });
+    const proposalId = randomUUID();
+    await prisma!.proposal.create({ data: { id: proposalId, clientId } });
+
+    let attempts = 0;
+    const error = await runSerializableWithRetry(async (tx) => {
+      attempts += 1;
+      // Violates proposal_version_content_nonblank: content must not be blank.
+      await tx.proposalVersion.create({
+        data: {
+          id: randomUUID(),
+          proposalId,
+          versionNumber: 1,
+          createdByUserId: userId,
+          content: '   ',
+        },
+      });
+    }).catch((caught: unknown) => caught);
+
+    // The real shape: a raw DriverAdapterError (Postgres 23514), not P2004.
+    expect(error).toMatchObject({
+      name: 'DriverAdapterError',
+      cause: { kind: 'postgres', originalCode: '23514' },
+    });
+    expect(attempts).toBe(1);
+    expect(errors.isRetryableWriteConflict(error)).toBe(false);
+    expect(errors.isSerializableRetriesExhausted(error)).toBe(false);
+    expect(errors.uniqueViolation(error)).toBeNull();
+    expect(errors.isResidualDatabaseConflict(error)).toBe(false);
+    expect(await prisma!.proposalVersion.count({ where: { proposalId } })).toBe(0);
   });
 });

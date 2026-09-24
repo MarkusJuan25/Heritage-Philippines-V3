@@ -57,9 +57,9 @@ function notFoundOrForbidden(clientActor: ClientActor): ClientError {
 // Exhausted serializable retries (SerializableRetriesExhaustedError,
 // lib/prisma-errors.ts; D-031 F-01 — updateClient's own transaction was
 // previously a plain, non-retrying prisma.$transaction, so this conflict
-// code was never reachable here before). P2002/P2004: a database-level
-// uniqueness/CHECK conflict this service did not anticipate — a
-// defense-in-depth backstop, mirroring features/leads/service.ts's and
+// code was never reachable here before). P2002: a database-level
+// uniqueness conflict this service did not anticipate — a defense-in-depth
+// backstop, mirroring features/leads/service.ts's and
 // features/bookings/service.ts's identical `isKnownConflict`/
 // `isOtherKnownConflict` precedent.
 function isKnownConflict(error: unknown): boolean {

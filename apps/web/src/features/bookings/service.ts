@@ -86,12 +86,14 @@ function isBookingUniqueViolationOn(error: unknown, field: string): boolean {
 }
 
 // Exhausted serializable retries (SerializableRetriesExhaustedError), a
-// P2002 unmatched by the two specific checks above, or a P2004: the
-// database's own unique indexes / CHECK constraints (see the
-// Booking/BookingStatusHistory model doc comments in
+// P2002 unmatched by the two specific checks above: the database's own
+// unique indexes (see the Booking model doc comment in
 // apps/web/prisma/schema.prisma) rejecting a write for a reason this
 // service did not anticipate — a defense-in-depth backstop, mapped to the
-// safe BOOKING_CONFLICT.
+// safe BOOKING_CONFLICT. Any CHECK-constraint violation stays an unknown error (generic
+// response): every CHECK constraint on these tables is an integrity
+// backstop that only a code defect can reach, never a retryable conflict
+// (D-055).
 function isOtherKnownConflict(error: unknown): boolean {
   return isResidualDatabaseConflict(error);
 }
@@ -199,8 +201,8 @@ async function attemptCreateBooking(
  *   Booking and return it as the idempotent result — the same outcome a
  *   non-concurrent idempotent replay produces.
  *
- * Any other residual conflict (exhausted write-conflict retries, P2004, or
- * an unmatched P2002) maps to a controlled `BookingError('BOOKING_CONFLICT')`
+ * Any other residual conflict (exhausted write-conflict retries or an
+ * unmatched P2002) maps to a controlled `BookingError('BOOKING_CONFLICT')`
  * — never a raw Prisma/PostgreSQL error reaching the route layer
  * (.claude/rules/backend.md's "Consistent Error Responses" / "No secret or
  * sensitive-error exposure").

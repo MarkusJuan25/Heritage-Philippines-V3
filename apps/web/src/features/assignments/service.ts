@@ -18,13 +18,16 @@ import type { AssignmentRecord } from './repository';
 
 function isKnownConflict(error: unknown): boolean {
   // Exhausted serializable retries (SerializableRetriesExhaustedError,
-  // lib/prisma-errors.ts) or a raw write conflict. P2002/P2004: the database's own partial
-  // unique index / CHECK constraint on staff_assignment (see the
-  // StaffAssignment model's doc comment in apps/web/prisma/schema.prisma)
-  // rejecting a write that would leave more than one active assignment, or
-  // both/neither of leadId and clientId set — a defense-in-depth backstop
-  // in case a write ever reaches the database outside this service's own
-  // "read the active assignment, then write" transaction.
+  // lib/prisma-errors.ts) or a raw write conflict. P2002: the database's own
+  // partial unique index on staff_assignment (see the StaffAssignment
+  // model's doc comment in apps/web/prisma/schema.prisma) rejecting a write
+  // that would leave more than one active assignment — a defense-in-depth
+  // backstop in case a write ever reaches the database outside this
+  // service's own "read the active assignment, then write" transaction.
+  // Any CHECK-constraint violation stays an unknown error (generic
+  // response): every CHECK constraint on these tables is an integrity
+  // backstop that only a code defect can reach, never a retryable conflict
+  // (D-055).
   return isResidualDatabaseConflict(error);
 }
 

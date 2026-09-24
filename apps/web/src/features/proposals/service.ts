@@ -173,12 +173,14 @@ async function assertProposalAuthorAccess(
 // verified adapter-error recognition, shared with features/bookings) ---
 
 // Exhausted serializable retries (SerializableRetriesExhaustedError), a
-// P2002 unmatched by a specific isUniqueViolationOn check below, or a
-// P2004: the database's own unique indexes/CHECK constraints
-// (proposal_version_current_client_visible_key,
-// proposal_version_content_nonblank, proposal_acceptance_response_path)
-// rejecting a write for a reason this service did not anticipate — a
-// defense-in-depth backstop, mapped to the safe PROPOSAL_CONFLICT.
+// P2002 unmatched by a specific isUniqueViolationOn check below (e.g.
+// proposal_version_current_client_visible_key): the database rejecting a
+// write for a reason this service did not anticipate — a defense-in-depth
+// backstop, mapped to the safe PROPOSAL_CONFLICT. The CHECK constraints
+// proposal_version_content_nonblank and proposal_acceptance_response_path
+// are integrity backstops only a code defect can reach: a violation stays
+// an unknown error (generic response), never PROPOSAL_CONFLICT (D-055,
+// correcting D-047).
 function isOtherKnownConflict(error: unknown): boolean {
   return isResidualDatabaseConflict(error);
 }
@@ -365,7 +367,7 @@ const MAX_REVISION_ATTEMPTS = 3;
  * Only a P2002 conflict whose target names both `proposalId` and
  * `versionNumber` (the composite `@@unique` index, i.e. a genuine
  * concurrent revision-number race) triggers a retry; every other
- * conflict — an unrelated P2002, P2004, or an exhausted P2034 — maps
+ * conflict — an unrelated P2002 or an exhausted P2034 — maps
  * immediately to `PROPOSAL_CONFLICT`, never retried. `ProposalError`
  * business outcomes and any truly unexpected error propagate unchanged,
  * also never retried. After the third composite-conflict attempt, this
@@ -493,7 +495,7 @@ export async function createProposalRevision(
  * fresh `clientVisibleAt`/`supersededAt` the write just produced.
  *
  * Any residual P2002 (including the partial `proposal_version_current_
- * client_visible_key` unique index), P2004, or exhausted P2034 maps to
+ * client_visible_key` unique index) or exhausted P2034 maps to
  * `PROPOSAL_CONFLICT` — never a raw Prisma/PostgreSQL error.
  */
 export async function publishProposalVersion(
@@ -635,7 +637,7 @@ export async function publishProposalVersion(
  * unique race is translated to the same controlled
  * `PROPOSAL_RESPONSE_ALREADY_RECORDED` — never exposed as a raw Prisma
  * error, and never treated as an idempotent success. Every other residual
- * P2002, P2004, or exhausted P2034 maps to `PROPOSAL_CONFLICT`.
+ * P2002 or exhausted P2034 maps to `PROPOSAL_CONFLICT`.
  */
 export async function recordProposalResponse(
   actor: AuthenticatedUser,
@@ -1107,7 +1109,7 @@ const RESPONSE_TYPE_VALUES: readonly ProposalResponseType[] = [
  *
  * A P2002 unique-race on `proposalVersionId` → `PROPOSAL_RESPONSE_ALREADY_
  * RECORDED` (never an idempotent success, never a raw error). Every other
- * residual P2002 / P2004 / exhausted P2034 → `PROPOSAL_CONFLICT`. A truly
+ * residual P2002 / exhausted P2034 → `PROPOSAL_CONFLICT`. A truly
  * unexpected error propagates unchanged.
  */
 export async function submitClientProposalResponse(

@@ -36,6 +36,24 @@ function knownError(code: string, meta?: Record<string, unknown>) {
   });
 }
 
+/**
+ * A CHECK violation exactly as the adapter reports it (Postgres 23514): a
+ * raw DriverAdapterError, never Prisma's P2004. `detail` repeats the
+ * failing row.
+ */
+function rawCheckViolation(): Error {
+  const message = 'new row for relation "some_table" violates check constraint "some_check"';
+  return Object.assign(new Error(message), {
+    name: 'DriverAdapterError',
+    cause: {
+      originalCode: '23514',
+      originalMessage: message,
+      kind: 'postgres',
+      detail: 'Failing row contains (private-client-value).',
+    },
+  });
+}
+
 /** A P2002 exactly as the adapter reports it: no `meta.target`. */
 function adapterUniqueViolation(modelName: string, rawFields: string[]) {
   return knownError('P2002', {
@@ -62,7 +80,8 @@ describe('isRetryableWriteConflict', () => {
 
   it.each([
     ['a unique violation', adapterUniqueViolation('ClientProfile', ['"userId"'])],
-    ['a CHECK violation', knownError('P2004')],
+    ['a CHECK violation', rawCheckViolation()],
+    ['a legacy P2004', knownError('P2004')],
     ['a plain Error', new Error('boom')],
     [
       'a DriverAdapterError of another kind',
@@ -189,7 +208,6 @@ describe('isResidualDatabaseConflict', () => {
     ['a P2034', knownError('P2034')],
     ['a raw adapter write conflict', rawAdapterWriteConflict()],
     ['a P2002', adapterUniqueViolation('Booking', ['"bookingReference"'])],
-    ['a P2004', knownError('P2004')],
   ])('treats %s as a residual conflict', (_label, error) => {
     expect(isResidualDatabaseConflict(error)).toBe(true);
   });
@@ -197,6 +215,10 @@ describe('isResidualDatabaseConflict', () => {
   it.each([
     ['a P2025 (record not found)', knownError('P2025')],
     ['a plain Error', new Error('boom')],
+    // D-055: a CHECK violation is an integrity backstop only a defect can
+    // reach, never a retryable conflict — it stays a generic error.
+    ['a CHECK violation (raw adapter 23514)', rawCheckViolation()],
+    ['a legacy P2004', knownError('P2004')],
   ])('does not treat %s as a conflict', (_label, error) => {
     expect(isResidualDatabaseConflict(error)).toBe(false);
   });
