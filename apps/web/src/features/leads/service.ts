@@ -226,6 +226,7 @@ export async function createLead(
         id: randomUUID(),
         assignedStaffId: leadActor.id,
         assignedByUserId: leadActor.id,
+        role: 'TRAVEL_CONSULTANT',
         leadId: created.id,
       });
 
@@ -806,6 +807,7 @@ export async function convertLead(
           id: randomUUID(),
           assignedStaffId: leadActiveAssignment.assignedStaffId,
           assignedByUserId: leadActor.id,
+          role: 'TRAVEL_CONSULTANT',
           clientId: client.id,
         });
 

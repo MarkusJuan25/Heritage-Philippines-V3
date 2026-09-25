@@ -380,6 +380,7 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
         id: randomUUID(),
         assignedStaffId: chainTcActor.id,
         assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
         clientId: client.id,
       },
     });
@@ -569,6 +570,55 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
     expect(replacedAudits[0]?.beforeState).not.toBeNull();
   }, 20000);
 
+  it('reassigning the Travel Consultant on a Booking never touches a concurrent, independent Finance/Accounting assignment on that same Booking (D-054 Stage 2 §16)', async () => {
+    const { bookingId } = await createAcceptedBookingFixture();
+
+    await setBookingAssignment(adminActor, bookingId, activeTc1Id);
+
+    // A Finance/Accounting assignment created independently of this
+    // feature's own Travel-Consultant-only `setAssignment` control flow —
+    // exactly the shape D-054's own Payments service creates via the new
+    // role-aware `staff_assignment_active_booking_role_key` index
+    // (`(bookingId, role)`), never through `setBookingAssignment` itself.
+    const financeAssignmentId = randomUUID();
+    await prisma!.staffAssignment.create({
+      data: {
+        id: financeAssignmentId,
+        assignedStaffId: nonTcStaffId,
+        assignedByUserId: adminActor.id,
+        role: 'FINANCE_ACCOUNTING',
+        bookingId,
+      },
+    });
+
+    const replaced = await setBookingAssignment(
+      adminActor,
+      bookingId,
+      activeTc2Id,
+      'D-054 Stage 2 concurrent-assignment isolation test',
+    );
+    expect(replaced.assignedStaffId).toBe(activeTc2Id);
+
+    // The Travel Consultant assignment was genuinely replaced: exactly one
+    // active TRAVEL_CONSULTANT row remains, and it is the new assignee.
+    const activeTcRows = await prisma!.staffAssignment.findMany({
+      where: { bookingId, role: 'TRAVEL_CONSULTANT', endedAt: null },
+    });
+    expect(activeTcRows).toHaveLength(1);
+    expect(activeTcRows[0]?.assignedStaffId).toBe(activeTc2Id);
+
+    // The Finance/Accounting row is untouched: still the exact same row,
+    // still active, never ended as a side effect of the unrelated
+    // Travel Consultant reassignment above.
+    const financeRow = await prisma!.staffAssignment.findUniqueOrThrow({
+      where: { id: financeAssignmentId },
+    });
+    expect(financeRow.endedAt).toBeNull();
+    expect(financeRow.assignedStaffId).toBe(nonTcStaffId);
+    expect(financeRow.role).toBe('FINANCE_ACCOUNTING');
+    expect(financeRow.updatedAt).toEqual(financeRow.createdAt);
+  }, 20000);
+
   // --- D-040 §9: one CLIENT-actor case for Contract F ---
   describe('getActiveConsultantNameForClient (D-040 Contract F) — real database', () => {
     let getActiveConsultantNameForClient: (typeof import('./service'))['getActiveConsultantNameForClient'];
@@ -647,6 +697,7 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
           id: aid,
           assignedStaffId: consultantId,
           assignedByUserId: adminActor.id,
+          role: 'TRAVEL_CONSULTANT',
           clientId: ownedWithConsultantId,
         },
       });

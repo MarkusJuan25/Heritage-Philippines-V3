@@ -630,6 +630,7 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
           id: seedAssignmentId,
           assignedStaffId: otherTcActor.id,
           assignedByUserId: adminActor.id,
+          role: 'TRAVEL_CONSULTANT',
           clientId: seedClient.id,
         },
       });
@@ -830,6 +831,7 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
           id: randomUUID(),
           assignedStaffId: otherTcActor.id,
           assignedByUserId: adminActor.id,
+          role: 'TRAVEL_CONSULTANT',
           clientId: seedClient.id,
         },
       });
@@ -1265,6 +1267,7 @@ describe.skipIf(!hasTestDatabaseUrl)('leads service integration (real database)'
             id: randomUUID(),
             assignedStaffId: otherTcActor.id,
             assignedByUserId: adminActor.id,
+            role: 'TRAVEL_CONSULTANT',
             clientId: seedClient.id,
           },
         });

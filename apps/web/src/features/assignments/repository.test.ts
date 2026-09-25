@@ -187,7 +187,7 @@ describe('findActiveAssignmentForClient', () => {
 });
 
 describe('findActiveAssignmentForBooking', () => {
-  it('scopes the query by bookingId and endedAt: null directly in the query itself, never fetch-then-filter', async () => {
+  it('scopes the query by bookingId, role: TRAVEL_CONSULTANT, and endedAt: null directly in the query itself, never fetch-then-filter (D-054 Stage 2 §16)', async () => {
     const findFirst = vi.fn().mockResolvedValue({ id: 'assignment-1' });
     const db = { staffAssignment: { findFirst } } as unknown as Prisma.TransactionClient;
 
@@ -195,7 +195,7 @@ describe('findActiveAssignmentForBooking', () => {
 
     expect(result).toEqual({ id: 'assignment-1' });
     expect(findFirst).toHaveBeenCalledWith({
-      where: { bookingId: 'booking-1', endedAt: null },
+      where: { bookingId: 'booking-1', role: 'TRAVEL_CONSULTANT', endedAt: null },
       select: ASSIGNMENT_SELECT,
     });
   });
@@ -230,6 +230,7 @@ describe('createAssignment', () => {
       id: 'assignment-1',
       assignedStaffId: 'staff-1',
       assignedByUserId: 'admin-1',
+      role: 'TRAVEL_CONSULTANT',
       leadId: 'lead-1',
     });
 
@@ -239,6 +240,7 @@ describe('createAssignment', () => {
         id: 'assignment-1',
         assignedStaffId: 'staff-1',
         assignedByUserId: 'admin-1',
+        role: 'TRAVEL_CONSULTANT',
         leadId: 'lead-1',
         clientId: undefined,
         bookingId: undefined,

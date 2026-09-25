@@ -201,7 +201,13 @@ describe.skipIf(!hasTestDatabaseUrl)('portal invitation service (real database)'
   async function assignConsultant(clientId: string, staffId: string): Promise<void> {
     const id = randomUUID();
     await prisma.staffAssignment.create({
-      data: { id, clientId, assignedStaffId: staffId, assignedByUserId: adminActor.id },
+      data: {
+        id,
+        clientId,
+        assignedStaffId: staffId,
+        assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
+      },
     });
     createdAssignmentIds.push(id);
   }

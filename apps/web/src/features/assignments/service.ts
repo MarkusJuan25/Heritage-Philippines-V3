@@ -261,6 +261,13 @@ async function setAssignment(
       id: randomUUID(),
       assignedStaffId,
       assignedByUserId: actor.id,
+      // D-054 Stage 2: `StaffAssignment.role` is now required. This
+      // function (`setAssignment`, covering LEAD/CLIENT/BOOKING) has only
+      // ever assigned Travel Consultants — `listEligibleTravelConsultants`
+      // below is the sole picklist source for `assignedStaffId` across
+      // every caller of this function (D-015) — so `TRAVEL_CONSULTANT` is
+      // not a guess, it is this pathway's own already-established scope.
+      role: 'TRAVEL_CONSULTANT',
       ...targetFields(kind, targetId),
     });
 
