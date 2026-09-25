@@ -20,10 +20,11 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 
 ## D-002 — Currency strategy
 
-- **Status:** Proposed — pending explicit stakeholder approval
+- **Status:** Superseded in direction by D-019 (Accepted July 20, 2026) — status corrected September 25, 2026; see "Status correction" below. Previous status, preserved verbatim: "Proposed — pending explicit stakeholder approval".
 - **Proposal:** The Philippine peso (PHP) is the single billing currency for the MVP; the Booking currency field (blueprint Section 13.4) is fixed to it; multi-currency support is deferred.
-- **Blocks:** Phase 4 payment work; affects Phase 1 schema design (money column types and the currency field).
+- **Blocks:** *(Historical — no longer current since D-019; see "Status correction" below.)* Phase 4 payment work; affects Phase 1 schema design (money column types and the currency field).
 - **Refinement (July 20, 2026, D-019):** Following this log's "supersede rather than delete" convention (see the closing note at the end of this file), the original PHP-only-MVP proposal above is preserved and superseded, not deleted, by the following approved refinement: each Booking selects exactly one currency (`Booking.currencyCode`); PHP and USD are supported examples, not an exhaustive list; every financial amount within that Booking uses that Booking's own selected currency; mixed currencies and exchange-rate handling within a single Booking are deferred. See D-019 for the full Payment Schema Foundation decision this refinement is part of.
+- **Status correction (September 25, 2026):** D-019's Refinement above (July 20, 2026) settled this decision's direction: each Booking selects exactly one currency, with no mixed currencies or exchange rates within a Booking. D-019 is Accepted, and the design direction is confirmed again in D-056. The Status and Blocks lines were not updated when the Refinement was recorded, so they still said this decision was pending and blocked Phase 4. This log's own rule is to update a decision's status when it changes ("Update this log when a decision's status changes; do not delete entries — supersede them"), so only the Status line is changed and the Blocks line is marked historical. Their original wording, the Proposal, and the Refinement are preserved. The first-release supported-currency list was then accepted in D-056 (September 25, 2026) as `currencies-v1`, PHP only. USD is not approved; adding any currency requires a dated business decision, a precision check, and tests (D-056 §2). Nothing in this decision blocks Phase 4 any longer.
 
 ## D-003 — Retention periods for documents, activity logs, audit logs, and other personal data
 
@@ -132,6 +133,7 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 - **Rationale:** Blueprint Section 4.2 explicitly grants Admin / Manager the capability to "manage staff accounts' operational role assignments and lead/client/booking assignments," naming Booking directly — the same explicit basis Lead and Client assignment already rely on. The underlying `StaffAssignment.bookingId` column, its three-way `leadId`/`clientId`/`bookingId` XOR CHECK constraint, and its partial unique active-Booking-assignment index were already added by the Booking Schema Foundation checkpoint (migration `20260716020734_booking_schema_foundation`) but never used by any service or route until now — extending the existing generic `setAssignment`/`endAssignment` control flow (idempotent same-assignee replay, `REASON_REQUIRED` only when replacing an active assignment, atomic end-old/create-new/audit inside `runSerializableWithRetry`) maximizes reuse of already-reviewed, already-tested logic rather than duplicating it. Leaving Booking read/status authorization on Client-level assignment avoids conflating two separate concerns — "who currently works this Booking" (new, additive) and "who may read or transition this Booking" (existing, unchanged) — until a future decision, if any, deliberately links them.
 - **Constraint:** Whether a Booking assignment must eventually require, or should remain independent of, the Client assignment; whether Booking read/status authorization should ever incorporate Booking-level assignment; and whether assignment removal without replacement should be added, are all left open for a future decision — none is silently resolved here. No Prisma schema or migration change was required or made for this checkpoint.
 - **Effect:** Implements the "Booking-specific staff-assignment enforcement" checkpoint referenced in `docs/HERITAGE_V3_TASK_BOARD.md`. `features/bookings/repository.ts`, its status-transition service, and their routes remain completely unchanged.
+- **Amendment pointer (September 25, 2026):** D-056 (Accepted) extends Booking assignment to the Finance/Accounting role — Admin/Manager may set, replace, and end it, with distinct `BOOKING_FINANCE_ASSIGNMENT_*` audit actions. This entry's Travel Consultant Booking assignment, its PUT-only behavior, and its audit actions are unchanged.
 
 ## D-016 — Conversation Schema Foundation: schema shape, read-state model, and migration-history remediation
 
@@ -218,6 +220,7 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 - **Deferred:** `PaymentAdjustment` is not modeled until its exact balance effect is approved. The refund documentation type (a refund reference, credit note, or equivalent client-facing document, blueprint Section 11.5/16.2) remains open — `PaymentRefund` is a structured internal financial record only, not automatically that document. A post-approval Installment amendment/correction workflow is left open. Payment-gateway/processor fields, mixed-currency/exchange-rate handling within one Booking, an installment-status enum, and automatic credit-to-installment allocation are all explicitly excluded from this checkpoint.
 - **Effect:** Implements Stage A (schema-and-decision-documentation only) of the Payment Schema Foundation slice of the Phase 1 "Implement database schema and reviewed migrations from the approved Phase 0 entity plan" checklist item in `docs/HERITAGE_V3_TASK_BOARD.md`. That checklist item remains unchecked: Payment itself has no migration yet. `docs/HERITAGE_V3_TASK_BOARD.md` is not updated by this entry — per this checkpoint's explicit scope, that update belongs after Stage C (the reviewed migration is applied).
 - **Implementation status update (July 20, 2026):** Migration `20260720060555_payment_schema_foundation` was generated (Stage B1), reviewed, and manually augmented (Stage B2) with all 16 new CHECK constraints specified above (`booking_total_amount_positive`, `booking_financials_pairing`, `booking_currency_code_format`, `payment_plan_approval_pairing`, `installment_amount_positive`, `payment_amount_positive`, `payment_status_history_status_changed`, `payment_status_history_reason_required`, `payment_status_history_idempotency_key_required`, `payment_allocation_amount_positive`, `payment_allocation_reversal_reason_required`, `payment_refund_amount_positive`, `payment_refund_reason_required`, `payment_refund_allocation_amount_positive`, `receipt_amount_positive`, `receipt_currency_code_format`), the widened `document_context_exclusive` replacement (`num_nonnulls("bookingId", "visaCaseId", "paymentId") <= 1`), and the `installment_active_deposit_key` partial unique index. The migration was applied successfully to the local `heritage_v3_dev` database on July 20, 2026 (Stage B3); `prisma migrate status` subsequently reported all 11 migrations applied and the database schema up to date, and a read-only PostgreSQL catalog check confirmed every expected table, column, CHECK constraint, partial index, and foreign key. Staging and production application are not claimed and remain unverified — `docs/HERITAGE_V3_TASK_BOARD.md` remains the source for the current, verified environment/migration-application status. This completes the Payment schema foundation only: Payment workflow/API enforcement, status-transition rules, the transactional aggregate invariants documented above (PaymentPlan reconciliation, allocation and refund totals, currency/total immutability, receipt eligibility), receipt generation/download behavior, client- and admin-facing balance/receipt reporting, and every other item this entry's own Deferred section already lists remain future implementation work. This update does not change Stage A's Decision, Rationale, Constraint, Deferred, or Effect recorded above. It marks the Payment Schema Foundation checkpoint itself complete, and `docs/HERITAGE_V3_TASK_BOARD.md` records that completed checkpoint — but it does **not** mark the broader Phase 1 "Implement database schema and reviewed migrations from the approved Phase 0 entity plan" checklist item complete: blueprint Section 14.9's `Notification` entity is neither implemented in `schema.prisma` nor explicitly deferred by any decision (unlike `Permission`, D-012; `VisaRequirement`, D-017/D-018; `ActivityLog`'s access/download-logging purpose, D-018; `TourPackage`/`ItineraryVersion`, the Booking Schema Foundation checkpoint; and `PaymentAdjustment`, this entry), so the approved Phase 0 entity plan is not yet fully covered. A separate, explicit decision — implementing `Notification` or deliberately deferring it with its own documented rationale — is required before the overall checklist item can be completed.
+- **Amendment pointer (September 25, 2026):** D-057 (Accepted) replaces one `PaymentPlan` per Booking with at most one non-withdrawn plan per Booking, and adds a stored plan status (`PROPOSED`/`APPROVED`/`WITHDRAWN`) with withdrawal fields. D-056 and D-057 amend the financial lock to: locked while any non-withdrawn plan or any Payment exists. D-056 limits first-release currencies to the versioned list `currencies-v1` (PHP only). This entry's text above is preserved unchanged.
 
 ## D-020 — Notification Schema Foundation: minimal in-app alert shape and Stage A schema
 
@@ -519,6 +522,7 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 - **Constraint:** `features/bookings/**`, `features/assignments/**` (including `findActiveAssignmentForBooking` itself), every existing Booking/assignment API route, `apps/web/prisma/schema.prisma`, and every existing migration receive no change of any kind from this decision. `docs/HERITAGE_V3_TASK_BOARD.md` is not modified by this entry. No component, page, or panel this checkpoint authorizes may exceed the following distinct boundaries: a mutation payload any component submits may contain only fields `createBookingSchema`, `updateBookingStatusSchema`, or `setAssignmentSchema` already authorize (`listBookingsQuerySchema` governs the list page's own query parameters, not a submitted payload); Booking list/detail data may display only fields the existing `BookingRecord` response shape (`features/bookings/repository.ts:58-100`) already returns, per Section 5's corrected enumeration — which excludes `totalAmount`/`currencyCode`; assignment presentation may display only the existing return shapes of `findActiveAssignmentForBooking` and `GET /api/assignments/travel-consultants`, called exactly as Section 8 describes; and `CreateBookingButton` may consume only the `proposalVersionId` identity and the accepted-response eligibility information (Section 6) already available to the Proposal detail flow it is embedded in. No expansion of any of these existing API response shapes is authorized by this decision.
 - **Deferred:** Booking list filters; Booking status-history presentation; any editing capability for nullable Booking fields; Finance/Accounting and Visa Documentation Staff Booking access; a standalone booking-creation page; any new Booking API endpoint, request field, or response expansion; and a real-PostgreSQL `features/bookings/service.integration.test.ts` backfill (recorded as an open follow-up risk, not resolved).
 - **Effect:** Authorizes implementation of the Phase 2 "Booking management UI using the existing Booking API (creation, list, detail, status transitions, assignment)" checklist item. Does not itself implement any UI code, and does not mark that — or any other — Task Board item complete; that update remains a later, separate closure checkpoint, made only once the implementation described above, and its required test coverage, actually exist and pass.
+- **Amendment pointer (September 25, 2026):** D-056 (Accepted) resolves this entry's deferred editing of nullable Booking fields for `totalAmount` and `currencyCode` only (assigned Finance/Accounting user, before the financial lock), and resolves the deferred Finance/Accounting Booking access for payment operations only. Every other deferral here is unchanged.
 
 ## D-029 — Admin Dashboard Overview
 
@@ -2296,6 +2300,7 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 - **Constraint:** This entry, once appended, modifies only `docs/HERITAGE_V3_DECISIONS_LOG.md` (this entry, appended after D-053). It preserves D-001 through D-053 byte-for-byte, preserves the file's existing line-ending convention and its absence of a BOM, and reformats no unrelated text. It creates or modifies no application, test, configuration, environment, schema, migration, dependency, lockfile, or workflow file, and no other documentation file; it does not modify `docs/HERITAGE_V3_TASK_BOARD.md`. It runs no application test, lint, typecheck, build, Prettier, integration, or E2E suite and accesses no database; only documentation-level status, diff, and formatting checks are run for it. It does not start, stop, restart, or modify `pnpm dev`, PostgreSQL, or any other process, and it installs no dependency. It does not stage, commit, push, or open a pull request beyond what its own separate publication authorization covers. It authorizes no implementation: every stage after Stage 1 (§10) requires its own separate, explicit, reviewed authorization. It does not renumber, rename, amend, or supersede any earlier decision entry (D-001 through D-053), does not modify or narrow D-053 or any of its stages, and does not claim that any Phase 3, Phase 4, or Phase 5 completion gate is satisfied.
 - **Deferred:** Execution of Stages 2 through 6 (§10), each to its own separate, explicit, reviewed authorization. `PaymentAdjustment`'s exact shape, the refund-document/credit-note format, a post-approval Installment amendment workflow, an installment-status enum, and automatic credit-to-installment allocation — all to their own future decisions, per D-019's own already-open items (§12). Basic finance exports, to its own future decision if pursued (§12). Marking Phase 3, Phase 4, or Phase 5 complete, to the user alone (CLAUDE.md §5). Any D-053-governed staging/infrastructure work, to D-053's own separately authorized stages, entirely unaffected by and unreferenced-as-satisfied by this entry.
 - **Effect:** Establishes the contract (proposed September 22, 2026) for the smallest complete Payments & Receipts vertical slice needed to make progress on Phase 4's task list, under the user's already-recorded controlled exception (D-053) to begin Phase 4 feature work while Phase 3's own completion gate remains unmet; builds entirely on D-019's already-approved schema and arithmetic without changing any of it; fixes the roles/authorization boundary for every payment operation (§3); states the exact lifecycle, invariants, and balance/allocation/refund formulas the future service layer must implement unchanged from D-019 (§§4-5); defines the admin scope (including payment-plan approval, included on verified schema-and-role-contract evidence) and the strictly read-only, ownership-isolated client scope (§§6-7); fixes auditability, idempotency, error-handling, and security expectations consistent with this repository's existing `.claude/rules/` (§§8-9); lays out a six-stage plan — service/repository, admin UI, client UI (including the sole authorized `ClientPortalNav.tsx` promotion), E2E verification, and review/closure — with explicit provisional file boundaries and per-stage validation requirements (§§10-11), none of which is authorized by this entry; records what remains deferred or explicitly excluded, including finance exports, `PaymentAdjustment`, the refund-document format, any payment gateway, and all Documents/Visa Center/infrastructure/deployment/staging work (§12); and states rollback/compatibility expectations and this Stage 1's own acceptance criterion and one-file boundary (§§13-15). Does not itself implement any application code, schema change, or test; modify `docs/HERITAGE_V3_TASK_BOARD.md`, D-053, or any earlier decision entry; run any test/build/lint/typecheck/format/Prisma/database/server command; start any process; stage, commit, push, or open a pull request; or mark any phase complete; and its future acceptance (a separate stage) would authorize no implementation.
+- **Amendment pointer (September 25, 2026):** D-056 and D-057 (both Accepted) amend this contract. D-056 adds a `CANCELLED` Booking-status rule for payment operations (§5 there), states that `COMPLETED` keeps this entry's behavior, adds a currency-precision check to its amounts, and adds stages P1–P4 before Stage 3. D-057 adds plan withdrawal and the `PROPOSED → APPROVED | WITHDRAWN` plan lifecycle to §§3, 4, 6, 8, 10, and 13. §7's client view is unchanged. This entry's text above is preserved unchanged.
 
 ## D-055 — CHECK-Constraint Error Handling Correction (D-047 Correction)
 
@@ -2309,6 +2314,343 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 - **Constraint:** Implemented on branch `fix/check-constraint-conflicts`, based on `main` at `aea7081`: `apps/web/src/lib/prisma-errors.ts` (the `P2004` removal and a header note documenting the verified CHECK-violation shape), comment-only corrections in the five services named above, focused test updates (the six `P2004`-to-409 expectations removed; a real-PostgreSQL test proving a genuine 23514 is neither retried nor treated as a conflict; unit tests covering the raw 23514 shape and a legacy `P2004` as non-conflicts; a `withRole` test proving the generic 500 carries no failing-row, constraint, or SQLSTATE detail), and this entry. No schema, migration, route, UI, dependency, or environment change.
 - **Deferred:** Server-log exposure, to its own follow-up: `withRole` logs the whole error object (`apps/web/src/lib/auth/guards.ts`, `console.error('Unhandled error in a role-guarded route handler:', error)`), and Next logs errors rethrown from server actions and unwrapped routes, so a CHECK violation's `cause.detail` (the failing row) reaches server logs, though never a client. The recommended fix is a log-safe error description (name, Prisma code or adapter kind, SQLSTATE, and table/constraint names only) used in `withRole` and in Next's `onRequestError` instrumentation, per `.claude/rules/database-security.md`'s logging-hygiene rule.
 - **Effect:** Every CHECK-constraint violation receives the generic response in every feature on `main` once this change is merged; D-047's `P2004` clauses are superseded as described; no other decision's text or behavior changes.
+
+---
+
+## D-056 — Phase 4 Payments Operational Prerequisites: Finance/Accounting Booking Assignment and Booking Financials Entry
+
+- **Status:** Accepted
+- **Date proposed:** September 25, 2026
+- **Date accepted:** September 25, 2026
+- **Acceptance note (September 25, 2026):** The user accepted this entry after three revisions made the same day, with these decisions:
+  - **First-release currency scope:** `currencies-v1` contains **PHP only**. USD is not approved. It appeared in D-019 only as a schema example, which is not evidence of an operational need, and no management approval of USD exists.
+  - **`CANCELLED` Bookings:** new plan proposals, plan approval, new allocations, and ordinary recording and confirmation of payments are blocked. Eligible reversal, refund, allocation reversal, receipt issuance, plan withdrawal (D-057), and reads remain under each operation's existing guards.
+  - **Post-cancellation funds:** a separate decision about money received after cancellation, with a manual escalation procedure, is required before production (§8).
+  - **`COMPLETED` Bookings** keep D-054's current payment behavior, because `COMPLETED` records trip completion, not financial settlement (§5).
+  The internal-consistency review of this entry, D-057, and the D-002 and blueprint §16 corrections was completed before the status was changed.
+- **Context:** D-054 Stage 2 (merged to `main` through PR #108, merge commit `6a4edbb`) implemented every payment operation behind two prerequisites that no production code path can yet satisfy:
+  - **A Finance/Accounting Booking assignment.** Every Finance/Accounting payment operation is authorized by `payments/repository.ts`'s `bookingAssignmentFilter`, which requires an active `StaffAssignment` for that Booking whose `role` matches the actor's (D-054 §16). The only assignment write path, `features/assignments/service.ts`'s `setAssignment`, always writes `role: 'TRAVEL_CONSULTANT'`, and `assertEligibleAssignee` rejects every other role (D-015). No code outside tests creates a `FINANCE_ACCOUNTING` Booking assignment.
+  - **`Booking.totalAmount` and `Booking.currencyCode`.** D-019 requires both before a `PaymentPlan` may be created, and D-054 §17 Rule 4 requires the currency before a Payment may be recorded. No service or route writes either field: `createBookingSchema` accepts only `proposalVersionId`, `ProposalVersion` carries no pricing (D-027 deferred it), and D-028 deferred any editing of nullable Booking fields.
+  - **Consequence.** Outside test fixtures, every Finance/Accounting operation returns `BOOKING_FORBIDDEN` or `PAYMENT_FORBIDDEN`, every plan proposal returns `PAYMENT_PLAN_CONFLICT`, and every `recordPayment` returns `BOOKING_CURRENCY_NOT_SET`. The Task Board's Phase 4 completion gate ("deposit → installments → documents → conditional visa case → completed payment") cannot be reached.
+  - **Why Stage 3 cannot absorb this.** D-054 §10 defines its Stage 3 as UI-only ("introduces no new business logic of its own"). Both entry points need new service-layer rules, so they need their own contract and stages first.
+  - The Task Board still records Phase 3 as the active phase; this entry does not change that, and does not mark any phase or checklist item complete.
+
+  **1. Finance/Accounting Booking assignment — set, replace, end.**
+  - **Who may act.** `ADMIN_MANAGER` only, reusing `assertAssignmentMutationActor` (blueprint §4.2: "manage ... lead/client/booking assignments"; D-015). `SYSTEM_ADMINISTRATOR` is excluded (blueprint §4.1; D-009(c)). A Finance/Accounting user cannot assign themselves, and a Travel Consultant cannot assign Finance.
+  - **Who may be assigned.** An active user whose current role is `FINANCE_ACCOUNTING`, chosen from a new eligible-Finance picklist read (Admin/Manager only, mirroring `listEligibleTravelConsultants`).
+  - **Operations.**
+    - *Set:* creates the Booking's Finance/Accounting assignment when none is active, with an audit record. Setting the same assignee again is an idempotent no-op with no audit record, as `setAssignment` already behaves.
+    - *Replace:* ends the active Finance/Accounting assignment and creates the new one in one transaction. A reason and an audit record are required.
+    - *End:* ends the active Finance/Accounting assignment without a replacement. A reason, an audit record, and an explicit confirmation step in the UI are required (`.claude/rules/admin-dashboard.md`, "Destructive and Irreversible Actions"). This differs from D-015, which is PUT-only for the Travel Consultant; ending is included because least privilege requires being able to remove Finance access without naming a successor. Ending again when nothing is active is a no-op.
+  - **Independence from the Travel Consultant assignment.** The existing `staff_assignment_active_booking_role_key` already allows one active assignment per Booking *per role*. The Finance/Accounting operations never read, replace, or end the Travel Consultant row, and `setBookingAssignment` / `findActiveAssignmentForBooking` stay Travel-Consultant-only and never touch the Finance row. Neither is a precondition for the other.
+  - **Cancelled and completed Bookings.** A Finance/Accounting assignment may be set on, replaced on, and remain on a Booking in any status, including `CANCELLED` and `COMPLETED`, so that eligible refunds and other permitted operations remain possible.
+    - The assignment only *authorizes* the assigned user. It never makes an operation allowed.
+    - Each payment operation still enforces its own payment-state rules (D-054) and the Booking-status rules in §5.
+  - **Scope granted.** Exactly what `bookingAssignmentFilter` already gates for that one Booking, in `features/payments` only:
+    - view and approve its payment plan;
+    - record, confirm, reverse, and refund its payments;
+    - create and reverse allocations;
+    - issue receipts;
+    - read its staff payment summary;
+    - set its financials under §2;
+    - withdraw its unapproved plan under D-057;
+    each subject to §5's Booking-status rules. It grants nothing else: no `features/bookings` list, detail, or status access (D-014 and D-028 are unchanged); no documents, visa case, conversations, or client profile; and nothing on the same Client's other Bookings.
+  - **"Broader operational scope."** Blueprint §4.4 and §4.7 let Admin/Manager grant Finance/Accounting broader scope "where the finance workload requires it", and D-054 §3 repeats it. No mechanism is adopted: the first release grants Finance/Accounting access per Booking only, and a portfolio-wide or all-Bookings grant is deferred to its own decision.
+  - **Role changes and deactivation.** `changeStaffRole` and `deactivateStaffAccount` do not end assignments today, and this entry adds no automatic ending. A stale row already grants nothing, because the filter matches the row's `role` to the actor's current role (D-054 §16; tested), and a deactivated account has no sessions. The admin Booking view shows the active Finance/Accounting assignee and their current role, so a stale row is visible and can be ended.
+  - **Audit.** Every set, replace, and end writes an `AuditLog` record in the same transaction, with `entityType: 'Booking'`, `entityId` the Booking, and the Admin/Manager as actor.
+    - Actions: `BOOKING_FINANCE_ASSIGNMENT_CREATED`, `BOOKING_FINANCE_ASSIGNMENT_REPLACED`, and `BOOKING_FINANCE_ASSIGNMENT_ENDED`.
+    - Content: before and after assignment snapshots that include `role`, plus the reason for a replace or an end.
+    - **These actions must stay distinct from the historical Travel Consultant actions** (`BOOKING_ASSIGNMENT_CREATED`, `_REPLACED`, `_ENDED`). Migration `20260925000000_staff_assignment_role_backfill_correction` and D-054 §16's correction treat a `BOOKING_ASSIGNMENT_CREATED`/`_REPLACED` entry as proof that a row was created as a Travel Consultant assignment, and no Finance/Accounting write may ever emit one.
+  - **Concurrency.** Writes run in `runSerializableWithRetry`. A lost race on `staff_assignment_active_booking_role_key` maps to the module's existing safe `ASSIGNMENT_CONFLICT`.
+  - **Examples.**
+    - Booking HP-A has Travel Consultant Ana. The Admin assigns Finance user Ben, producing one `BOOKING_FINANCE_ASSIGNMENT_CREATED` record. Ana's assignment is untouched.
+    - Ben goes on leave. The Admin replaces Ben with Cora, giving the reason "Ben on leave until October 10". Ben's row is ended and Cora's is created, with one `BOOKING_FINANCE_ASSIGNMENT_REPLACED` record.
+    - HP-A is cancelled with a confirmed PHP 35,000.00 deposit. Cora stays assigned and records the refund, and the refund still requires the Payment to be `CONFIRMED`. Afterwards the Admin ends Cora's assignment with a reason, producing one `BOOKING_FINANCE_ASSIGNMENT_ENDED` record.
+
+  **2. Booking financials — `totalAmount` and `currencyCode`.**
+  - **Meaning.** The Booking's authoritative total price, net of any discount agreed before a payment plan exists, in the Booking's single currency. The design direction — each Booking selects exactly one currency, with no mixed currencies or exchange rates within a Booking — is D-019's, and is confirmed here.
+  - **Who writes them.** Only the Finance/Accounting user who holds the Booking's active Finance/Accounting assignment. They may set or change both values until the financial lock. This follows blueprint §4.4 (Finance/Accounting "manages the financial lifecycle of a booking") and §11.5 (booking-total changes are a Finance-only action).
+    - **Travel Consultant:** cannot write either field. The Travel Consultant supplies the agreed quote through existing workflows — the Proposal/ROS version content (D-027; free text, no structured pricing) and Support & Messages (D-051) — and still proposes the plan's deposit, installments, and due dates (blueprint §4.3, §11.3; D-054 §3).
+    - **Admin/Manager:** read-only for booking financials, consistent with D-054 §3. Admin/Manager's only role here is granting or ending the Finance/Accounting assignment (§1).
+  - **Operational order this creates.** A plan cannot be proposed until the total and currency exist (D-019), so the Admin assigns Finance/Accounting and Finance/Accounting enters the financials *before* the Travel Consultant proposes the plan.
+  - **When.** While the financials are unlocked, in any Booking status except `CANCELLED`. A cancelled Booking accepts no new plan or ordinary payment (§5), so new financials would serve no permitted operation. `COMPLETED` is not excluded, consistent with §5's finding that `COMPLETED` is not financial settlement.
+  - **Entry.** Both values are always entered together in one request (`booking_financials_pairing`) and are never cleared back to null. The currency is selected explicitly each time, with no default.
+  - **Supported currencies: an explicit, versioned list.**
+    - The existing `booking_currency_code_format` CHECK (`^[A-Z]{3}$`) checks shape only: it accepts non-currencies such as a typo `PHO`, and says nothing about precision. It stays in place as a database backstop but is not sufficient on its own.
+    - The service validates against a code-level, versioned list, `SUPPORTED_CURRENCIES`. Each entry is `{ code, minorUnits }`, and the list carries a version identifier.
+    - **Accepted version `currencies-v1`: PHP only (2 minor units).** This is the first-release scope. PHP is the billing currency named in D-002's original proposal and blueprint §16's original entry.
+    - **USD is not included and not approved.** It appears only in D-019, as one of the "supported examples, not an exhaustive list" of a schema design, which is not evidence of an operational need. No documented requirement — client base, supplier pricing, or inbound international travelers — establishes it, and `docs/HERITAGE_V3_MANAGEMENT_FEEDBACK.md` is empty.
+  - **Precision validation.**
+    - `totalAmount` must use the existing money format (`positiveMoneyAmountSchema`: exactly two decimal places, greater than zero). Its digits beyond the currency's `minorUnits` must be zero.
+    - Every money column is `Decimal(18,2)`, so no list entry may declare more than 2 minor units without a schema change.
+    - The same currency-precision check is applied, against the Booking's currency, to every Stage 2 amount for that Booking: installments, payments, refunds, and allocations. For `currencies-v1` this changes no accepted input, because PHP has 2 minor units.
+  - **Adding or changing a currency.** USD or any other currency may be added later. Each addition requires:
+    - a dated business decision in this log, amending this entry and recording the business need;
+    - a precision check that its minor units fit the existing `Decimal(18,2)` storage, or a separate schema decision if they do not;
+    - unit and real-database tests for the new code.
+    It is released as a new list version, for example `currencies-v2`.
+    - Removing a code affects only new financials writes. A Booking keeps its locked currency, and its receipts keep their snapshot.
+    - The list is enforced in the service rather than as a database CHECK, so a list change needs no migration; the format CHECK remains.
+  - **Lock (amended by D-057).** Both fields become immutable while the Booking has any `PaymentPlan` that is not `WITHDRAWN` (a proposed or approved plan), **or any `Payment` in any status**. The two conditions are independent: withdrawing every plan never unlocks a Booking that has a Payment.
+    - A later write is rejected with a new safe `BOOKING_FINANCIALS_LOCKED` error (409).
+    - **Concurrency requirement.** `setBookingFinancials` must read the lock conditions (plans that are not `WITHDRAWN`, and Payments) inside the same `runSerializableWithRetry` transaction that performs its write. `proposePaymentPlan` and `recordPayment` must read `totalAmount`/`currencyCode` inside their own writing transactions, as they do today.
+    - Serializable isolation makes these races safe only under those conditions. A serialization failure must be retried by `runSerializableWithRetry` and re-read on retry, and an exhausted retry must end in the existing safe conflict error. Real-database race tests (§3) must demonstrate this; the isolation level alone is not the proof.
+  - **Corrections before the lock.** Changing an already-set value requires a reason. Submitting identical values is a no-op with no audit record.
+  - **After the lock.** See §4.
+  - **Audit.** `AuditLog` with `entityType: 'Booking'` and the Finance/Accounting user as actor. Action `BOOKING_FINANCIALS_SET` on the first write and `BOOKING_FINANCIALS_CHANGED` on a correction. `beforeState` and `afterState` are `{ totalAmount, currencyCode }` as decimal strings; `afterState` also records `currencyListVersion` (for example `currencies-v1`), plus the reason on a change.
+  - **Client visibility.** Unchanged: the client payment summary lists only Bookings with an approved plan (D-054 §7).
+  - **Examples.**
+    - Ana sends the client a Proposal quoting PHP 120,000.00 less a PHP 5,000.00 early-booking discount. The client accepts and the Booking is created. The Admin assigns Ben, and Ben enters `totalAmount 115000.00`, `currencyCode PHP` (list version `currencies-v1`). Ana then proposes a deposit of 35,000.00 plus two installments of 40,000.00. Ben approves the plan, and both fields are locked.
+    - Before any plan exists, Ben notices he entered `11500.00`. He corrects it to `115000.00` with a reason, producing one `BOOKING_FINANCIALS_CHANGED` record.
+    - Ben selects `USD`, or types `PHO`. The format CHECK would accept either, but neither is in `currencies-v1`, so the request is rejected before anything is written.
+    - Ana tries to set the total herself and is refused: the Travel Consultant is not permitted to write booking financials.
+
+  **3. Service and repository work required before D-054 Stage 3.** See §7 for the ordered stages, including D-057's.
+  - **`features/assignments` (no migration):** role-aware create using the Finance/Accounting role; set, replace, and end operations for the Booking's Finance/Accounting assignment; a read of the active Finance/Accounting assignment for a Booking; the eligible-Finance picklist read; the three new audit actions; and a snapshot that includes `role`. The Travel Consultant functions stay unchanged.
+  - **`features/payments` (no migration of its own; depends on D-057's `PaymentPlan.status`):**
+    - `setBookingFinancials`: Finance/Accounting-only authorization through `bookingAssignmentFilter`, the `CANCELLED` exclusion, the supported-currency and precision checks, the D-057-amended lock, and the audit record. It lives here because its authorization and invariants are payment rules, and because `payments/repository.ts` already reads the Booking's financial columns (`findBookingFinancialsForActor`).
+    - The same currency-precision check applied to the existing plan, payment, refund, and allocation amounts.
+    - The §5 Booking-status guard on the blocked operations, with its replay-first ordering.
+    - A paginated `listPaymentBookingsForActor` with a Booking-reference search and a payment-plan-state filter (none, proposed, approved, withdrawn), required by `.claude/rules/admin-dashboard.md`'s list rules.
+    - A minimal, assignment-scoped Booking header (reference, status, client display name) for the Stage 3 list and detail views.
+  - **Validation layer:** Zod schemas for each new input: a supported-currency enum derived from `SUPPORTED_CURRENCIES`, the reason rules, and the precision refinement.
+  - **Tests:** unit tests, plus real-database integration tests covering:
+    - Admin/Manager-only assignment mutation;
+    - Finance-only eligibility;
+    - the Travel Consultant and Finance/Accounting rows staying independent;
+    - replace and end with reasons, and the distinct audit actions;
+    - stale-role denial;
+    - Finance/Accounting-only financials writes (Travel Consultant and Admin/Manager refused);
+    - `USD` and malformed codes rejected;
+    - precision rejection;
+    - the lock against a proposed plan, an approved plan, a withdrawn plan with and without a payment, a pending payment, and a concurrent proposal;
+    - every §5 `CANCELLED` block and every preserved operation, including a replay of a request that succeeded before cancellation;
+    - real-database race tests of a concurrent cancellation (`updateBookingStatus` to `CANCELLED`) against each blocked write — `proposePaymentPlan`, `approvePaymentPlan`, `createAllocation`, `recordPayment`, `confirmPayment`, and `setBookingFinancials`. In every run, each write either commits as if before the cancellation or is refused with `BOOKING_STATUS_NOT_PERMITTED` or its existing safe conflict error, with no raw database error; the test also covers a controlled interleaving in which the write's transaction has read the status before the cancellation commits;
+    - real-database race tests of `setBookingFinancials` against a concurrent `proposePaymentPlan` and `recordPayment`;
+    - an authorized replay, after cancellation, of a `recordPayment` and a `confirmPayment` that completed before it;
+    - unchanged behavior on `COMPLETED`;
+    - no change to the client summary.
+  - **Stage 3 file boundaries.** The Finance/Accounting assignment panel and the financials form belong on the admin Booking detail page, which is outside D-054 §10's provisional Stage 3 file list. That list needs a narrow adjustment when Stage 3 is authorized.
+
+  **4. Flexibility after approval — extensions, discounts, and adjustments.** No separate decision on these exists (`docs/HERITAGE_V3_MANAGEMENT_FEEDBACK.md` is empty). The governing rules are blueprint §11.4–§11.5, D-019's deferrals, and D-054 §12.
+  - **Before approval.** The Travel Consultant may propose any installment structure D-019 permits. Finance/Accounting may set or correct the financials while unlocked. D-057 allows an unapproved plan to be withdrawn and a new one proposed.
+  - **After approval — deferred implementation work, not disallowed.** Client-requested flexibility is a supported business need, and none of the following is permanently ruled out. Each is deferred implementation work that needs its own decision:
+    - moving an approved installment's due date (an extension): the post-approval Installment amendment/correction workflow, D-019;
+    - a discount or any other change to the total after the lock: `PaymentAdjustment`, a Finance-only action under blueprint §11.5, D-019 and D-054 §12;
+    - grace periods for near-due or recently due installments: blueprint §11.4, D-054 §12.
+  - **Until those exist.** Stage 3 must not offer them. They must never be simulated by editing a locked total, by refunding, by reversing a payment, or by withdrawing an approved plan (which D-057 forbids). A late installment has no in-system consequence beyond its derived outstanding amount and next-due date. The request and any agreement are recorded in Support & Messages (D-051), outside the payment records. `Booking.internalNotes` exists in the schema but has no edit path (D-028), so it cannot hold them yet.
+  - **Production-readiness gate — "Payments Flexibility Gate"** (§8).
+  - **Examples.**
+    - After the plan is approved, the client asks to move the second installment from November 1 to November 15. This is not available in the system until the amendment workflow exists. Finance/Accounting records the agreement in the Booking's conversation, and the installment keeps its approved due date in the system.
+    - After approval, management grants a PHP 2,000.00 goodwill discount. This waits for `PaymentAdjustment`. It is never applied by editing the locked total or by recording a refund.
+
+  **5. Booking-status rules for payment operations.** D-054 Stage 2 enforced no Booking-status rule. This section adds one for `CANCELLED` only.
+  - **Blocked on a `CANCELLED` Booking:**
+    - `proposePaymentPlan`, `approvePaymentPlan`, and `createAllocation`;
+    - ordinary `recordPayment` and `confirmPayment`;
+    - `setBookingFinancials` (§2).
+    Each is refused with a new safe `BOOKING_STATUS_NOT_PERMITTED` error (409).
+  - **Preserved on a `CANCELLED` Booking,** each under its own existing guards:
+    - `reversePayment` (a `CONFIRMED` payment with no refunds);
+    - `refundPayment` (a `CONFIRMED` payment, within the refund caps);
+    - `reverseAllocation` (D-019's refund-allocation rule);
+    - `issueReceipt` (D-054 §17 Rule 3: new receipts only while `CONFIRMED`; an existing receipt is returned unchanged);
+    - `withdrawPaymentPlan` (D-057: a `PROPOSED` plan only);
+    - every read.
+  - **No "money in flight" exception.** Recording or confirming a payment on a `CANCELLED` Booking is not allowed on the claim that the money was sent before cancellation. The current input cannot establish that fact, and no field records it. Money received after cancellation, and a payment left `PENDING` at cancellation, follow §8's manual escalation until a separate decision exists.
+  - **Order of checks.** Each operation keeps its existing role check, booking-scoped authorization, and idempotent-replay handling, in their existing order:
+    - `recordPayment` authorizes the Booking before its replay lookup (D-054 §17 Rule 6);
+    - `confirmPayment`, `reversePayment`, `refundPayment`, and the allocation operations look up the replay first and re-read the Payment through the actor-scoped lookup (D-054 §8).
+    The Booking-status guard runs after those checks, and before the operation's other guards and any write.
+    - A retry of a request that succeeded before the Booking was cancelled still returns its original result and writes nothing. For example, a `recordPayment` or `confirmPayment` replay under D-054 §17 Rule 6 and §8 returns the payment in its current status.
+    - **Concurrency requirement for the status guard.** Each new Booking-status check must read `Booking.status` inside the same `runSerializableWithRetry` transaction that performs the payment or plan write. It must never rely on a status read earlier, in another transaction, or passed in from the caller.
+    - **What that gives, and its conditions.** A cancellation and a blocked write are then serialized. Every committed outcome is equivalent to the write happening entirely before the cancellation — in which case it succeeds, as it would have before the cancellation — or entirely after it, in which case it is refused with `BOOKING_STATUS_NOT_PERMITTED`. This holds only while:
+      - every writer of `Booking.status` also runs serializable. Today the only one is `updateBookingStatus`, which uses `runSerializableWithRetry` (`features/bookings/service.ts`);
+      - a serialization failure is retried and the status re-read on retry;
+      - an exhausted retry ends in the operation's existing safe conflict error, never a raw database error.
+      Serializable isolation alone is not the proof: the real-database race tests required in §3 must demonstrate it.
+    - **Idempotent replays are preserved.** An authorized replay of an operation that completed before the cancellation performs no write, so the status guard does not refuse it.
+  - **`COMPLETED`: D-054's current payment behavior is preserved, with no new restriction.**
+    - What `COMPLETED` means, verified in the documents and code: blueprint §8's client journey ends "Ready for travel → In progress → Completed", and blueprint §13.4 lists it as a booking status. D-014's matrix reaches it only from `IN_PROGRESS` and makes it terminal (`features/bookings/transitions.ts`). D-050 presents it to the client as "a completed trip in your travel history" (`features/client-portal/travel-status.ts`).
+    - Nothing in D-014, the blueprint, or `updateBookingStatus` requires a settled balance or any payment state to enter `COMPLETED`. `COMPLETED` therefore records **trip completion, not financial settlement**. A completed trip may still carry an outstanding balance or need a refund.
+    - Every payment operation keeps its D-054 behavior on a `COMPLETED` Booking, including plan proposal and approval, and `setBookingFinancials` is also permitted.
+    - Whether a "financially settled" state or report is needed is not settled by any document, and is recorded as a separate open item (§8), not as a restriction here.
+  - **Example.** Booking HP-B is cancelled with a `CONFIRMED` PHP 35,000.00 deposit (receipt issued) and a PHP 40,000.00 installment payment still `PENDING`.
+    - Ben refunds the deposit in full: allowed. The existing receipt stays unchanged.
+    - Ben tries to confirm the `PENDING` payment: refused with `BOOKING_STATUS_NOT_PERMITTED`. That payment goes to §8's manual escalation.
+    - A retry of Ben's deposit confirmation from before cancellation returns the payment in its current status, `REFUNDED`, and writes nothing.
+
+  **6. Checked for consistency against D-014, D-015, D-019, D-028, D-054, the blueprint, and the current validation code.**
+  - **Booking assignment was Travel-Consultant-only.** D-015 made it Travel-Consultant-only and PUT-only, D-028 §10 deferred Finance/Accounting Booking access, and `setAssignment` hard-codes the role. Blueprint §4.2, §4.4, and §4.7, and D-054 §3 and §16, require Finance/Accounting assignment. This entry extends D-015 for the Finance/Accounting role only.
+  - **Booking-field editing was deferred.** D-028 deferred editing nullable Booking fields; this entry resolves it for the two financial fields only.
+  - **Stage 3 is UI-only** (D-054 §10), so this work needs its own stages (§7).
+  - **The assignment audit actions carry a meaning that must be preserved:** the separate Finance/Accounting action names in §1.
+  - **The Travel Consultant cannot write financials** (blueprint §4.3, §11.3). **Admin/Manager is read-only** for financials (D-054 §3).
+  - **The currency record was inconsistent.** Blueprint §16 and D-002 said the currency strategy was pending and blocked Phase 4, while D-019 (Accepted) had already set per-Booking currency. The design direction is confirmed here, and blueprint §16 and D-002 carry dated corrections made on September 25, 2026; their original wording is preserved.
+  - **Format-only currency validation** is replaced by the versioned PHP-only list and the precision check (§2). The `^[A-Z]{3}$` CHECK remains as a backstop.
+  - **D-019's open currency wording.** D-019 set the design and named PHP and USD as examples. It did not require that every code be accepted, so a PHP-only first release sits within that design.
+  - **D-054 had no Booking-status rule.** §5 adds the `CANCELLED` rule and states `COMPLETED` explicitly. D-054 §17 Rule 1 still defers moving a `PENDING` payment to `REJECTED`/`CANCELLED`/`FAILED`; §8's post-cancellation funds decision must address that for cancelled Bookings.
+  - **Broader scope is deferred.** Blueprint §4.4 makes it optional ("may grant").
+  - **Two different assignments gate Booking access.** Booking read and status authorization uses the Travel Consultant's *Client* assignment (D-014, D-015), while payments use the role-aware *Booking* assignment (D-054 §16). This entry keeps that split; unifying them needs its own decision. Not blocking.
+
+  **7. Implementation stages required before D-054 Stage 3.** Each proceeds only under its own separate authorization and review, with D-054 §11's validation requirements.
+  - **P1 — Finance/Accounting assignment** (§1; `features/assignments`; no migration). Independent of P2–P4.
+  - **P2 — Plan-state migration design** (D-057 §2): the Prisma schema change and migration file, reviewed. It may be applied and checked on an isolated, disposable local database created for that purpose under P2's own authorization: catalog checks of the enum, columns, CHECK constraints, and partial unique index, plus the backfill. It is **not** applied to the shared `heritage_v3_test` or `heritage_v3_dev` in P2.
+  - **P3 — Plan withdrawal and state-aware queries** (D-057 §§3–6; `features/payments`), **together with the coordinated application of P2's migration to the shared databases.** P2's migration alone does not leave the running application ready: current code approves a plan by setting `approvedAt` without `status`, which the new `payment_plan_status_approval` CHECK rejects (D-057 §2). The migration is therefore applied to `heritage_v3_test`, then `heritage_v3_dev`, only in the same reviewed change as P3's compatible code. The existing integration harness accepts only a database named `heritage_v3_test`, so P3's real-database evidence is produced there after the coordinated application. The procedure, per database, is D-057 §2's.
+  - **P4 — Booking financials entry, the PHP-only currency list and precision checks, the §5 Booking-status guard, and the list and header reads** (§§2, 3, 5; `features/payments`). Requires P3 for the amended lock.
+  - Then **D-054 Stage 3 (UI)**, with the file-list adjustment in §3.
+
+  **8. Production decisions and gates** (before the October 31, 2026 production launch, as part of Phase 7's launch-readiness checklist; none blocks the internal MVP on staging, September 30, 2026):
+  - **Payments Flexibility Gate.** One of the following must hold:
+    - (a) decisions for the post-approval Installment amendment workflow (including due-date extensions) and for `PaymentAdjustment` (including post-lock discounts) are accepted, implemented, and verified; or
+    - (b) management explicitly accepts, in writing and recorded in this log, launching without them, together with the interim manual procedure.
+  - **Post-Cancellation Funds Gate.** A separate decision must be accepted, implemented where it requires code, and verified, covering:
+    - money received for a Booking after it is cancelled;
+    - a payment still `PENDING` at cancellation;
+    - how either is recorded, confirmed or rejected, and returned without being lost or misclassified. This includes whether D-054 §17 Rule 1's deferred `PENDING` → `REJECTED`/`CANCELLED` transitions are needed.
+    Until that decision exists, the **manual escalation** is:
+    - Finance/Accounting must not record such money as a payment on this or any other Booking, and must not confirm a `PENDING` payment on a cancelled Booking;
+    - Finance/Accounting escalates to Admin/Manager, and Admin/Manager names an owner responsible for the case until it is resolved;
+    - how the money is held, returned, or otherwise handled, and where the facts are recorded, is decided by Admin/Manager and the named owner for each case. No written company procedure for post-cancellation incoming money exists in this repository's documents, and this entry does not establish one: the Post-Cancellation Funds decision must define it. The application has no staff-only record for these facts — `Booking.internalNotes` has no edit path (D-028), and Support & Messages is visible to the client (D-051) — so bank or sender details must not be written into the client conversation.
+  - **Other open items, not gates set by this entry:**
+    - adding any currency beyond PHP (§2);
+    - a "financially settled" status or report distinct from `COMPLETED` (§5);
+    - a broader-than-Booking Finance/Accounting scope grant (§1);
+    - the client payment-history wording (D-054 L2).
+
+- **Rationale:** Both prerequisites already have fixed schema support and firm constraints (D-019; D-054 §16; §17 Rule 4), but no approved entry point. Stating who acts, what scope an assignment grants, which currency the first release supports, what a cancelled Booking permits, when the financials lock, and what is deferred — before any UI — keeps business rules in the service layer (`.claude/rules/architecture.md`) and keeps Stage 3 UI-only as D-054 §10 requires.
+- **Constraint:** A documentation-only decision, recorded together with the dated blueprint §16 and D-002 corrections. It changes no code, schema, migration, route, UI, or Task Board entry. Its stages P1 and P4 each proceed only under their own separate authorization.
+- **Deferred:** a broader-than-Booking Finance/Accounting scope grant; `PaymentAdjustment`; the post-approval Installment amendment workflow (including due-date extensions); grace periods and overdue automation; unifying Booking-read and payments authorization; the post-cancellation funds decision; a "financially settled" state or report; any currency beyond PHP; and the client payment-history wording (D-054 L2, still unresolved). §8's gates apply where stated.
+- **Effect:** Establishes the accepted contract for Finance/Accounting Booking assignment, booking financials entry with a PHP-only first-release currency list, and Booking-status rules for payment operations. It amends D-015 (Finance/Accounting Booking assignment), D-028 (financial-field editing), and D-054 (a `CANCELLED` rule, a currency-precision check on its amounts, and the pre-Stage-3 stages). Together with D-057, it amends D-019's financial lock. It authorizes no implementation by itself.
+
+---
+
+## D-057 — Withdrawing an Unapproved Payment Plan (Pre-Stage-3 Prerequisite)
+
+- **Status:** Accepted
+- **Date proposed:** September 25, 2026
+- **Date accepted:** September 25, 2026
+- **Acceptance note (September 25, 2026):** The user accepted this entry, with these decisions:
+  - an explicit `WITHDRAWN` state, with the withdrawn plan and its installments retained in their tables;
+  - conditional approval and withdrawal updates;
+  - active-plan uniqueness;
+  - the currently assigned Travel Consultant and the currently assigned Finance/Accounting user both authorized to withdraw, with a reason;
+  - the existence of any Payment independently keeping the Booking's financials locked.
+  The acceptance followed the same internal-consistency review as D-056.
+- **Context:** D-019 allows one `PaymentPlan` per Booking (`PaymentPlan.bookingId @unique`) and locks `Booking.totalAmount`/`currencyCode` once any plan exists. D-054 defines proposal and approval, but no way to correct or remove a plan before approval. So a wrong installment structure, or a wrong total discovered after a plan is proposed but before it is approved, blocks the Booking permanently: a second proposal returns `PAYMENT_PLAN_CONFLICT`, and the financials cannot be corrected (D-056 §2). This entry adds one pre-approval action. It is not the deferred post-approval Installment amendment workflow (D-019; D-056 §4).
+
+  **1. Plan states and transitions.**
+  - An explicit `PaymentPlan.status` has three values: `PROPOSED`, `APPROVED`, and `WITHDRAWN`.
+  - Permitted transitions:
+    - `PROPOSED → APPROVED` (the existing `approvePaymentPlan`);
+    - `PROPOSED → WITHDRAWN` (the new `withdrawPaymentPlan`).
+  - `APPROVED` and `WITHDRAWN` are terminal for this entry.
+    - An approved plan can never be withdrawn. Changing it remains the deferred post-approval amendment workflow.
+    - A withdrawn plan is never re-activated. Correcting a plan always means withdrawing it and proposing a new plan, which gets a new id.
+  - **Retained, not deleted.** A withdrawn plan and all its installments stay in their tables, unchanged apart from the plan's status and withdrawal fields. The `AuditLog` record (§5) is additional to them, not a substitute.
+  - **Booking status.** Withdrawal is permitted in every Booking status, including `CANCELLED` and `COMPLETED` (D-056 §5). It only removes an unapproved commitment. On a `CANCELLED` Booking, approval and new proposals remain blocked (D-056 §5).
+
+  **2. Required migration** (stage P2 in D-056 §7; forward-only, like every migration in this project). Prisma cannot express a partial unique index, so the index is migration-only, following `installment_active_deposit_key` and `staff_assignment_active_booking_role_key`.
+  - (1) Create enum `PaymentPlanStatus` (`PROPOSED`, `APPROVED`, `WITHDRAWN`).
+  - (2) Add `payment_plan.status` (nullable at first), `withdrawnAt TIMESTAMP(3)`, `withdrawnByStaffUserId TEXT` (FK to `user`, `ON DELETE RESTRICT`, indexed), and `withdrawalReason TEXT`.
+  - (3) Backfill: `status = CASE WHEN "approvedAt" IS NULL THEN 'PROPOSED' ELSE 'APPROVED' END`. On September 25, 2026 neither `heritage_v3_dev` nor `heritage_v3_test` has any `payment_plan` rows, so the backfill updates 0 rows there. Then set `status` `NOT NULL` with default `PROPOSED`.
+  - (4) CHECK constraints:
+    - `payment_plan_status_approval`: `("status" = 'APPROVED') = ("approvedAt" IS NOT NULL)`;
+    - `payment_plan_status_withdrawal`: `("status" = 'WITHDRAWN') = ("withdrawnAt" IS NOT NULL)`;
+    - `payment_plan_withdrawal_pairing`: `withdrawnAt`, `withdrawnByStaffUserId`, and `withdrawalReason` are all null or all set;
+    - `payment_plan_withdrawal_reason_required`: a non-blank reason when set.
+    With the existing `payment_plan_approval_pairing`, these make a plan's approval and withdrawal fields impossible to contradict its status.
+  - (5) **Active-plan uniqueness:** drop the unique index `payment_plan_bookingId_key` and create `payment_plan_active_booking_key` = `UNIQUE ("bookingId") WHERE "status" <> 'WITHDRAWN'`. At most one proposed-or-approved plan exists per Booking, and any number of withdrawn plans may precede it.
+  - (6) **Prisma schema:** remove `@unique` from `PaymentPlan.bookingId` and add `@@index([bookingId])`. `Booking.paymentPlan PaymentPlan?` becomes `Booking.paymentPlans PaymentPlan[]`. Add the enum, the status field, and the withdrawal fields.
+  - **Compatibility and rollback.** Pre-P3 code is not compatible with the migrated schema. Its approval sets `approvedAt` without `status`, so every approval fails the `payment_plan_status_approval` CHECK from the moment the migration is applied. Once any plan has been withdrawn, it would also read a withdrawn plan as the Booking's plan. So:
+    - no shared database receives the migration without P3's code (D-056 §7);
+    - a code-only rollback against a migrated database is unsafe, as with D-054 §16's correction.
+  - **Procedure for each shared database** (`heritage_v3_test` first, then `heritage_v3_dev`, only with P3's code; the same discipline used for `20260925000000_staff_assignment_role_backfill_correction`):
+    - **Pre-checks:**
+      - a clean worktree at the reviewed commit containing both the migration and P3's code;
+      - `DATABASE_URL` verified to resolve to `localhost:5432` and the intended database, without printing credentials;
+      - `prisma migrate status` showing only this migration pending and no failed migration;
+      - the migration file's working-copy bytes matching the committed file;
+      - read-only counts of `payment_plan` rows by approval state and of Bookings with more than one plan (expected 0).
+    - **Backup:** a verified `pg_dump` (custom format), confirmed by `pg_restore --list` including the `payment_plan` and `installment` data, kept private.
+    - **Apply:** `prisma migrate deploy` with an explicitly set `DATABASE_URL`.
+    - **Post-checks:**
+      - `prisma migrate status` up to date;
+      - a completed `_prisma_migrations` record;
+      - catalog checks of the enum, columns, CHECK constraints, and `payment_plan_active_booking_key`;
+      - backfilled `status` values matching `approvedAt` exactly;
+      - on `heritage_v3_test`, the full unit and integration suites run with P3's code before `heritage_v3_dev` is touched.
+    - Any failure stops the rollout without retrying or running `prisma migrate resolve`.
+
+  **3. Query filtering** (stage P3). Every plan read in `features/payments` becomes state-aware:
+  - **Active-plan reads** use `status <> 'WITHDRAWN'`: `findPaymentPlanByBookingIdForActor` (`repository.ts:129`), which is also the proposal's existing-plan check (`service.ts:348`), and `findBookingPaymentSummaryData`'s plan selection (`repository.ts:870`).
+  - **Approved-only reads** use `status = 'APPROVED'` in place of `approvedAt IS NOT NULL`: the allocation eligibility read `findInstallmentForAllocation` (`repository.ts:260`) and `findApprovedBookingIdsForClient` (`repository.ts:968`). Allocations therefore can never target a withdrawn plan's installments, and withdrawn plans never reach the client.
+  - **Id-based reads:** `findPaymentPlanWithBookingForActor` (`repository.ts:148`) returns the plan in any state. Each caller applies its own state guard (§4).
+  - **Writes:** `createPaymentPlanWithInstallments` (`repository.ts:185`) writes `status = PROPOSED`. `approvePaymentPlanRow` (`repository.ts:232`) writes `status = APPROVED` together with `approvedAt`/`approvedByStaffUserId`, and becomes a conditional update on `status = 'PROPOSED'`.
+  - **History:** a staff read may list a Booking's withdrawn plans with their installments, for Stage 3. Clients never see them (D-054 §7).
+
+  **4. Guards, authorization, and the approval-versus-withdrawal race.**
+  - **Who may withdraw.** The Travel Consultant who currently holds the Booking's active Travel Consultant assignment, or the Finance/Accounting user who currently holds its active Finance/Accounting assignment. Authorization is booking-scoped through `bookingAssignmentFilter`: the plan is looked up only through that actor-scoped read, so an unassigned caller learns nothing about it.
+    - Admin/Manager stays read-only (D-054 §3). Visa Documentation Staff and Client are refused.
+    - A reason is required.
+  - **Withdrawal guards,** checked in one serializable transaction:
+    - the plan is `PROPOSED`;
+    - no `PaymentAllocation` targets any of its installments. This is already impossible before approval, and the check stays as defense in depth.
+    An `APPROVED` plan is refused with the safe `PAYMENT_PLAN_CONFLICT` (409).
+  - **Approval guard.** `approvePaymentPlan` now requires `status = 'PROPOSED'`, not only `approvedAt IS NULL`. D-056 §5's `CANCELLED` rule also applies to it.
+  - **The race.** Both operations run under serializable isolation, and each performs a conditional update: `UPDATE payment_plan ... WHERE id = $1 AND status = 'PROPOSED'`. Exactly one can succeed.
+    - If approval commits first, withdrawal either fails its guard or updates no row, and returns `PAYMENT_PLAN_CONFLICT`.
+    - If withdrawal commits first, approval fails the same way.
+    - A serialization failure is retried by `runSerializableWithRetry` and then reaches the same guard. Neither side can produce a plan that is both approved and withdrawn, which the §2 CHECK constraints also forbid.
+  - **A new proposal racing a withdrawal.** The proposal's existing-plan check sees the withdrawing plan until the withdrawal commits. `payment_plan_active_booking_key` then prevents a second active plan. A lost race maps to `PAYMENT_PLAN_CONFLICT`. The real Prisma error shape for this partial index must be verified by a real-database test before any classifier relies on it, as was done for D-054 §17 Rule 6.
+  - **Repeat requests.** The request names the plan's id. Withdrawing a plan that is already `WITHDRAWN` returns it unchanged and writes nothing, whoever sends the repeat and whatever reason it carries. This is safe because the state is explicit, and it mirrors `setAssignment`'s same-state no-op.
+
+  **5. Audit.** In the same transaction: `AuditLog` action `PAYMENT_PLAN_WITHDRAWN`, `entityType: 'PaymentPlan'`, `entityId` the plan's id, with the acting user.
+  - `beforeState` is the complete snapshot: `sanitizePaymentPlanSnapshot` extended with `status`, plus every installment's `sequenceNumber`, `isDeposit`, `amount` (decimal string), and `dueDate`.
+  - `afterState` is `{ status: 'WITHDRAWN', withdrawnAt, withdrawnByStaffUserId, reason }`.
+  - `sanitizePaymentPlanSnapshot` gains `status` for every plan audit record.
+
+  **6. Effect on the financial lock.** The D-019 lock is amended (D-056 §2): `totalAmount` and `currencyCode` are locked while the Booking has any plan that is not `WITHDRAWN`, **or** any `Payment` in any status. These are two independent conditions.
+  - Withdrawing the only active plan releases the plan's part of the lock.
+  - The existence of any Payment — `PENDING`, `CONFIRMED`, `REVERSED`, or `REFUNDED` — keeps the Booking locked by itself, with or without an active plan.
+
+  **7. Exactly how this changes D-019 and D-054.** Dated pointers to this entry and D-056 are added to D-019 and D-054 on acceptance.
+  - **D-019:**
+    - "One `PaymentPlan` per `Booking` for the MVP (`PaymentPlan.bookingId @unique`)" becomes "at most one non-withdrawn `PaymentPlan` per Booking", enforced by the partial unique index.
+    - "neither may change once a `PaymentPlan` or `Payment` exists" becomes "once a non-withdrawn `PaymentPlan` or any `Payment` exists".
+    - `PaymentPlan` gains a stored status and withdrawal fields. D-019 derived plan state from `approvedAt`; the new CHECK constraints keep the stored status consistent with it.
+    - D-019's post-approval amendment deferral and its append-only rules are unchanged.
+  - **D-054:**
+    - §3 (roles): the assigned Travel Consultant and the assigned Finance/Accounting user may withdraw an unapproved plan, and Admin/Manager remains read-only.
+    - §4 (lifecycle): the plan lifecycle becomes `PROPOSED → APPROVED | WITHDRAWN`.
+    - §6 (admin operations): withdrawal is added.
+    - §8 (audit): `PAYMENT_PLAN_WITHDRAWN` is added.
+    - §10 (stages): P2 and P3 are added before Stage 3.
+    - §13 (rollback): the new migration's rollback note in §2 applies.
+    - §7 (client view) is unchanged: clients still see only approved plans.
+
+  **8. Example.** Ana proposes a PHP 115,000.00 plan: a 35,000.00 deposit and two installments of 40,000.00. Before approving, Ben notices the agreed total was PHP 110,000.00.
+  - Ben withdraws the plan with the reason "Total should be 110,000.00 per accepted proposal". The plan and its three installments remain, with status `WITHDRAWN`, and one `PAYMENT_PLAN_WITHDRAWN` record holds the full snapshot.
+  - No active plan and no Payment exist, so Ben corrects the total, producing `BOOKING_FINANCIALS_CHANGED`.
+  - Ana proposes a new plan summing to 110,000.00, which gets a new id, and Ben approves it.
+  - Had a PHP 10,000.00 payment already been recorded, the withdrawal would still succeed, but the Payment alone would keep the total locked. The corrected total would then wait for `PaymentAdjustment` (D-056 §4).
+
+  **9. Tests** (stage P3; unit and real-database):
+  - **Migration and schema:** the backfill; each CHECK constraint; the partial unique index.
+  - **Withdrawal:** by each authorized role; refusal for Admin/Manager, Visa Documentation Staff, Client, and an unassigned actor (not revealing the plan); refusal for an approved plan; withdrawal on a `CANCELLED` Booking.
+  - **State and races:**
+    - approval refused for a withdrawn plan;
+    - the approval-versus-withdrawal race;
+    - a proposal racing a withdrawal, including the real P2002 shape;
+    - repeat withdrawal writing nothing.
+  - **State-aware reads:** allocation and client-summary reads ignoring withdrawn plans.
+  - **The lock:** released with no Payment, kept with a Payment in each status.
+  - **Audit:** the snapshot content.
+
+- **Rationale:** A proposed plan is a draft of commercial terms, not a financial event. An explicit `WITHDRAWN` state keeps the withdrawn plan and its installments as first-class history, consistent with D-019's append-only preference and blueprint §11.5's history-preservation rule, while removing a permanent dead end before approval. D-019's post-approval rules are untouched.
+- **Constraint:** A documentation-only decision. It applies only before approval. It does not create the post-approval amendment workflow, `PaymentAdjustment`, or any in-place edit of a plan.
+- **Deferred:** everything after approval (D-056 §4 and §8).
+- **Effect:** Establishes the accepted contract for plan withdrawal and explicit plan state, and amends D-019 and D-054 as listed in §7. Stage P2 (design, and isolated verification only) and stage P3 (code, plus the coordinated shared-database application) each proceed only under their own separate authorization (D-056 §7).
 
 ---
 
