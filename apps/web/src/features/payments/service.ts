@@ -16,7 +16,9 @@ import {
   RECEIPT_AUDIT_ENTITY_TYPE,
   sanitizeAllocationSnapshot,
   sanitizePaymentPlanSnapshot,
+  sanitizePaymentRefundBeforeSnapshot,
   sanitizePaymentRefundSnapshot,
+  sanitizePaymentStatusChangeSnapshot,
   sanitizePaymentStatusSnapshot,
   sanitizeReceiptSnapshot,
 } from './audit';
@@ -118,20 +120,37 @@ function isOtherKnownConflict(error: unknown): boolean {
   return isResidualDatabaseConflict(error);
 }
 
+// A duplicate PaymentStatusHistory.idempotencyKey. That row is only ever
+// written as a nested create inside a Payment create or update, and Prisma
+// reports the violation against the parent model: `modelName: 'Payment'`
+// with the history row's `idempotencyKey` field (verified against
+// PostgreSQL in service.integration.test.ts). Payment has no
+// `idempotencyKey` field of its own, so this match is unambiguous.
+function isStatusHistoryKeyViolation(error: unknown): boolean {
+  return isUniqueViolationOn(error, 'Payment', ['idempotencyKey']);
+}
+
 // --- Idempotent-replay resolution (D-019; D-054 §8) ---
 // A retry is answered with its own prior result only when the stored record
 // matches the request on every identifying field — the same Payment, the
-// same target status or allocation, the same amount. A key already used for
-// anything else is IDEMPOTENCY_KEY_CONFLICT, never a "success" that hands
-// back an unrelated record. Every replay also re-reads the Payment through
-// the actor-scoped `findPaymentForActor`, so a key can never be used to read
-// a Payment the actor is not assigned to (.claude/rules/admin-dashboard.md's
+// same target status or allocation, the same amount. A key the same kind of
+// operation already used for a different request is IDEMPOTENCY_KEY_CONFLICT,
+// never a "success" that hands back an unrelated record. Each operation
+// checks only its own key table (D-054 §8's per-operation retry guarantee),
+// so reuse of a key across different kinds of operation is not generally
+// detected. recordPayment, confirmPayment, and reversePayment share
+// PaymentStatusHistory's key column, so a key used by one of them is a
+// conflict for the others; refundPayment additionally checks that column
+// because a completing refund writes its key there too. Every replay also
+// re-reads the Payment through the actor-scoped `findPaymentForActor`, so a
+// key can never be used to read a Payment the actor is not assigned to
+// (.claude/rules/admin-dashboard.md's
 // "every fetch of a specific record re-checks authorization").
 
 function idempotencyKeyConflict(): PaymentError {
   return new PaymentError(
     'IDEMPOTENCY_KEY_CONFLICT',
-    'This idempotency key has already been used for a different payment operation.',
+    'This idempotency key has already been used for a different request.',
   );
 }
 
@@ -143,6 +162,33 @@ async function findScopedPaymentOrForbidden(
   const payment = await repository.findPaymentForActor(db, actor, paymentId);
   if (!payment) {
     throw new PaymentError('PAYMENT_FORBIDDEN', 'Payment not found or not accessible.');
+  }
+  return payment;
+}
+
+/**
+ * recordPayment's replay (D-054 §17 Rule 6). Called only after the actor's
+ * access to `input.bookingId` has been verified, so an unassigned caller
+ * learns nothing about a key. The key must name a Payment's initial PENDING
+ * row — never a later status change — and that Payment must belong to the
+ * same Booking with the same amount; anything else is
+ * IDEMPOTENCY_KEY_CONFLICT, never the other Payment. A replay returns the
+ * Payment as it is now, so a retry after the Payment was confirmed,
+ * reversed, or refunded returns it in that status and creates nothing.
+ */
+async function resolveRecordReplay(
+  db: Prisma.TransactionClient,
+  actor: PaymentActor,
+  input: RecordPaymentInput,
+): Promise<PaymentRecord | null> {
+  const history = await repository.findStatusHistoryByIdempotencyKey(db, input.idempotencyKey);
+  if (!history) return null;
+  if (history.previousStatus !== null || history.newStatus !== PaymentStatus.PENDING) {
+    throw idempotencyKeyConflict();
+  }
+  const payment = await repository.findPaymentForActor(db, actor, history.paymentId);
+  if (!payment || payment.bookingId !== input.bookingId || !payment.amount.equals(input.amount)) {
+    throw idempotencyKeyConflict();
   }
   return payment;
 }
@@ -435,6 +481,14 @@ export async function approvePaymentPlan(
  * integration exists or is authorized. The created Payment starts `PENDING`
  * (D-019/D-054 §4) — a separate `confirmPayment` call is required before it
  * counts toward any balance.
+ *
+ * Idempotent by the required `idempotencyKey` (D-054 §17 Rule 6), stored on
+ * the new Payment's initial PENDING status-history row: a retry with the
+ * same key, Booking, and amount returns the original Payment (in its
+ * current status) and writes nothing; see `resolveRecordReplay`. Two
+ * genuine payments of equal amount need distinct keys. A concurrent
+ * duplicate loses on the key's unique index (or a serialization failure,
+ * retried) and is answered by the same replay.
  */
 export async function recordPayment(
   actor: AuthenticatedUser,
@@ -451,6 +505,10 @@ export async function recordPayment(
       );
       if (!booking) {
         throw new PaymentError('BOOKING_FORBIDDEN', 'Booking not found or not accessible.');
+      }
+      const replay = await resolveRecordReplay(tx, paymentActor, input);
+      if (replay) {
+        return replay;
       }
       // D-054 §17 Rule 4: a Payment against a Booking with no currency could
       // never receive a Receipt. D-019's booking_financials_pairing
@@ -471,6 +529,7 @@ export async function recordPayment(
         clientId: booking.clientId,
         amount: input.amount,
         changedByUserId: paymentActor.id,
+        idempotencyKey: input.idempotencyKey,
       });
 
       await repository.insertAuditLog(tx, {
@@ -485,6 +544,13 @@ export async function recordPayment(
     });
   } catch (error) {
     if (error instanceof PaymentError) throw error;
+    if (isStatusHistoryKeyViolation(error)) {
+      // The losing side of a concurrent duplicate. Access to the Booking was
+      // verified in the rolled-back attempt; the replay re-reads the Payment
+      // through the actor-scoped lookup.
+      const replay = await resolveRecordReplay(prisma, paymentActor, input);
+      if (replay) return replay;
+    }
     if (isOtherKnownConflict(error)) {
       throw new PaymentError(
         'PAYMENT_CONFLICT',
@@ -543,14 +609,14 @@ export async function confirmPayment(
         entityType: PAYMENT_AUDIT_ENTITY_TYPE,
         entityId: updated.id,
         beforeState: sanitizePaymentStatusSnapshot(found.status),
-        afterState: sanitizePaymentStatusSnapshot(updated.status),
+        afterState: sanitizePaymentStatusChangeSnapshot(updated.status, input.reason),
       });
 
       return updated;
     });
   } catch (error) {
     if (error instanceof PaymentError) throw error;
-    if (isUniqueViolationOn(error, 'PaymentStatusHistory', ['idempotencyKey'])) {
+    if (isStatusHistoryKeyViolation(error)) {
       const replay = await resolveStatusTransitionReplay(
         prisma,
         paymentActor,
@@ -626,14 +692,14 @@ export async function reversePayment(
         entityType: PAYMENT_AUDIT_ENTITY_TYPE,
         entityId: updated.id,
         beforeState: sanitizePaymentStatusSnapshot(found.status),
-        afterState: sanitizePaymentStatusSnapshot(updated.status),
+        afterState: sanitizePaymentStatusChangeSnapshot(updated.status, input.reason),
       });
 
       return updated;
     });
   } catch (error) {
     if (error instanceof PaymentError) throw error;
-    if (isUniqueViolationOn(error, 'PaymentStatusHistory', ['idempotencyKey'])) {
+    if (isStatusHistoryKeyViolation(error)) {
       const replay = await resolveStatusTransitionReplay(
         prisma,
         paymentActor,
@@ -763,20 +829,28 @@ export async function refundPayment(
         allocationId: input.allocationId,
       });
 
+      const completesRefund = newRefundTotal.equals(found.amount);
       await repository.insertAuditLog(tx, {
         actorId: paymentActor.id,
         action: PAYMENT_AUDIT_ACTIONS.PAYMENT_REFUNDED,
         entityType: PAYMENT_AUDIT_ENTITY_TYPE,
         entityId: found.id,
+        beforeState: sanitizePaymentRefundBeforeSnapshot({
+          status: found.status,
+          refundedTotal: existingRefundTotal.toFixed(2),
+        }),
         afterState: sanitizePaymentRefundSnapshot({
           paymentId: found.id,
           amount: input.amount,
           reason: input.reason,
+          allocationId: input.allocationId ?? null,
+          status: completesRefund ? PaymentStatus.REFUNDED : found.status,
+          refundedTotal: newRefundTotal.toFixed(2),
         }),
       });
 
       let payment: PaymentRecord = found;
-      if (newRefundTotal.equals(found.amount)) {
+      if (completesRefund) {
         payment = await repository.transitionPaymentStatus(tx, {
           paymentId: found.id,
           previousStatus: found.status,
@@ -792,7 +866,7 @@ export async function refundPayment(
           entityType: PAYMENT_AUDIT_ENTITY_TYPE,
           entityId: payment.id,
           beforeState: sanitizePaymentStatusSnapshot(found.status),
-          afterState: sanitizePaymentStatusSnapshot(payment.status),
+          afterState: sanitizePaymentStatusChangeSnapshot(payment.status, input.reason),
         });
       }
 

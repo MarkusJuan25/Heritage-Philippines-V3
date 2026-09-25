@@ -173,6 +173,8 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     try {
       if (prisma) {
         try {
+          // ClientProfile is onDelete:Restrict on both its User and Client.
+          await prisma.clientProfile.deleteMany({ where: { userId: { in: actorUserIds } } });
           await prisma.receipt.deleteMany({ where: { issuedByStaffUserId: { in: actorUserIds } } });
           await prisma.paymentRefundAllocation.deleteMany({
             where: { paymentRefund: { performedByStaffUserId: { in: actorUserIds } } },
@@ -236,6 +238,45 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       else process.env.ACTIVATION_RATE_LIMIT_HMAC_SECRET = originalRateLimitSecret;
     }
   });
+
+  /** A user created by a test itself; cleaned up with the shared actors. */
+  async function createUserFixture(
+    role: 'FINANCE_ACCOUNTING' | 'CLIENT',
+  ): Promise<AuthenticatedUser> {
+    const id = randomUUID();
+    const email = `payments-integration-${role.toLowerCase()}-${randomUUID()}@example.test`;
+    const name = `Integration ${role}`;
+    await prisma!.user.create({ data: { id, name, email, role, isActive: true } });
+    actorUserIds.push(id);
+    return { id, name, email, role };
+  }
+
+  /** A booking with an approved plan and one confirmed payment of `paid`. */
+  async function createPaidBookingFixture(paid: string): Promise<{
+    bookingId: string;
+    clientId: string;
+    paymentId: string;
+  }> {
+    const { bookingId, clientId } = await createAssignedBookingFixture('500.00');
+    const plan = await proposePaymentPlan(tcActor, {
+      bookingId,
+      installments: [
+        { sequenceNumber: 1, isDeposit: true, amount: '500.00', dueDate: '2026-10-01' },
+      ],
+    });
+    await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: paid,
+      idempotencyKey: randomUUID(),
+    });
+    await confirmPayment(financeActor, {
+      paymentId: payment.id,
+      reason: 'Verified',
+      idempotencyKey: randomUUID(),
+    });
+    return { bookingId, clientId, paymentId: payment.id };
+  }
 
   async function createClientFixture(): Promise<{ id: string }> {
     const id = randomUUID();
@@ -341,7 +382,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     const approved = await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
     expect(approved.approvedAt).not.toBeNull();
 
-    const payment = await recordPayment(financeActor, { bookingId, amount: '200.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '200.00',
+      idempotencyKey: randomUUID(),
+    });
     expect(payment.status).toBe('PENDING');
 
     const confirmed = await confirmPayment(financeActor, {
@@ -398,7 +443,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       ],
     });
     await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
-    const payment = await recordPayment(financeActor, { bookingId, amount: '150.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '150.00',
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -412,7 +461,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
 
   it('is idempotent under a real concurrent retry: two confirmPayment calls with the same key confirm exactly once', async () => {
     const { bookingId } = await createAssignedBookingFixture('500.00');
-    const payment = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     const idempotencyKey = randomUUID();
 
     const [first, second] = await Promise.all([
@@ -431,7 +484,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
 
   it('records a partial refund without changing status, then completes it to REFUNDED', async () => {
     const { bookingId } = await createAssignedBookingFixture('500.00');
-    const payment = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -463,7 +520,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
 
   it('reaches every terminal state and proves no further transition is possible from it', async () => {
     const { bookingId } = await createAssignedBookingFixture('500.00');
-    const payment = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -510,7 +571,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       ],
     });
     await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
-    const payment = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -546,8 +611,16 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
 
   it('rejects reusing a confirmation key from one payment on another payment, leaving the second payment PENDING', async () => {
     const { bookingId } = await createAssignedBookingFixture('500.00');
-    const first = await recordPayment(financeActor, { bookingId, amount: '100.00' });
-    const second = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const first = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
+    const second = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     const idempotencyKey = randomUUID();
 
     await confirmPayment(financeActor, { paymentId: first.id, reason: 'Verified', idempotencyKey });
@@ -574,7 +647,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       ],
     });
     await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
-    const payment = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -646,7 +723,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       ],
     });
     await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
-    const payment = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -696,7 +777,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
   }
 
   async function confirmedPayment(bookingId: string, amount: string): Promise<string> {
-    const payment = await recordPayment(financeActor, { bookingId, amount });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount,
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -930,7 +1015,7 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     });
 
     await expect(
-      recordPayment(financeActor, { bookingId, amount: '100.00' }),
+      recordPayment(financeActor, { bookingId, amount: '100.00', idempotencyKey: randomUUID() }),
     ).rejects.toMatchObject({ code: 'BOOKING_CURRENCY_NOT_SET', status: 409 });
     expect(await prisma!.payment.count({ where: { bookingId } })).toBe(0);
     expect(
@@ -1110,7 +1195,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
         { sequenceNumber: 1, isDeposit: true, amount: '100.00', dueDate: '2026-10-01' },
       ],
     });
-    const payment = await recordPayment(financeActor, { bookingId, amount: '100.00' });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
     await confirmPayment(financeActor, {
       paymentId: payment.id,
       reason: 'Verified',
@@ -1222,5 +1311,611 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     } catch (error) {
       expect(error).toBeInstanceOf(PaymentError);
     }
+  });
+
+  it("returns a client only their own bookings' payment summaries and refuses another client's (ownership and isolation)", async () => {
+    const own = await createPaidBookingFixture('120.00');
+    const other = await createPaidBookingFixture('80.00');
+    const ownUser = await createUserFixture('CLIENT');
+    const otherUser = await createUserFixture('CLIENT');
+    await prisma!.clientProfile.create({
+      data: { id: randomUUID(), userId: ownUser.id, clientId: own.clientId },
+    });
+    await prisma!.clientProfile.create({
+      data: { id: randomUUID(), userId: otherUser.id, clientId: other.clientId },
+    });
+
+    const summaries = await getClientPaymentSummaries(ownUser, own.clientId);
+    expect(summaries.map((s) => s.bookingId)).toEqual([own.bookingId]);
+    expect(summaries[0]!.confirmedAmountPaid.toFixed(2)).toBe('120.00');
+    expect(summaries[0]!.remainingBalance?.toFixed(2)).toBe('380.00');
+    expect(summaries[0]!.payments.map((p) => p.id)).toEqual([own.paymentId]);
+    const serialized = JSON.stringify(summaries);
+    expect(serialized).not.toContain(other.bookingId);
+    expect(serialized).not.toContain(other.paymentId);
+
+    await expect(getClientPaymentSummaries(ownUser, other.clientId)).rejects.toMatchObject({
+      code: 'BOOKING_FORBIDDEN',
+    });
+    await expect(getClientPaymentSummaries(otherUser, own.clientId)).rejects.toMatchObject({
+      code: 'BOOKING_FORBIDDEN',
+    });
+
+    const otherSummaries = await getClientPaymentSummaries(otherUser, other.clientId);
+    expect(otherSummaries.map((s) => s.bookingId)).toEqual([other.bookingId]);
+    expect(otherSummaries[0]!.payments.map((p) => p.id)).toEqual([other.paymentId]);
+  });
+
+  it('denies a Finance/Accounting user whose only booking assignment is a stale Travel Consultant row or an ended Finance row (D-054 §16)', async () => {
+    const { bookingId } = await createAssignedBookingFixture('500.00');
+    const pending = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
+
+    // Stale role: assigned to this booking as a Travel Consultant, and a
+    // Finance/Accounting user now. The booking's active Travel Consultant
+    // slot is ended first, since only one may be active per booking and role.
+    const staleFinance = await createUserFixture('FINANCE_ACCOUNTING');
+    await prisma!.staffAssignment.updateMany({
+      where: { bookingId, role: 'TRAVEL_CONSULTANT', endedAt: null },
+      data: { endedAt: new Date() },
+    });
+    await prisma!.staffAssignment.create({
+      data: {
+        id: randomUUID(),
+        assignedStaffId: staleFinance.id,
+        assignedByUserId: adminActor.id,
+        role: 'TRAVEL_CONSULTANT',
+        bookingId,
+      },
+    });
+
+    // Ended: a Finance/Accounting assignment to this booking that has ended.
+    const endedFinance = await createUserFixture('FINANCE_ACCOUNTING');
+    await prisma!.staffAssignment.create({
+      data: {
+        id: randomUUID(),
+        assignedStaffId: endedFinance.id,
+        assignedByUserId: adminActor.id,
+        role: 'FINANCE_ACCOUNTING',
+        bookingId,
+        endedAt: new Date(),
+      },
+    });
+
+    for (const actor of [staleFinance, endedFinance]) {
+      await expect(
+        confirmPayment(actor, {
+          paymentId: pending.id,
+          reason: 'Verified',
+          idempotencyKey: randomUUID(),
+        }),
+      ).rejects.toMatchObject({ code: 'PAYMENT_FORBIDDEN' });
+      await expect(
+        recordPayment(actor, { bookingId, amount: '10.00', idempotencyKey: randomUUID() }),
+      ).rejects.toMatchObject({
+        code: 'BOOKING_FORBIDDEN',
+      });
+      await expect(getBookingPaymentSummaryForStaff(actor, bookingId)).rejects.toMatchObject({
+        code: 'BOOKING_FORBIDDEN',
+      });
+    }
+    const unchanged = await prisma!.payment.findUniqueOrThrow({ where: { id: pending.id } });
+    expect(unchanged.status).toBe('PENDING');
+    expect(await prisma!.payment.count({ where: { bookingId } })).toBe(1);
+
+    // Control: the currently assigned Finance/Accounting user still can.
+    const confirmed = await confirmPayment(financeActor, {
+      paymentId: pending.id,
+      reason: 'Verified',
+      idempotencyKey: randomUUID(),
+    });
+    expect(confirmed.status).toBe('CONFIRMED');
+  });
+
+  it('answers a retried refund with its own prior result without applying it twice, and rejects its key for a different refund (D-054 §8)', async () => {
+    const { bookingId } = await createAssignedBookingFixture('500.00');
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
+    await confirmPayment(financeActor, {
+      paymentId: payment.id,
+      reason: 'Verified',
+      idempotencyKey: randomUUID(),
+    });
+    const refundInput = {
+      paymentId: payment.id,
+      amount: '40.00',
+      reason: 'Partial cancellation',
+      idempotencyKey: randomUUID(),
+    };
+
+    const first = await refundPayment(financeActor, refundInput);
+    const retry = await refundPayment(financeActor, refundInput);
+    expect(retry.refund.id).toBe(first.refund.id);
+
+    await expect(
+      refundPayment(financeActor, { ...refundInput, amount: '10.00' }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+
+    expect(await prisma!.paymentRefund.count({ where: { paymentId: payment.id } })).toBe(1);
+    expect(
+      await prisma!.auditLog.count({ where: { entityId: payment.id, action: 'PAYMENT_REFUNDED' } }),
+    ).toBe(1);
+    const summary = await getBookingPaymentSummaryForStaff(financeActor, bookingId);
+    expect(summary.confirmedAmountPaid.toFixed(2)).toBe('60.00');
+  });
+
+  it('audits the reason and before/after values of confirmations, reversals, and refunds (blueprint §11.7)', async () => {
+    const { bookingId } = await createAssignedBookingFixture('500.00');
+    const refunded = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
+    await confirmPayment(financeActor, {
+      paymentId: refunded.id,
+      reason: 'Verified bank transfer',
+      idempotencyKey: randomUUID(),
+    });
+    await refundPayment(financeActor, {
+      paymentId: refunded.id,
+      amount: '40.00',
+      reason: 'Partial cancellation',
+      idempotencyKey: randomUUID(),
+    });
+    await refundPayment(financeActor, {
+      paymentId: refunded.id,
+      amount: '60.00',
+      reason: 'Remainder cancelled',
+      idempotencyKey: randomUUID(),
+    });
+
+    const reversed = await recordPayment(financeActor, {
+      bookingId,
+      amount: '50.00',
+      idempotencyKey: randomUUID(),
+    });
+    await confirmPayment(financeActor, {
+      paymentId: reversed.id,
+      reason: 'Verified deposit slip',
+      idempotencyKey: randomUUID(),
+    });
+    await reversePayment(financeActor, {
+      paymentId: reversed.id,
+      reason: 'Duplicate entry',
+      idempotencyKey: randomUUID(),
+    });
+
+    const entries = await prisma!.auditLog.findMany({
+      where: { entityId: { in: [refunded.id, reversed.id] } },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        entityId: true,
+        action: true,
+        actorId: true,
+        createdAt: true,
+        beforeState: true,
+        afterState: true,
+      },
+    });
+    // Acting user and timestamp (blueprint §11.7) on every entry: two
+    // PAYMENT_RECORDED, four status changes, and two refunds.
+    expect(entries).toHaveLength(8);
+    for (const entry of entries) {
+      expect(entry.actorId).toBe(financeActor.id);
+      expect(entry.createdAt).toBeInstanceOf(Date);
+    }
+    const statusChanges = (paymentId: string) =>
+      entries
+        .filter((e) => e.entityId === paymentId && e.action === 'PAYMENT_STATUS_CHANGED')
+        .map((e) => [e.beforeState, e.afterState]);
+
+    expect(statusChanges(refunded.id)).toEqual([
+      [{ status: 'PENDING' }, { status: 'CONFIRMED', reason: 'Verified bank transfer' }],
+      [{ status: 'CONFIRMED' }, { status: 'REFUNDED', reason: 'Remainder cancelled' }],
+    ]);
+    expect(statusChanges(reversed.id)).toEqual([
+      [{ status: 'PENDING' }, { status: 'CONFIRMED', reason: 'Verified deposit slip' }],
+      [{ status: 'CONFIRMED' }, { status: 'REVERSED', reason: 'Duplicate entry' }],
+    ]);
+    expect(
+      entries
+        .filter((e) => e.action === 'PAYMENT_REFUNDED')
+        .map((e) => [e.beforeState, e.afterState]),
+    ).toEqual([
+      [
+        { status: 'CONFIRMED', refundedTotal: '0.00' },
+        {
+          paymentId: refunded.id,
+          amount: '40.00',
+          reason: 'Partial cancellation',
+          allocationId: null,
+          status: 'CONFIRMED',
+          refundedTotal: '40.00',
+        },
+      ],
+      [
+        { status: 'CONFIRMED', refundedTotal: '40.00' },
+        {
+          paymentId: refunded.id,
+          amount: '60.00',
+          reason: 'Remainder cancelled',
+          allocationId: null,
+          status: 'REFUNDED',
+          refundedTotal: '100.00',
+        },
+      ],
+    ]);
+  });
+
+  it('audits the allocation a linked refund reduces', async () => {
+    const { bookingId, paymentId } = await createPaidBookingFixture('100.00');
+    const [installment] = await prisma!.installment.findMany({
+      where: { paymentPlan: { bookingId } },
+    });
+    const allocation = await createAllocation(financeActor, {
+      paymentId,
+      installmentId: installment!.id,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
+
+    await refundPayment(financeActor, {
+      paymentId,
+      amount: '30.00',
+      reason: 'Excursion cancelled',
+      idempotencyKey: randomUUID(),
+      allocationId: allocation.id,
+    });
+
+    const entry = await prisma!.auditLog.findFirstOrThrow({
+      where: { entityId: paymentId, action: 'PAYMENT_REFUNDED' },
+    });
+    expect(entry.actorId).toBe(financeActor.id);
+    expect(entry.beforeState).toEqual({ status: 'CONFIRMED', refundedTotal: '0.00' });
+    expect(entry.afterState).toEqual({
+      paymentId,
+      amount: '30.00',
+      reason: 'Excursion cancelled',
+      allocationId: allocation.id,
+      status: 'CONFIRMED',
+      refundedTotal: '30.00',
+    });
+  });
+
+  describe('recordPayment idempotency (D-054 §17 Rule 6)', () => {
+    async function recordedRowCounts(bookingId: string) {
+      const paymentIds = (
+        await prisma!.payment.findMany({ where: { bookingId }, select: { id: true } })
+      ).map((p) => p.id);
+      return {
+        payments: paymentIds.length,
+        history: await prisma!.paymentStatusHistory.count({
+          where: { paymentId: { in: paymentIds } },
+        }),
+        recordedAudits: await prisma!.auditLog.count({
+          where: { entityId: { in: paymentIds }, action: 'PAYMENT_RECORDED' },
+        }),
+      };
+    }
+
+    it('returns the original payment for an identical retry and writes nothing more', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const input = { bookingId, amount: '200.00', idempotencyKey: randomUUID() };
+
+      const first = await recordPayment(financeActor, input);
+      const retry = await recordPayment(financeActor, input);
+
+      expect(retry).toEqual(first);
+      expect(await recordedRowCounts(bookingId)).toEqual({
+        payments: 1,
+        history: 1,
+        recordedAudits: 1,
+      });
+      const history = await prisma!.paymentStatusHistory.findFirstOrThrow({
+        where: { paymentId: first.id },
+      });
+      expect(history).toMatchObject({
+        previousStatus: null,
+        newStatus: 'PENDING',
+        idempotencyKey: input.idempotencyKey,
+      });
+    });
+
+    it('rejects the key for a different amount or booking, and refuses an unassigned user before revealing it', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const { bookingId: otherBookingId } = await createAssignedBookingFixture('500.00');
+      const idempotencyKey = randomUUID();
+      await recordPayment(financeActor, { bookingId, amount: '200.00', idempotencyKey });
+
+      for (const amount of ['250.00', '200.01', '199.99']) {
+        await expect(
+          recordPayment(financeActor, { bookingId, amount, idempotencyKey }),
+        ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+      }
+      await expect(
+        recordPayment(financeActor, {
+          bookingId: otherBookingId,
+          amount: '200.00',
+          idempotencyKey,
+        }),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+
+      const unassignedFinance = await createUserFixture('FINANCE_ACCOUNTING');
+      await expect(
+        recordPayment(unassignedFinance, { bookingId, amount: '200.00', idempotencyKey }),
+      ).rejects.toMatchObject({ code: 'BOOKING_FORBIDDEN' });
+
+      expect(await recordedRowCounts(bookingId)).toEqual({
+        payments: 1,
+        history: 1,
+        recordedAudits: 1,
+      });
+      expect(await recordedRowCounts(otherBookingId)).toEqual({
+        payments: 0,
+        history: 0,
+        recordedAudits: 0,
+      });
+    });
+
+    it('answers a retry after the payment was fully refunded with it in REFUNDED status, creating nothing', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const input = { bookingId, amount: '100.00', idempotencyKey: randomUUID() };
+      const original = await recordPayment(financeActor, input);
+      await confirmPayment(financeActor, {
+        paymentId: original.id,
+        reason: 'Verified',
+        idempotencyKey: randomUUID(),
+      });
+      await refundPayment(financeActor, {
+        paymentId: original.id,
+        amount: '100.00',
+        reason: 'Trip cancelled',
+        idempotencyKey: randomUUID(),
+      });
+
+      const retry = await recordPayment(financeActor, input);
+      expect(retry.id).toBe(original.id);
+      expect(retry.status).toBe('REFUNDED');
+      expect(await recordedRowCounts(bookingId)).toEqual({
+        payments: 1,
+        history: 3,
+        recordedAudits: 1,
+      });
+    });
+
+    it('returns the same payment when another Finance user now assigned to the booking retries the key (the acting user is not part of the request)', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const input = { bookingId, amount: '100.00', idempotencyKey: randomUUID() };
+      const original = await recordPayment(financeActor, input);
+
+      const nextFinance = await createUserFixture('FINANCE_ACCOUNTING');
+      await prisma!.staffAssignment.updateMany({
+        where: { bookingId, role: 'FINANCE_ACCOUNTING', endedAt: null },
+        data: { endedAt: new Date() },
+      });
+      await prisma!.staffAssignment.create({
+        data: {
+          id: randomUUID(),
+          assignedStaffId: nextFinance.id,
+          assignedByUserId: adminActor.id,
+          role: 'FINANCE_ACCOUNTING',
+          bookingId,
+        },
+      });
+
+      await expect(recordPayment(nextFinance, input)).resolves.toEqual(original);
+      // The previous user's assignment has ended, so it may no longer replay.
+      await expect(recordPayment(financeActor, input)).rejects.toMatchObject({
+        code: 'BOOKING_FORBIDDEN',
+      });
+      expect(await recordedRowCounts(bookingId)).toEqual({
+        payments: 1,
+        history: 1,
+        recordedAudits: 1,
+      });
+    });
+
+    it('resolves concurrent identical requests to one PENDING payment, never a second payment or a raw error', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const input = { bookingId, amount: '200.00', idempotencyKey: randomUUID() };
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 5 }, () => recordPayment(financeActor, input)),
+      );
+
+      expect(await recordedRowCounts(bookingId)).toEqual({
+        payments: 1,
+        history: 1,
+        recordedAudits: 1,
+      });
+      const [payment] = await prisma!.payment.findMany({ where: { bookingId } });
+      expect(payment!.status).toBe('PENDING');
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          expect(result.value.id).toBe(payment!.id);
+        } else {
+          expect(result.reason).toBeInstanceOf(PaymentError);
+          expect(result.reason).toMatchObject({ code: 'PAYMENT_CONFLICT' });
+        }
+      }
+      expect(results.some((r) => r.status === 'fulfilled')).toBe(true);
+    });
+
+    it('never turns a key used by confirmPayment or reversePayment into a new payment, and the reverse', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const payment = await recordPayment(financeActor, {
+        bookingId,
+        amount: '100.00',
+        idempotencyKey: randomUUID(),
+      });
+      const confirmKey = randomUUID();
+      const reverseKey = randomUUID();
+      await confirmPayment(financeActor, {
+        paymentId: payment.id,
+        reason: 'Verified',
+        idempotencyKey: confirmKey,
+      });
+      await reversePayment(financeActor, {
+        paymentId: payment.id,
+        reason: 'Duplicate entry',
+        idempotencyKey: reverseKey,
+      });
+
+      for (const idempotencyKey of [confirmKey, reverseKey]) {
+        await expect(
+          recordPayment(financeActor, { bookingId, amount: '100.00', idempotencyKey }),
+        ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+      }
+
+      const recordKey = randomUUID();
+      const second = await recordPayment(financeActor, {
+        bookingId,
+        amount: '100.00',
+        idempotencyKey: recordKey,
+      });
+      await expect(
+        confirmPayment(financeActor, {
+          paymentId: second.id,
+          reason: 'Verified',
+          idempotencyKey: recordKey,
+        }),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT' });
+
+      expect((await recordedRowCounts(bookingId)).payments).toBe(2);
+      const secondNow = await prisma!.payment.findUniqueOrThrow({ where: { id: second.id } });
+      expect(secondNow.status).toBe('PENDING');
+    });
+
+    it('records two genuine payments of equal amount when their keys differ', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const first = await recordPayment(financeActor, {
+        bookingId,
+        amount: '100.00',
+        idempotencyKey: randomUUID(),
+      });
+      const second = await recordPayment(financeActor, {
+        bookingId,
+        amount: '100.00',
+        idempotencyKey: randomUUID(),
+      });
+
+      expect(second.id).not.toBe(first.id);
+      expect(await recordedRowCounts(bookingId)).toEqual({
+        payments: 2,
+        history: 2,
+        recordedAudits: 2,
+      });
+    });
+
+    it('answers a retry after the payment changed status with the payment in its current status, creating nothing', async () => {
+      const { bookingId } = await createAssignedBookingFixture('500.00');
+      const input = { bookingId, amount: '100.00', idempotencyKey: randomUUID() };
+      const original = await recordPayment(financeActor, input);
+
+      await confirmPayment(financeActor, {
+        paymentId: original.id,
+        reason: 'Verified',
+        idempotencyKey: randomUUID(),
+      });
+      const afterConfirm = await recordPayment(financeActor, input);
+      expect(afterConfirm.id).toBe(original.id);
+      expect(afterConfirm.status).toBe('CONFIRMED');
+
+      await reversePayment(financeActor, {
+        paymentId: original.id,
+        reason: 'Wrong booking',
+        idempotencyKey: randomUUID(),
+      });
+      const afterReverse = await recordPayment(financeActor, input);
+      expect(afterReverse.id).toBe(original.id);
+      expect(afterReverse.status).toBe('REVERSED');
+
+      expect(await recordedRowCounts(bookingId)).toEqual({
+        payments: 1,
+        history: 3,
+        recordedAudits: 1,
+      });
+    });
+
+    it('reports a duplicate status-history key from a nested insert against the parent Payment model', async () => {
+      const repository = await import('./repository');
+      const { isUniqueViolationOn } = await import('@/lib/prisma-errors');
+      const { bookingId, clientId } = await createAssignedBookingFixture('500.00');
+      const recordKey = randomUUID();
+      await recordPayment(financeActor, { bookingId, amount: '100.00', idempotencyKey: recordKey });
+
+      // recordPayment's insert: a Payment with a nested initial history row.
+      const recordError = await repository
+        .createPendingPayment(prisma!, {
+          id: randomUUID(),
+          bookingId,
+          clientId,
+          amount: '100.00',
+          changedByUserId: financeActor.id,
+          idempotencyKey: recordKey,
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(isUniqueViolationOn(recordError, 'Payment', ['idempotencyKey'])).toBe(true);
+      expect(JSON.stringify((recordError as { meta?: unknown }).meta)).toContain(
+        'payment_status_history_idempotencyKey_key',
+      );
+
+      // confirmPayment's insert: a Payment update with a nested history row.
+      const second = await recordPayment(financeActor, {
+        bookingId,
+        amount: '100.00',
+        idempotencyKey: randomUUID(),
+      });
+      const transitionError = await repository
+        .transitionPaymentStatus(prisma!, {
+          paymentId: second.id,
+          previousStatus: 'PENDING',
+          newStatus: 'CONFIRMED',
+          changedByUserId: financeActor.id,
+          reason: 'Verified',
+          idempotencyKey: recordKey,
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(isUniqueViolationOn(transitionError, 'Payment', ['idempotencyKey'])).toBe(true);
+      expect(JSON.stringify((transitionError as { meta?: unknown }).meta)).toContain(
+        'payment_status_history_idempotencyKey_key',
+      );
+
+      expect((await recordedRowCounts(bookingId)).payments).toBe(2);
+      const secondNow = await prisma!.payment.findUniqueOrThrow({ where: { id: second.id } });
+      expect(secondNow.status).toBe('PENDING');
+
+      // An unrelated unique violation under the same parent model — a
+      // duplicate Payment id with a fresh key — is not classified as a key race.
+      const { uniqueViolation } = await import('@/lib/prisma-errors');
+      const idError = await repository
+        .createPendingPayment(prisma!, {
+          id: second.id,
+          bookingId,
+          clientId,
+          amount: '100.00',
+          changedByUserId: financeActor.id,
+          idempotencyKey: randomUUID(),
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(uniqueViolation(idError)).toEqual({ modelName: 'Payment', fields: ['id'] });
+      expect(isUniqueViolationOn(idError, 'Payment', ['idempotencyKey'])).toBe(false);
+      expect((await recordedRowCounts(bookingId)).payments).toBe(2);
+    });
   });
 });

@@ -379,7 +379,7 @@ describe('approvePaymentPlan', () => {
 });
 
 describe('recordPayment', () => {
-  const input = { bookingId: 'booking-1', amount: '150.00' };
+  const input = { bookingId: 'booking-1', amount: '150.00', idempotencyKey: 'record-1' };
 
   it('rejects a non-FINANCE_ACCOUNTING actor', async () => {
     await expectPaymentError(recordPayment(TRAVEL_CONSULTANT, input), 'ROLE_NOT_PERMITTED');
@@ -433,6 +433,129 @@ describe('recordPayment', () => {
     });
     expect(repositoryMocks.findPaymentPlanByBookingIdForActor).not.toHaveBeenCalled();
   });
+
+  describe('idempotency (D-054 §17 Rule 6)', () => {
+    const accessibleBooking = {
+      id: 'booking-1',
+      clientId: 'client-1',
+      totalAmount: d('500.00'),
+      currencyCode: 'PHP',
+    };
+    const initialRow = { paymentId: 'payment-1', previousStatus: null, newStatus: 'PENDING' };
+    const original = {
+      id: 'payment-1',
+      bookingId: 'booking-1',
+      clientId: 'client-1',
+      amount: d('150.00'),
+      status: 'PENDING',
+    };
+
+    beforeEach(() => {
+      repositoryMocks.findBookingFinancialsForActor.mockResolvedValue(accessibleBooking);
+    });
+
+    it("stores the key on the new payment's initial status-history row", async () => {
+      repositoryMocks.createPendingPayment.mockResolvedValue(original);
+      await recordPayment(FINANCE, input);
+      expect(repositoryMocks.createPendingPayment).toHaveBeenCalledWith(
+        TX_CLIENT,
+        expect.objectContaining({ idempotencyKey: 'record-1', amount: '150.00' }),
+      );
+    });
+
+    it('checks booking access before looking up the key', async () => {
+      repositoryMocks.findBookingFinancialsForActor.mockResolvedValue(null);
+      await expectPaymentError(recordPayment(FINANCE, input), 'BOOKING_FORBIDDEN');
+      expect(repositoryMocks.findStatusHistoryByIdempotencyKey).not.toHaveBeenCalled();
+    });
+
+    it('returns the original payment, in its current status, and writes nothing on a retry', async () => {
+      repositoryMocks.findStatusHistoryByIdempotencyKey.mockResolvedValue(initialRow);
+      repositoryMocks.findPaymentForActor.mockResolvedValue({ ...original, status: 'CONFIRMED' });
+
+      await expect(recordPayment(FINANCE, input)).resolves.toEqual({
+        ...original,
+        status: 'CONFIRMED',
+      });
+      expect(repositoryMocks.findPaymentForActor).toHaveBeenCalledWith(
+        TX_CLIENT,
+        { id: FINANCE.id, role: 'FINANCE_ACCOUNTING' },
+        'payment-1',
+      );
+      expect(repositoryMocks.createPendingPayment).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a different amount', { ...original, amount: d('150.01') }],
+      ['a different booking', { ...original, bookingId: 'booking-2' }],
+      ['a payment the actor cannot access', null],
+    ])('rejects the key when it names %s, without writing', async (_label, found) => {
+      repositoryMocks.findStatusHistoryByIdempotencyKey.mockResolvedValue(initialRow);
+      repositoryMocks.findPaymentForActor.mockResolvedValue(found);
+
+      await expectPaymentError(recordPayment(FINANCE, input), 'IDEMPOTENCY_KEY_CONFLICT');
+      expect(repositoryMocks.createPendingPayment).not.toHaveBeenCalled();
+      expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['CONFIRMED', 'PENDING'],
+      ['REVERSED', 'CONFIRMED'],
+      ['REFUNDED', 'CONFIRMED'],
+    ])(
+      'rejects a key already used for a %s transition, never creating a payment',
+      async (newStatus, previousStatus) => {
+        repositoryMocks.findStatusHistoryByIdempotencyKey.mockResolvedValue({
+          paymentId: 'payment-1',
+          previousStatus,
+          newStatus,
+        });
+
+        await expectPaymentError(recordPayment(FINANCE, input), 'IDEMPOTENCY_KEY_CONFLICT');
+        expect(repositoryMocks.findPaymentForActor).not.toHaveBeenCalled();
+        expect(repositoryMocks.createPendingPayment).not.toHaveBeenCalled();
+      },
+    );
+
+    it("answers the losing side of a concurrent duplicate with the winner's payment", async () => {
+      repositoryMocks.createPendingPayment.mockRejectedValue(
+        adapterUniqueViolation('Payment', ['idempotencyKey']),
+      );
+      repositoryMocks.findStatusHistoryByIdempotencyKey
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(initialRow);
+      repositoryMocks.findPaymentForActor.mockResolvedValue(original);
+
+      await expect(recordPayment(FINANCE, input)).resolves.toEqual(original);
+      expect(repositoryMocks.createPendingPayment).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['a duplicate Payment id', adapterUniqueViolation('Payment', ['id'])],
+      ['a refund key', adapterUniqueViolation('PaymentRefund', ['idempotencyKey'])],
+      ['an allocation key', adapterUniqueViolation('PaymentAllocation', ['idempotencyKey'])],
+    ])('never treats %s as a status-history key race', async (_label, violation) => {
+      repositoryMocks.createPendingPayment.mockRejectedValue(violation);
+
+      await expectPaymentError(recordPayment(FINANCE, input), 'PAYMENT_CONFLICT');
+      // Only the in-transaction lookup ran; no replay was attempted.
+      expect(repositoryMocks.findStatusHistoryByIdempotencyKey).toHaveBeenCalledTimes(1);
+      expect(repositoryMocks.findPaymentForActor).not.toHaveBeenCalled();
+    });
+
+    it('rejects the losing side when the concurrent winner recorded a different amount', async () => {
+      repositoryMocks.createPendingPayment.mockRejectedValue(
+        adapterUniqueViolation('Payment', ['idempotencyKey']),
+      );
+      repositoryMocks.findStatusHistoryByIdempotencyKey
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(initialRow);
+      repositoryMocks.findPaymentForActor.mockResolvedValue({ ...original, amount: d('99.00') });
+
+      await expectPaymentError(recordPayment(FINANCE, input), 'IDEMPOTENCY_KEY_CONFLICT');
+    });
+  });
 });
 
 describe('payment write conflicts (shared lib/prisma-errors.ts handling)', () => {
@@ -454,7 +577,7 @@ describe('payment write conflicts (shared lib/prisma-errors.ts handling)', () =>
       amount: d('150.00'),
     });
     repositoryMocks.transitionPaymentStatus.mockRejectedValue(
-      adapterUniqueViolation('PaymentStatusHistory', ['idempotencyKey']),
+      adapterUniqueViolation('Payment', ['idempotencyKey']),
     );
     // After the rolled-back attempt, the concurrent winner's row is visible.
     repositoryMocks.findStatusHistoryByIdempotencyKey
@@ -1524,5 +1647,124 @@ describe('getClientPaymentSummaries', () => {
     });
     expect(summary?.installments[0]).not.toHaveProperty('allocations');
     expect(summary?.payments[0]?.receipt?.receiptNumber).toBe('r-1');
+  });
+});
+
+describe('money-changing operations refuse every role except Finance/Accounting', () => {
+  const PAYMENT_ID = '00000000-0000-4000-8000-000000000001';
+  const OTHER_ID = '00000000-0000-4000-8000-000000000002';
+  const operations: [string, (actor: AuthenticatedUser) => Promise<unknown>][] = [
+    ['approvePaymentPlan', (actor) => approvePaymentPlan(actor, { paymentPlanId: PAYMENT_ID })],
+    [
+      'recordPayment',
+      (actor) =>
+        recordPayment(actor, { bookingId: OTHER_ID, amount: '10.00', idempotencyKey: 'k' }),
+    ],
+    [
+      'confirmPayment',
+      (actor) =>
+        confirmPayment(actor, { paymentId: PAYMENT_ID, reason: 'Verified', idempotencyKey: 'k' }),
+    ],
+    [
+      'reversePayment',
+      (actor) =>
+        reversePayment(actor, { paymentId: PAYMENT_ID, reason: 'Wrong', idempotencyKey: 'k' }),
+    ],
+    [
+      'refundPayment',
+      (actor) =>
+        refundPayment(actor, {
+          paymentId: PAYMENT_ID,
+          amount: '10.00',
+          reason: 'Refund',
+          idempotencyKey: 'k',
+        }),
+    ],
+    ['issueReceipt', (actor) => issueReceipt(actor, { paymentId: PAYMENT_ID })],
+    [
+      'createAllocation',
+      (actor) =>
+        createAllocation(actor, {
+          paymentId: PAYMENT_ID,
+          installmentId: OTHER_ID,
+          amount: '10.00',
+          idempotencyKey: 'k',
+        }),
+    ],
+    [
+      'reverseAllocation',
+      (actor) =>
+        reverseAllocation(actor, { allocationId: OTHER_ID, reason: 'Wrong', idempotencyKey: 'k' }),
+    ],
+  ];
+  const deniedActors = [TRAVEL_CONSULTANT, ADMIN_MANAGER, VISA, CLIENT_USER];
+
+  it.each(
+    operations.flatMap(([name, run]) =>
+      deniedActors.map((actor) => [name, actor.role, run, actor] as const),
+    ),
+  )('%s refuses %s before any database access', async (_name, _role, run, actor) => {
+    await expectPaymentError(run(actor), 'ROLE_NOT_PERMITTED');
+    expect(transactionMock).not.toHaveBeenCalled();
+    for (const mock of Object.values(repositoryMocks)) {
+      expect(mock).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('CHECK-constraint violations from payment writes stay generic errors (D-055)', () => {
+  // A CHECK violation exactly as the adapter reports it (Postgres 23514),
+  // mirroring lib/prisma-errors.test.ts's `rawCheckViolation`.
+  function rawCheckViolation(): Error {
+    const message = 'new row for relation "payment" violates check constraint "some_check"';
+    return Object.assign(new Error(message), {
+      name: 'DriverAdapterError',
+      cause: {
+        originalCode: '23514',
+        originalMessage: message,
+        kind: 'postgres',
+        detail: 'Failing row contains (private-client-value).',
+      },
+    });
+  }
+
+  it('confirmPayment propagates the violation unchanged, never as a PaymentError or a retry', async () => {
+    const violation = rawCheckViolation();
+    repositoryMocks.findPaymentForActor.mockResolvedValue({
+      id: 'payment-1',
+      status: 'PENDING',
+      amount: d('150.00'),
+    });
+    repositoryMocks.transitionPaymentStatus.mockRejectedValue(violation);
+
+    const promise = confirmPayment(FINANCE, {
+      paymentId: 'payment-1',
+      reason: 'Verified',
+      idempotencyKey: 'idem-1',
+    });
+    await expect(promise).rejects.toBe(violation);
+    await expect(promise).rejects.not.toBeInstanceOf(PaymentError);
+    expect(transactionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refundPayment propagates the violation unchanged, never as a PaymentError or a retry', async () => {
+    const violation = rawCheckViolation();
+    repositoryMocks.findPaymentForActor.mockResolvedValue({
+      id: 'payment-1',
+      status: 'CONFIRMED',
+      amount: d('150.00'),
+    });
+    repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('0.00'));
+    repositoryMocks.createRefund.mockRejectedValue(violation);
+
+    const promise = refundPayment(FINANCE, {
+      paymentId: 'payment-1',
+      amount: '50.00',
+      reason: 'Partial cancellation',
+      idempotencyKey: 'idem-1',
+    });
+    await expect(promise).rejects.toBe(violation);
+    await expect(promise).rejects.not.toBeInstanceOf(PaymentError);
+    expect(transactionMock).toHaveBeenCalledTimes(1);
   });
 });

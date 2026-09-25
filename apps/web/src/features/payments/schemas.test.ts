@@ -168,22 +168,61 @@ describe('approvePaymentPlanSchema', () => {
 });
 
 describe('recordPaymentSchema', () => {
-  it('accepts bookingId and amount, no idempotencyKey field', () => {
-    const result = recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '150.00' });
-    expect(result.success).toBe(true);
+  it('requires a non-empty idempotencyKey (D-054 §17 Rule 6)', () => {
     expect(
-      recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '150.00', idempotencyKey: 'x' })
+      recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '150.00', idempotencyKey: 'k' })
+        .success,
+    ).toBe(true);
+    expect(recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '150.00' }).success).toBe(
+      false,
+    );
+    expect(
+      recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '150.00', idempotencyKey: '' })
         .success,
     ).toBe(false);
   });
 
+  it.each(['bookingId', 'amount', 'idempotencyKey'] as const)(
+    'rejects %s when null or omitted',
+    (field) => {
+      const valid = { bookingId: UUID_A, amount: '150.00', idempotencyKey: 'k' };
+      expect(recordPaymentSchema.safeParse({ ...valid, [field]: null }).success).toBe(false);
+      const omitted: Record<string, string> = { ...valid };
+      delete omitted[field];
+      expect(recordPaymentSchema.safeParse(omitted).success).toBe(false);
+    },
+  );
+
+  it('accepts one spelling per amount, so identical amounts compare equal as strings', () => {
+    for (const amount of ['150', '150.0', '0150.00', '150.000', ' 150.00']) {
+      expect(
+        recordPaymentSchema.safeParse({ bookingId: UUID_A, amount, idempotencyKey: 'k' }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('rejects any field beyond bookingId, amount, and idempotencyKey', () => {
+    for (const extra of [{ clientId: UUID_A }, { status: 'CONFIRMED' }, { id: UUID_A }]) {
+      expect(
+        recordPaymentSchema.safeParse({
+          bookingId: UUID_A,
+          amount: '150.00',
+          idempotencyKey: 'k',
+          ...extra,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it('rejects a zero or negative amount', () => {
-    expect(recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '0.00' }).success).toBe(
-      false,
-    );
-    expect(recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '-5.00' }).success).toBe(
-      false,
-    );
+    expect(
+      recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '0.00', idempotencyKey: 'k' })
+        .success,
+    ).toBe(false);
+    expect(
+      recordPaymentSchema.safeParse({ bookingId: UUID_A, amount: '-5.00', idempotencyKey: 'k' })
+        .success,
+    ).toBe(false);
   });
 });
 

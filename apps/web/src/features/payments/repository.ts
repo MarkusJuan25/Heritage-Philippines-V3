@@ -314,6 +314,7 @@ export type CreatePendingPaymentInput = {
   clientId: string;
   amount: string;
   changedByUserId: string;
+  idempotencyKey: string;
 };
 
 /**
@@ -342,6 +343,9 @@ export async function createPendingPayment(
           previousStatus: null,
           newStatus: PaymentStatus.PENDING,
           changedByUserId: input.changedByUserId,
+          // D-054 §17 Rule 6: recordPayment's retry key lives on this
+          // initial row, in the same unique column confirm/reverse/refund use.
+          idempotencyKey: input.idempotencyKey,
         },
       },
     },
@@ -351,18 +355,21 @@ export async function createPendingPayment(
 
 export type StatusHistoryIdempotencyRecord = {
   paymentId: string;
+  previousStatus: PaymentStatus | null;
   newStatus: PaymentStatus;
 };
 
 /**
  * Resolves what a given `PaymentStatusHistory.idempotencyKey` already
- * recorded — which Payment, and which target status — the retry-detection
- * read `confirmPayment`/`reversePayment` (service.ts) each run before
- * inserting, exactly mirroring `PaymentAllocation.idempotencyKey`'s retry
- * pattern documented in schema.prisma. Deliberately returns only the two
- * identifying facts, never the Payment itself: the caller must match both
- * against its own request and then re-read the Payment through
- * `findPaymentForActor`, so a replay is never an unscoped read.
+ * recorded — which Payment, and which transition — the retry-detection
+ * read `recordPayment`/`confirmPayment`/`reversePayment` (service.ts) each
+ * run before inserting, exactly mirroring `PaymentAllocation.idempotencyKey`'s
+ * retry pattern documented in schema.prisma. `previousStatus` is null only
+ * on a Payment's initial PENDING row, which is where `recordPayment` stores
+ * its key. Deliberately returns only these identifying facts, never the
+ * Payment itself: the caller must match them against its own request and
+ * then re-read the Payment through `findPaymentForActor`, so a replay is
+ * never an unscoped read.
  */
 export async function findStatusHistoryByIdempotencyKey(
   db: Prisma.TransactionClient,
@@ -370,7 +377,7 @@ export async function findStatusHistoryByIdempotencyKey(
 ): Promise<StatusHistoryIdempotencyRecord | null> {
   return db.paymentStatusHistory.findUnique({
     where: { idempotencyKey },
-    select: { paymentId: true, newStatus: true },
+    select: { paymentId: true, previousStatus: true, newStatus: true },
   });
 }
 

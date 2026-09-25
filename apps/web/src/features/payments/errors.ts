@@ -90,12 +90,19 @@ const STATUS_BY_CODE: Record<PaymentErrorCode, 403 | 404 | 409> = {
  * `BOOKING_CURRENCY_NOT_SET` rejects recording a Payment against a Booking
  * whose `currencyCode` is not yet set (D-054 §17 Rule 4): such a Payment
  * could never receive a Receipt.
- * `IDEMPOTENCY_KEY_CONFLICT` is a caller-supplied idempotency key that
- * already belongs to a *different* operation — another Payment, another
- * target status, another allocation, or a different amount. A retry is only
- * ever answered with its own prior result (.claude/rules/backend.md's
- * "Idempotency for Sensitive Operations"); a key reused for anything else is
- * rejected, never answered with the unrelated record it already names.
+ * `IDEMPOTENCY_KEY_CONFLICT` is a caller-supplied idempotency key that the
+ * same kind of operation already used for a *different* request — another
+ * Payment, another target status, another allocation, or a different
+ * amount. A retry is only ever answered with its own prior result
+ * (.claude/rules/backend.md's "Idempotency for Sensitive Operations"; D-054
+ * §8), never with the unrelated record the key already names. Keys are
+ * checked per operation (D-054 §8's per-operation retry guarantee): a key
+ * used by one kind of operation is not generally detected when reused by
+ * another kind. The exceptions share PaymentStatusHistory's key column:
+ * recordPayment (D-054 §17 Rule 6), confirmPayment, and reversePayment each
+ * reject the others' keys, and refundPayment also rejects a key already held
+ * by a status change, because a refund that completes a Payment writes its
+ * own key there too.
  */
 export class PaymentError extends Error {
   readonly status: 403 | 404 | 409;

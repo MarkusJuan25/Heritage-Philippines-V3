@@ -67,27 +67,71 @@ export function sanitizePaymentStatusSnapshot(status: string): AuditPaymentStatu
   return { status };
 }
 
+export type AuditPaymentStatusChangeSnapshot = { status: string; reason: string };
+
+/**
+ * The afterState for a confirmation, reversal, or refund-completing status
+ * change: the new status plus the required reason (blueprint Section 11.7:
+ * "acting user, timestamp, reason, and before/after values"). The
+ * beforeState stays `sanitizePaymentStatusSnapshot`'s status-only shape.
+ */
+export function sanitizePaymentStatusChangeSnapshot(
+  status: string,
+  reason: string,
+): AuditPaymentStatusChangeSnapshot {
+  return { status, reason };
+}
+
+export type AuditPaymentRefundBeforeSnapshot = { status: string; refundedTotal: string };
+
+/**
+ * The beforeState for a refund: the Payment's status and cumulative refunded
+ * total immediately before this refund (blueprint Section 11.5: "before/after
+ * values"). `refundedTotal` is a decimal string, never a binary float
+ * (CLAUDE.md §8).
+ */
+export function sanitizePaymentRefundBeforeSnapshot(record: {
+  status: string;
+  refundedTotal: string;
+}): AuditPaymentRefundBeforeSnapshot {
+  return { status: record.status, refundedTotal: record.refundedTotal };
+}
+
 export type AuditPaymentRefundSnapshot = {
   paymentId: string;
   amount: string;
   reason: string;
+  allocationId: string | null;
+  status: string;
+  refundedTotal: string;
 };
 
 /**
  * The audit afterState for a refund — deliberately narrower than a full
  * PaymentRefund row: the Payment it targets, the amount actually returned,
- * and the required reason (blueprint Section 11.7: "acting user, timestamp,
+ * the required reason, the allocation it was linked to (null when it came
+ * from unallocated credit), and the Payment's status and cumulative refunded
+ * total after it (blueprint Sections 11.5 and 11.7: "acting user, timestamp,
  * reason, and before/after values" — actor/timestamp already come from
- * AuditLog.actorId/createdAt). `amount` is passed as the same decimal string
- * already validated by schemas.ts, never converted to a binary float
- * (CLAUDE.md §8).
+ * AuditLog.actorId/createdAt). Amounts are decimal strings, never binary
+ * floats (CLAUDE.md §8).
  */
 export function sanitizePaymentRefundSnapshot(record: {
   paymentId: string;
   amount: string;
   reason: string;
+  allocationId: string | null;
+  status: string;
+  refundedTotal: string;
 }): AuditPaymentRefundSnapshot {
-  return { paymentId: record.paymentId, amount: record.amount, reason: record.reason };
+  return {
+    paymentId: record.paymentId,
+    amount: record.amount,
+    reason: record.reason,
+    allocationId: record.allocationId,
+    status: record.status,
+    refundedTotal: record.refundedTotal,
+  };
 }
 
 export type AuditAllocationSnapshot = {

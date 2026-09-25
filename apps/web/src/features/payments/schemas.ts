@@ -134,20 +134,18 @@ export type ApprovePaymentPlanInput = z.infer<typeof approvePaymentPlanSchema>;
 // explicit exclusion) — this schema only ever records that money was
 // already received outside this system.
 //
-// No `idempotencyKey` field on this one either: `Payment` itself has no such
-// column (D-019 requires one only for the CONFIRMED/REVERSED/REFUNDED
-// transitions recorded on `PaymentStatusHistory`, never for the initial
-// `PENDING` row this schema creates — see `PaymentStatusHistory.idempotencyKey`'s
-// doc comment in schema.prisma: nullable, "required specifically when
-// newStatus is CONFIRMED, REVERSED, or REFUNDED"). Inventing a retry-safety
-// mechanism D-019 does not require here would be scope this entry does not
-// approve; a duplicate PENDING record from an accidental retry is a Finance-
-// visible data-hygiene matter, never a money-safety one, since PENDING never
-// counts toward confirmed amount paid (blueprint §11.1).
+// `idempotencyKey` is required (D-054 §17 Rule 6, September 25, 2026): a
+// resubmitted request would otherwise create a second PENDING Payment that
+// no operation can cancel (§17 Rule 1). `Payment` has no key column; the key
+// is stored on the Payment's initial PENDING `PaymentStatusHistory` row,
+// whose `idempotencyKey` column is already nullable and unique, and which
+// D-019's `payment_status_history_idempotency_key_required` CHECK permits
+// (it requires a key only for CONFIRMED, REVERSED, and REFUNDED).
 export const recordPaymentSchema = z
   .object({
     bookingId: uuidSchema,
     amount: positiveMoneyAmountSchema,
+    idempotencyKey: idempotencyKeySchema,
   })
   .strict();
 export type RecordPaymentInput = z.infer<typeof recordPaymentSchema>;

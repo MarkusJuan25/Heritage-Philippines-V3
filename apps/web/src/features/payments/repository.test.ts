@@ -225,7 +225,7 @@ describe('findPaymentForActor', () => {
 });
 
 describe('createPendingPayment', () => {
-  it('creates the Payment with status PENDING and its initial history row', async () => {
+  it('creates the Payment with status PENDING and its initial history row, carrying the key', async () => {
     const create = vi.fn().mockResolvedValue({ id: 'payment-1' });
     await createPendingPayment(db({ payment: { create } }), {
       id: 'payment-1',
@@ -233,12 +233,17 @@ describe('createPendingPayment', () => {
       clientId: 'client-1',
       amount: '150.00',
       changedByUserId: FINANCE.id,
+      idempotencyKey: 'record-1',
     });
     expect(create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         status: 'PENDING',
         statusHistory: {
-          create: expect.objectContaining({ previousStatus: null, newStatus: 'PENDING' }),
+          create: expect.objectContaining({
+            previousStatus: null,
+            newStatus: 'PENDING',
+            idempotencyKey: 'record-1',
+          }),
         },
       }),
       select: expect.any(Object),
@@ -247,18 +252,17 @@ describe('createPendingPayment', () => {
 });
 
 describe('findStatusHistoryByIdempotencyKey', () => {
-  it('returns only the paymentId and target status the key recorded, never the Payment itself', async () => {
-    const findUnique = vi
-      .fn()
-      .mockResolvedValue({ paymentId: 'payment-1', newStatus: 'CONFIRMED' });
+  it('returns only the paymentId and transition the key recorded, never the Payment itself', async () => {
+    const recorded = { paymentId: 'payment-1', previousStatus: 'PENDING', newStatus: 'CONFIRMED' };
+    const findUnique = vi.fn().mockResolvedValue(recorded);
     const result = await findStatusHistoryByIdempotencyKey(
       db({ paymentStatusHistory: { findUnique } }),
       'idem-1',
     );
-    expect(result).toEqual({ paymentId: 'payment-1', newStatus: 'CONFIRMED' });
+    expect(result).toEqual(recorded);
     expect(findUnique).toHaveBeenCalledWith({
       where: { idempotencyKey: 'idem-1' },
-      select: { paymentId: true, newStatus: true },
+      select: { paymentId: true, previousStatus: true, newStatus: true },
     });
   });
 

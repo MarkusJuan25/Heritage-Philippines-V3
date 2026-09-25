@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   sanitizeAllocationSnapshot,
   sanitizePaymentPlanSnapshot,
+  sanitizePaymentRefundBeforeSnapshot,
   sanitizePaymentRefundSnapshot,
+  sanitizePaymentStatusChangeSnapshot,
   sanitizePaymentStatusSnapshot,
   sanitizeReceiptSnapshot,
 } from './audit';
@@ -49,17 +51,42 @@ describe('sanitizePaymentStatusSnapshot', () => {
   });
 });
 
+describe('sanitizePaymentStatusChangeSnapshot', () => {
+  it('returns only the status and reason', () => {
+    expect(sanitizePaymentStatusChangeSnapshot('REVERSED', 'Duplicate entry')).toEqual({
+      status: 'REVERSED',
+      reason: 'Duplicate entry',
+    });
+  });
+});
+
+describe('sanitizePaymentRefundBeforeSnapshot', () => {
+  it('returns only the status and refunded total', () => {
+    const source = { status: 'CONFIRMED', refundedTotal: '0.00', amount: '100.00' };
+    expect(sanitizePaymentRefundBeforeSnapshot(source)).toEqual({
+      status: 'CONFIRMED',
+      refundedTotal: '0.00',
+    });
+  });
+});
+
 describe('sanitizePaymentRefundSnapshot', () => {
-  it('carries paymentId, amount, and reason only', () => {
+  it('carries the refund, its allocation link, and the after values only', () => {
     const snapshot = sanitizePaymentRefundSnapshot({
       paymentId: 'payment-1',
       amount: '50.00',
       reason: 'Client cancelled excursion',
+      allocationId: 'allocation-1',
+      status: 'CONFIRMED',
+      refundedTotal: '50.00',
     });
     expect(snapshot).toEqual({
       paymentId: 'payment-1',
       amount: '50.00',
       reason: 'Client cancelled excursion',
+      allocationId: 'allocation-1',
+      status: 'CONFIRMED',
+      refundedTotal: '50.00',
     });
   });
 });
