@@ -10,11 +10,13 @@ import { canAccessClient } from './authorization';
 import {
   ASSIGNMENT_AUDIT_ACTIONS,
   ASSIGNMENT_AUDIT_ENTITY_TYPE,
+  BOOKING_FINANCE_ASSIGNMENT_AUDIT_ACTIONS,
   sanitizeAssignmentSnapshot,
+  sanitizeRoleAssignmentSnapshot,
 } from './audit';
 import { AssignmentError } from './errors';
 import * as repository from './repository';
-import type { AssignmentRecord } from './repository';
+import type { AssignmentRecord, RoleAssignmentRecord } from './repository';
 
 function isKnownConflict(error: unknown): boolean {
   // Exhausted serializable retries (SerializableRetriesExhaustedError,
@@ -359,9 +361,10 @@ export async function endClientAssignment(
   return endAssignment('CLIENT', actor, clientId, reason);
 }
 
-// No endBookingAssignment export — assignment removal without a
-// replacement is out of scope for this checkpoint (Booking assignment
-// enforcement decision). setAssignment's own control flow (idempotent
+// No endBookingAssignment export — ending the Travel Consultant's Booking
+// assignment without a replacement stays out of scope (D-015). Ending a
+// Booking's Finance/Accounting assignment is a separate operation
+// (`endBookingFinanceAssignment`, D-056 §1). setAssignment's own control flow (idempotent
 // same-assignee no-op, REASON_REQUIRED on replace, atomic
 // end-old/create-new/audit) is reused unchanged for 'BOOKING'.
 export async function setBookingAssignment(
@@ -455,4 +458,250 @@ export async function getActiveConsultantNameForClient(
     throw new AssignmentError('CLIENT_NOT_FOUND', 'Client not found.');
   }
   return repository.findActiveConsultantNameForClient(prisma, clientId);
+}
+
+// --- Booking Finance/Accounting assignment (D-056 §1) ---
+// Admin/Manager sets, replaces, and ends a Booking's single active
+// Finance/Accounting assignment. It is independent of the Booking's Travel
+// Consultant assignment: every read and write here is scoped to the
+// FINANCE_ACCOUNTING role, and `setBookingAssignment` never touches it.
+// It may be set on, and remain on, a Booking in any status, including
+// CANCELLED and COMPLETED. It only authorizes the assignee for that
+// Booking's payment operations (features/payments' `bookingAssignmentFilter`);
+// it never overrides any payment operation's own guards.
+
+/**
+ * An assignee for a Booking's Finance/Accounting assignment must exist, be
+ * active, and currently hold FINANCE_ACCOUNTING. Called only before a new
+ * row is created, never for the idempotent same-assignee no-op.
+ */
+async function assertEligibleFinanceAssignee(
+  tx: Prisma.TransactionClient,
+  assignedStaffId: string,
+): Promise<void> {
+  const candidate = await repository.findAssigneeCandidateById(tx, assignedStaffId);
+  if (!candidate) {
+    throw new AssignmentError('ASSIGNEE_NOT_FOUND', 'The specified staff member was not found.');
+  }
+  if (!candidate.isActive) {
+    throw new AssignmentError(
+      'ASSIGNEE_INACTIVE',
+      'The specified staff member is not active and cannot be assigned.',
+    );
+  }
+  if (candidate.role !== 'FINANCE_ACCOUNTING') {
+    throw new AssignmentError(
+      'ASSIGNEE_INELIGIBLE_ROLE',
+      "Only a Finance/Accounting user may be assigned as a booking's finance assignee.",
+    );
+  }
+}
+
+// A reason must contain more than whitespace; the stored reason is trimmed.
+function requireReason(reason: string | undefined, message: string): string {
+  const trimmed = reason?.trim();
+  if (!trimmed) {
+    throw new AssignmentError('REASON_REQUIRED', message);
+  }
+  return trimmed;
+}
+
+/**
+ * Sets or replaces a Booking's Finance/Accounting assignment (D-056 §1), in
+ * one SERIALIZABLE transaction:
+ * - none active: creates it; no reason needed;
+ * - the same assignee already active: an idempotent no-op — no eligibility
+ *   check, no write, no audit entry;
+ * - a different assignee active: requires a reason, ends the current row,
+ *   and creates the new one.
+ * Writes BOOKING_FINANCE_ASSIGNMENT_CREATED or _REPLACED, never a Travel
+ * Consultant `BOOKING_ASSIGNMENT_*` action. A concurrent write that loses on
+ * `staff_assignment_active_booking_role_key` is retried and then decided by
+ * the same rules, or ends as ASSIGNMENT_CONFLICT.
+ */
+export async function setBookingFinanceAssignment(
+  actor: AuthenticatedUser,
+  bookingId: string,
+  assignedStaffId: string,
+  reason?: string,
+): Promise<RoleAssignmentRecord> {
+  assertAssignmentMutationActor(actor);
+
+  return runAssignmentTransaction(async (tx) => {
+    const booking = await repository.findBookingById(tx, bookingId);
+    if (!booking) {
+      throw notFoundError('BOOKING');
+    }
+
+    const active = await repository.findActiveFinanceAssignmentForBooking(tx, bookingId);
+    if (active && active.assignedStaffId === assignedStaffId) {
+      return active;
+    }
+
+    await assertEligibleFinanceAssignee(tx, assignedStaffId);
+
+    const replacementReason = active
+      ? requireReason(reason, 'A reason is required when replacing an existing assignment.')
+      : undefined;
+
+    if (active) {
+      await repository.endRoleAssignmentById(tx, active.id);
+    }
+
+    const created = await repository.createBookingFinanceAssignment(tx, {
+      id: randomUUID(),
+      assignedStaffId,
+      assignedByUserId: actor.id,
+      bookingId,
+    });
+
+    await repository.insertAuditLog(tx, {
+      actorId: actor.id,
+      action: active
+        ? BOOKING_FINANCE_ASSIGNMENT_AUDIT_ACTIONS.REASSIGNED
+        : BOOKING_FINANCE_ASSIGNMENT_AUDIT_ACTIONS.ASSIGNED,
+      entityType: ASSIGNMENT_AUDIT_ENTITY_TYPE.BOOKING,
+      entityId: bookingId,
+      beforeState: active ? sanitizeRoleAssignmentSnapshot(active) : undefined,
+      afterState: {
+        ...sanitizeRoleAssignmentSnapshot(created),
+        ...(replacementReason ? { reason: replacementReason } : {}),
+      },
+    });
+
+    return created;
+  });
+}
+
+/**
+ * Ends a Booking's Finance/Accounting assignment without a replacement
+ * (D-056 §1). A reason is always required. Idempotent: when none is
+ * active it returns `null` with no write and no audit entry. Writes
+ * BOOKING_FINANCE_ASSIGNMENT_ENDED; the row is kept with `endedAt` set.
+ */
+export async function endBookingFinanceAssignment(
+  actor: AuthenticatedUser,
+  bookingId: string,
+  reason: string,
+): Promise<RoleAssignmentRecord | null> {
+  assertAssignmentMutationActor(actor);
+  const endReason = requireReason(reason, 'A reason is required to end an assignment.');
+
+  return runAssignmentTransaction(async (tx) => {
+    const booking = await repository.findBookingById(tx, bookingId);
+    if (!booking) {
+      throw notFoundError('BOOKING');
+    }
+
+    const active = await repository.findActiveFinanceAssignmentForBooking(tx, bookingId);
+    if (!active) {
+      return null;
+    }
+
+    const ended = await repository.endRoleAssignmentById(tx, active.id);
+
+    await repository.insertAuditLog(tx, {
+      actorId: actor.id,
+      action: BOOKING_FINANCE_ASSIGNMENT_AUDIT_ACTIONS.ENDED,
+      entityType: ASSIGNMENT_AUDIT_ENTITY_TYPE.BOOKING,
+      entityId: bookingId,
+      beforeState: sanitizeRoleAssignmentSnapshot(active),
+      afterState: { ...sanitizeRoleAssignmentSnapshot(ended), reason: endReason },
+    });
+
+    return ended;
+  });
+}
+
+export type BookingFinanceAssignmentView = {
+  id: string;
+  bookingId: string;
+  assignedStaffId: string;
+  assignedByUserId: string;
+  createdAt: Date;
+  assignee: { id: string; name: string; email: string; role: string; isActive: boolean };
+  /**
+   * False when the assignee is no longer an active FINANCE_ACCOUNTING user.
+   * Such a stale row grants nothing (the payments filter matches the row's
+   * role to the actor's current role) and should be ended (D-056 §1).
+   */
+  assigneeEligible: boolean;
+};
+
+/**
+ * A Booking's active Finance/Accounting assignment, for the admin Booking
+ * view (D-056 §1: it shows the assignee and their current role, so a stale
+ * row is visible and can be ended). ADMIN_MANAGER only: `null` when none is
+ * active, BOOKING_NOT_FOUND for an unknown Booking. Every other role —
+ * including FINANCE_ACCOUNTING, whose access D-056 §1 limits to
+ * `features/payments` — is ROLE_NOT_PERMITTED, before any read.
+ */
+export async function getBookingFinanceAssignment(
+  actor: AuthenticatedUser,
+  bookingId: string,
+): Promise<BookingFinanceAssignmentView | null> {
+  if (actor.role !== 'ADMIN_MANAGER') {
+    throw new AssignmentError(
+      'ROLE_NOT_PERMITTED',
+      "This role is not permitted to view a booking's finance assignment.",
+    );
+  }
+  const booking = await repository.findBookingById(prisma, bookingId);
+  if (!booking) {
+    throw notFoundError('BOOKING');
+  }
+  const row = await repository.findActiveFinanceAssignmentView(prisma, bookingId);
+  return row ? toFinanceAssignmentView(row) : null;
+}
+
+function toFinanceAssignmentView(
+  row: repository.BookingFinanceAssignmentRow,
+): BookingFinanceAssignmentView {
+  const { assignedStaff } = row;
+  return {
+    id: row.id,
+    bookingId: row.bookingId,
+    assignedStaffId: row.assignedStaffId,
+    assignedByUserId: row.assignedByUserId,
+    createdAt: row.createdAt,
+    assignee: {
+      id: assignedStaff.id,
+      name: assignedStaff.name,
+      email: assignedStaff.email,
+      role: assignedStaff.role,
+      isActive: assignedStaff.isActive,
+    },
+    assigneeEligible: assignedStaff.isActive && assignedStaff.role === 'FINANCE_ACCOUNTING',
+  };
+}
+
+export type ListEligibleFinanceStaffResult = {
+  items: repository.EligibleFinanceStaff[];
+  page: number;
+  pageSize: number;
+  total: number;
+};
+
+/**
+ * The eligible-assignee read for a Booking's Finance/Accounting picker
+ * (D-056 §1). ADMIN_MANAGER only, like `listEligibleTravelConsultants`.
+ */
+export async function listEligibleFinanceStaff(
+  actor: AuthenticatedUser,
+  query: { search?: string; page: number; pageSize: number },
+): Promise<ListEligibleFinanceStaffResult> {
+  if (actor.role !== 'ADMIN_MANAGER') {
+    throw new AssignmentError(
+      'ROLE_NOT_PERMITTED',
+      'This role is not permitted to view eligible Finance/Accounting staff.',
+    );
+  }
+
+  const skip = (query.page - 1) * query.pageSize;
+  const { items, total } = await repository.listEligibleFinanceStaff(prisma, {
+    search: query.search,
+    skip,
+    take: query.pageSize,
+  });
+  return { items, page: query.page, pageSize: query.pageSize, total };
 }

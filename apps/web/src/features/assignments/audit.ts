@@ -75,3 +75,35 @@ export function sanitizeAssignmentSnapshot(record: {
     endedAt: record.endedAt ? record.endedAt.toISOString() : null,
   };
 }
+
+// D-056 §1: a Booking's Finance/Accounting assignment has its own action
+// names. They must never be the Travel Consultant `BOOKING_ASSIGNMENT_*`
+// actions above: migration 20260925000000_staff_assignment_role_backfill_
+// correction and D-054 §16's correction treat a BOOKING_ASSIGNMENT_CREATED/
+// _REPLACED entry as proof that a row was created as a Travel Consultant
+// assignment.
+export const BOOKING_FINANCE_ASSIGNMENT_AUDIT_ACTIONS = {
+  ASSIGNED: 'BOOKING_FINANCE_ASSIGNMENT_CREATED',
+  REASSIGNED: 'BOOKING_FINANCE_ASSIGNMENT_REPLACED',
+  ENDED: 'BOOKING_FINANCE_ASSIGNMENT_ENDED',
+} as const;
+
+export type AuditRoleAssignmentSnapshot = AuditAssignmentSnapshot & { role: string };
+
+/**
+ * `sanitizeAssignmentSnapshot` plus the row's `role` (D-056 §1), so a
+ * Finance/Accounting assignment's audit history states which role the row
+ * was created for. Same explicit allow-list discipline.
+ */
+export function sanitizeRoleAssignmentSnapshot(record: {
+  id: string;
+  assignedStaffId: string;
+  assignedByUserId: string;
+  leadId: string | null;
+  clientId: string | null;
+  bookingId: string | null;
+  endedAt: Date | null;
+  role: string;
+}): AuditRoleAssignmentSnapshot {
+  return { ...sanitizeAssignmentSnapshot(record), role: record.role };
+}
