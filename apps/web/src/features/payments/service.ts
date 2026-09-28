@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Prisma, PaymentPlanStatus, PaymentStatus } from '@/generated/prisma/client';
+import { BookingStatus, Prisma, PaymentPlanStatus, PaymentStatus } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
 import { isResidualDatabaseConflict, isUniqueViolationOn } from '@/lib/prisma-errors';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
@@ -35,6 +35,7 @@ import {
   computeUnappliedCredit,
 } from './calculations';
 import { PaymentError } from './errors';
+import { CURRENCY_LIST_VERSION, hasSupportedCurrencyPrecision } from './currencies';
 import * as repository from './repository';
 import type {
   AllocationRecord,
@@ -50,13 +51,139 @@ import type {
   ConfirmPaymentInput,
   CreateAllocationInput,
   IssueReceiptInput,
+  ListPaymentBookingsInput,
   ProposePaymentPlanInput,
   RecordPaymentInput,
   RefundPaymentInput,
   ReverseAllocationInput,
   ReversePaymentInput,
+  SetBookingFinancialsInput,
   WithdrawPaymentPlanInput,
 } from './schemas';
+
+function assertBookingOpenForPayment(status: BookingStatus | null): void {
+  if (status === BookingStatus.CANCELLED) {
+    throw new PaymentError('BOOKING_STATUS_NOT_PERMITTED', 'This booking is cancelled.');
+  }
+}
+
+export async function getPaymentBookingHeaderForActor(actor: AuthenticatedUser, bookingId: string) {
+  const paymentActor = assertStaffReadActor(actor);
+  const booking = await repository.findPaymentBookingHeaderForActor(
+    prisma,
+    paymentActor,
+    bookingId,
+  );
+  if (!booking)
+    throw new PaymentError(
+      paymentActor.role === 'ADMIN_MANAGER' ? 'BOOKING_NOT_FOUND' : 'BOOKING_FORBIDDEN',
+      'Booking not found or not accessible.',
+    );
+  return booking;
+}
+
+export async function listPaymentBookingsForActor(
+  actor: AuthenticatedUser,
+  input: ListPaymentBookingsInput,
+) {
+  const paymentActor = assertStaffReadActor(actor);
+  return repository.listPaymentBookingsForActor(prisma, paymentActor, {
+    search: input.search,
+    planState: input.planState,
+    skip: (input.page - 1) * input.pageSize,
+    take: input.pageSize,
+  });
+}
+
+function assertAmountPrecision(amount: string, currencyCode: string): void {
+  if (!hasSupportedCurrencyPrecision(amount, currencyCode)) {
+    throw new PaymentError(
+      'PAYMENT_CONFLICT',
+      'The amount or currency precision is not supported.',
+    );
+  }
+}
+
+async function assertBookingAmountPrecision(
+  tx: Prisma.TransactionClient,
+  bookingId: string,
+  amount: string,
+): Promise<void> {
+  const currencyCode = await repository.findBookingCurrencyCode(tx, bookingId);
+  if (currencyCode === null) {
+    throw new PaymentError('BOOKING_CURRENCY_NOT_SET', "This booking's currency is not set yet.");
+  }
+  assertAmountPrecision(amount, currencyCode);
+}
+
+/** D-056 §2: only the assigned Finance user can set both Booking financial fields. */
+export async function setBookingFinancials(
+  actor: AuthenticatedUser,
+  input: SetBookingFinancialsInput,
+): Promise<repository.BookingFinancials> {
+  const paymentActor = assertFinanceActor(actor);
+  try {
+    return await runSerializableWithRetry(async (tx) => {
+      const before = await repository.findBookingFinancialsForActor(
+        tx,
+        paymentActor,
+        input.bookingId,
+      );
+      if (!before)
+        throw new PaymentError('BOOKING_FORBIDDEN', 'Booking not found or not accessible.');
+      assertBookingOpenForPayment(before.status);
+      assertAmountPrecision(input.totalAmount, input.currencyCode);
+      if (await repository.hasFinancialLock(tx, input.bookingId)) {
+        throw new PaymentError('BOOKING_FINANCIALS_LOCKED', 'The booking financials are locked.');
+      }
+      const unchanged =
+        before.currencyCode === input.currencyCode &&
+        before.totalAmount?.equals(input.totalAmount) === true;
+      if (unchanged) return before;
+      if (before.totalAmount !== null && !input.reason?.trim()) {
+        throw new PaymentError(
+          'PAYMENT_CONFLICT',
+          'A reason is required to change booking financials.',
+        );
+      }
+      const updated = await repository.updateBookingFinancials(
+        tx,
+        input.bookingId,
+        input.totalAmount,
+        input.currencyCode,
+      );
+      await repository.insertAuditLog(tx, {
+        actorId: paymentActor.id,
+        action:
+          before.totalAmount === null
+            ? PAYMENT_AUDIT_ACTIONS.BOOKING_FINANCIALS_SET
+            : PAYMENT_AUDIT_ACTIONS.BOOKING_FINANCIALS_CHANGED,
+        entityType: 'Booking',
+        entityId: input.bookingId,
+        beforeState: {
+          totalAmount: before.totalAmount?.toFixed(2) ?? null,
+          currencyCode: before.currencyCode,
+        },
+        afterState: {
+          totalAmount: updated.totalAmount!.toFixed(2),
+          currencyCode: updated.currencyCode!,
+          currencyListVersion: CURRENCY_LIST_VERSION,
+          ...(before.totalAmount !== null ? { reason: input.reason!.trim() } : {}),
+        },
+      });
+      return updated;
+    });
+  } catch (error) {
+    if (error instanceof PaymentError) throw error;
+    if (isOtherKnownConflict(error)) {
+      throw new PaymentError(
+        'PAYMENT_CONFLICT',
+        'Booking financials could not be updated. Please try again.',
+      );
+    }
+    throw error;
+  }
+}
 
 // --- Defense-in-depth actor assertions (.claude/rules/backend.md
 // "Authentication vs. Authorization") ---
@@ -355,11 +482,15 @@ export async function proposePaymentPlan(
       if (!booking) {
         throw new PaymentError('BOOKING_FORBIDDEN', 'Booking not found or not accessible.');
       }
+      assertBookingOpenForPayment(booking.status);
       if (booking.totalAmount === null || booking.currencyCode === null) {
         throw new PaymentError(
           'PAYMENT_PLAN_CONFLICT',
           'This booking has no total amount and currency set yet; a payment plan cannot be proposed until both exist.',
         );
+      }
+      for (const installment of input.installments) {
+        assertAmountPrecision(installment.amount, booking.currencyCode);
       }
 
       const existing = await repository.findPaymentPlanByBookingIdForActor(
@@ -450,6 +581,7 @@ export async function approvePaymentPlan(
       if (plan.status === PaymentPlanStatus.APPROVED) {
         return plan;
       }
+      assertBookingOpenForPayment(booking.status);
       if (plan.status !== PaymentPlanStatus.PROPOSED) {
         throw new PaymentError(
           'PAYMENT_PLAN_CONFLICT',
@@ -643,6 +775,7 @@ export async function recordPayment(
       if (replay) {
         return replay;
       }
+      assertBookingOpenForPayment(booking.status);
       // D-054 §17 Rule 4: a Payment against a Booking with no currency could
       // never receive a Receipt. D-019's booking_financials_pairing
       // constraint sets `totalAmount` and `currencyCode` together, so this
@@ -655,6 +788,7 @@ export async function recordPayment(
           "This booking's currency is not set yet; a payment cannot be recorded against it.",
         );
       }
+      assertAmountPrecision(input.amount, booking.currencyCode);
 
       const created = await repository.createPendingPayment(tx, {
         id: randomUUID(),
@@ -720,6 +854,7 @@ export async function confirmPayment(
       }
 
       const found = await findScopedPaymentOrForbidden(tx, paymentActor, input.paymentId);
+      assertBookingOpenForPayment(await repository.findBookingStatus(tx, found.bookingId));
       if (found.status !== PaymentStatus.PENDING) {
         throw new PaymentError(
           'INVALID_PAYMENT_TRANSITION',
@@ -898,6 +1033,8 @@ export async function refundPayment(
           `Only a CONFIRMED payment may be refunded (current status: ${found.status}).`,
         );
       }
+
+      await assertBookingAmountPrecision(tx, found.bookingId, input.amount);
 
       const existingRefundTotal = await repository.sumRefundsForPayment(tx, found.id);
       const amount = new Prisma.Decimal(input.amount);
@@ -1150,6 +1287,8 @@ export async function createAllocation(
       }
 
       const payment = await findScopedPaymentOrForbidden(tx, paymentActor, input.paymentId);
+      assertBookingOpenForPayment(await repository.findBookingStatus(tx, payment.bookingId));
+      await assertBookingAmountPrecision(tx, payment.bookingId, input.amount);
 
       // A missing Installment and one under a different Booking produce the
       // identical error, so this lookup (unscoped by actor) never reveals

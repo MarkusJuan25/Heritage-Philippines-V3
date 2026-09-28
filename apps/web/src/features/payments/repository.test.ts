@@ -15,6 +15,9 @@ import {
   findAllocationForReversal,
   findApprovedBookingIdsForClient,
   findBookingFinancialsForActor,
+  hasFinancialLock,
+  findPaymentBookingHeaderForActor,
+  listPaymentBookingsForActor,
   findBookingPaymentSummaryData,
   findInstallmentForAllocation,
   findInstallmentsForPlanSnapshot,
@@ -41,6 +44,78 @@ const BOOKING_ASSIGNMENT_FILTER = (staffId: string, role: string) => ({
 });
 
 const BOOKING_ID = 'booking-1';
+
+describe('D-056 P4 booking list and financial lock', () => {
+  it('treats active plans and payments as independent locks', async () => {
+    const plan = vi.fn().mockResolvedValue(null);
+    const payment = vi.fn().mockResolvedValue({ id: 'payment-1' });
+    await expect(
+      hasFinancialLock(
+        db({ paymentPlan: { findFirst: plan }, payment: { findFirst: payment } }),
+        BOOKING_ID,
+      ),
+    ).resolves.toBe(true);
+    expect(plan).toHaveBeenCalledWith({
+      where: { bookingId: BOOKING_ID, status: { not: 'WITHDRAWN' } },
+      select: { id: true },
+    });
+    expect(payment).toHaveBeenCalledWith({
+      where: { bookingId: BOOKING_ID },
+      select: { id: true },
+    });
+  });
+
+  it('unlocks withdrawn-only history when no payment exists', async () => {
+    const plan = vi.fn().mockResolvedValue(null);
+    const payment = vi.fn().mockResolvedValue(null);
+    await expect(
+      hasFinancialLock(
+        db({ paymentPlan: { findFirst: plan }, payment: { findFirst: payment } }),
+        BOOKING_ID,
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it('locks a proposed or approved plan even without a payment', async () => {
+    const plan = vi.fn().mockResolvedValue({ id: 'active-plan' });
+    const payment = vi.fn().mockResolvedValue(null);
+    await expect(
+      hasFinancialLock(
+        db({ paymentPlan: { findFirst: plan }, payment: { findFirst: payment } }),
+        BOOKING_ID,
+      ),
+    ).resolves.toBe(true);
+  });
+
+  it('scopes header and paginated list to the assigned booking role', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const client = db({ booking: { findFirst, findMany, count } });
+    await findPaymentBookingHeaderForActor(client, FINANCE, BOOKING_ID);
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: BOOKING_ID,
+          ...BOOKING_ASSIGNMENT_FILTER(FINANCE.id, FINANCE.role),
+        },
+      }),
+    );
+    await listPaymentBookingsForActor(client, FINANCE, {
+      search: 'HP-',
+      planState: 'withdrawn',
+      skip: 20,
+      take: 20,
+    });
+    const where = {
+      ...BOOKING_ASSIGNMENT_FILTER(FINANCE.id, FINANCE.role),
+      bookingReference: { contains: 'HP-', mode: 'insensitive' },
+      paymentPlans: { some: { status: 'WITHDRAWN' }, none: { status: { not: 'WITHDRAWN' } } },
+    };
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where, skip: 20, take: 20 }));
+    expect(count).toHaveBeenCalledWith({ where });
+  });
+});
 
 function db(overrides: Record<string, unknown>): PrismaNamespace.TransactionClient {
   return overrides as unknown as PrismaNamespace.TransactionClient;

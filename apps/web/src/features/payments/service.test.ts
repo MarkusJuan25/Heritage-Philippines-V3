@@ -14,6 +14,9 @@ vi.mock('@/lib/db', () => ({
 
 const repositoryMocks = vi.hoisted(() => ({
   findBookingFinancialsForActor: vi.fn(),
+  hasFinancialLock: vi.fn(),
+  updateBookingFinancials: vi.fn(),
+  findBookingStatus: vi.fn(),
   findPaymentPlanByBookingIdForActor: vi.fn(),
   findPaymentPlanWithBookingForActor: vi.fn(),
   createPaymentPlanWithInstallments: vi.fn(),
@@ -66,6 +69,7 @@ import {
   refundPayment,
   reverseAllocation,
   reversePayment,
+  setBookingFinancials,
   withdrawPaymentPlan,
 } from './service';
 
@@ -112,6 +116,9 @@ const d = (value: string) => new Prisma.Decimal(value);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  repositoryMocks.findBookingStatus.mockResolvedValue('CONFIRMED');
+  repositoryMocks.hasFinancialLock.mockResolvedValue(false);
+  repositoryMocks.findBookingCurrencyCode.mockResolvedValue('PHP');
   transactionMock.mockImplementation((fn: (tx: unknown) => unknown) => fn(TX_CLIENT));
   // `clearAllMocks` keeps implementations, so reset the idempotency lookups
   // every test relies on being empty unless it says otherwise.
@@ -2076,5 +2083,162 @@ describe('CHECK-constraint violations from payment writes stay generic errors (D
     await expect(promise).rejects.toBe(violation);
     await expect(promise).rejects.not.toBeInstanceOf(PaymentError);
     expect(transactionMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('D-056 P4 booking financials', () => {
+  const input = { bookingId: 'booking-1', totalAmount: '500.00', currencyCode: 'PHP' as const };
+  const booking = {
+    id: 'booking-1',
+    clientId: 'client-1',
+    status: 'CONFIRMED',
+    totalAmount: null,
+    currencyCode: null,
+  };
+
+  it('refuses non-Finance roles before reading the booking', async () => {
+    for (const actor of [ADMIN_MANAGER, TRAVEL_CONSULTANT, CLIENT_USER]) {
+      await expectPaymentError(setBookingFinancials(actor, input), 'ROLE_NOT_PERMITTED');
+    }
+    expect(repositoryMocks.findBookingFinancialsForActor).not.toHaveBeenCalled();
+  });
+
+  it('sets both values with one audit entry, then treats identical values as a no-op', async () => {
+    repositoryMocks.findBookingFinancialsForActor
+      .mockResolvedValueOnce(booking)
+      .mockResolvedValueOnce({
+        ...booking,
+        totalAmount: d('500.00'),
+        currencyCode: 'PHP',
+      });
+    repositoryMocks.updateBookingFinancials.mockResolvedValue({
+      ...booking,
+      totalAmount: d('500.00'),
+      currencyCode: 'PHP',
+    });
+    await setBookingFinancials(FINANCE, input);
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+      TX_CLIENT,
+      expect.objectContaining({
+        action: 'BOOKING_FINANCIALS_SET',
+        entityType: 'Booking',
+        afterState: {
+          totalAmount: '500.00',
+          currencyCode: 'PHP',
+          currencyListVersion: 'currencies-v1',
+        },
+      }),
+    );
+    await setBookingFinancials(FINANCE, input);
+    expect(repositoryMocks.updateBookingFinancials).toHaveBeenCalledTimes(1);
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a reason for a correction and records its trimmed value', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue({
+      ...booking,
+      totalAmount: d('400.00'),
+      currencyCode: 'PHP',
+    });
+    await expectPaymentError(setBookingFinancials(FINANCE, input), 'PAYMENT_CONFLICT');
+    repositoryMocks.updateBookingFinancials.mockResolvedValue({
+      ...booking,
+      totalAmount: d('500.00'),
+      currencyCode: 'PHP',
+    });
+    await setBookingFinancials(FINANCE, { ...input, reason: ' corrected price ' });
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+      TX_CLIENT,
+      expect.objectContaining({
+        action: 'BOOKING_FINANCIALS_CHANGED',
+        afterState: expect.objectContaining({ reason: 'corrected price' }),
+      }),
+    );
+  });
+
+  it('enforces the independent plan/payment lock even when the proposed plan was withdrawn', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue(booking);
+    repositoryMocks.hasFinancialLock.mockResolvedValue(true);
+    await expectPaymentError(setBookingFinancials(FINANCE, input), 'BOOKING_FINANCIALS_LOCKED');
+    expect(repositoryMocks.updateBookingFinancials).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cancelled booking before any financial lock read', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue({
+      ...booking,
+      status: 'CANCELLED',
+    });
+    await expectPaymentError(setBookingFinancials(FINANCE, input), 'BOOKING_STATUS_NOT_PERMITTED');
+    expect(repositoryMocks.hasFinancialLock).not.toHaveBeenCalled();
+  });
+});
+
+describe('D-056 P4 cancellation guards', () => {
+  it('blocks a new proposal after the assigned booking is read', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue({
+      id: 'booking-1',
+      clientId: 'client-1',
+      status: 'CANCELLED',
+      totalAmount: d('500.00'),
+      currencyCode: 'PHP',
+    });
+    await expectPaymentError(
+      proposePaymentPlan(TRAVEL_CONSULTANT, {
+        bookingId: 'booking-1',
+        installments: [
+          { sequenceNumber: 1, isDeposit: true, amount: '500.00', dueDate: '2026-10-01' },
+        ],
+      }),
+      'BOOKING_STATUS_NOT_PERMITTED',
+    );
+    expect(repositoryMocks.createPaymentPlanWithInstallments).not.toHaveBeenCalled();
+  });
+
+  it('returns an authorized record replay after cancellation', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue({
+      id: 'booking-1',
+      clientId: 'client-1',
+      status: 'CANCELLED',
+      totalAmount: d('500.00'),
+      currencyCode: 'PHP',
+    });
+    repositoryMocks.findStatusHistoryByIdempotencyKey.mockResolvedValue({
+      previousStatus: null,
+      newStatus: 'PENDING',
+      paymentId: 'payment-1',
+    });
+    repositoryMocks.findPaymentForActor.mockResolvedValue({
+      id: 'payment-1',
+      bookingId: 'booking-1',
+      status: 'CONFIRMED',
+      amount: d('100.00'),
+    });
+    await expect(
+      recordPayment(FINANCE, {
+        bookingId: 'booking-1',
+        amount: '100.00',
+        idempotencyKey: 'old-key',
+      }),
+    ).resolves.toMatchObject({ id: 'payment-1' });
+    expect(repositoryMocks.createPendingPayment).not.toHaveBeenCalled();
+  });
+
+  it('blocks new confirmation while leaving the payment unchanged', async () => {
+    repositoryMocks.findPaymentForActor.mockResolvedValue({
+      id: 'payment-1',
+      bookingId: 'booking-1',
+      status: 'PENDING',
+      amount: d('100.00'),
+    });
+    repositoryMocks.findBookingStatus.mockResolvedValue('CANCELLED');
+    await expectPaymentError(
+      confirmPayment(FINANCE, {
+        paymentId: 'payment-1',
+        reason: 'received',
+        idempotencyKey: 'new-key',
+      }),
+      'BOOKING_STATUS_NOT_PERMITTED',
+    );
+    expect(repositoryMocks.transitionPaymentStatus).not.toHaveBeenCalled();
   });
 });
