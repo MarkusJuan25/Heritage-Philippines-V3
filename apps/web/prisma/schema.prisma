@@ -642,6 +642,7 @@ model User {
   // what each captures and why it is required, not nullable.
   paymentPlansProposed       PaymentPlan[]               @relation("PaymentPlanProposer")
   paymentPlansApproved       PaymentPlan[]               @relation("PaymentPlanApprover")
+  paymentPlansWithdrawn      PaymentPlan[]               @relation("PaymentPlanWithdrawer")
   paymentAllocationsRecorded PaymentAllocation[]
   paymentAllocationReversals PaymentAllocationReversal[]
   paymentRefundsPerformed    PaymentRefund[]
@@ -2051,14 +2052,17 @@ model Booking {
   documentRequirements DocumentRequirement[]
 
   // The Payment Schema Foundation checkpoint, Stage A
-  // (docs/HERITAGE_V3_DECISIONS_LOG.md D-019). Zero or one, per D-019's
-  // one-PaymentPlan-per-Booking MVP decision — see the PaymentPlan model
-  // doc comment below for the `bookingId @unique` field that backs this.
+  // (docs/HERITAGE_V3_DECISIONS_LOG.md D-019), amended by D-057: every
+  // PaymentPlan this Booking has had, of which at most one is active
+  // (`PROPOSED` or `APPROVED`) — the migration-only partial unique index
+  // `payment_plan_active_booking_key` enforces this; any number of
+  // `WITHDRAWN` plans may precede it. See the PaymentPlan model doc
+  // comment below.
   // `payments`: every Payment recorded directly against this Booking —
   // see the Payment model doc comment below for why `bookingId` is a
   // direct field rather than reached only through an Installment.
-  paymentPlan PaymentPlan?
-  payments    Payment[]
+  paymentPlans PaymentPlan[]
+  payments     Payment[]
 
   @@index([clientId])
   @@index([status])
@@ -3165,16 +3169,28 @@ enum PaymentStatus {
   REVERSED
 }
 
+// A PaymentPlan's lifecycle state (D-057 §1): PROPOSED → APPROVED, or
+// PROPOSED → WITHDRAWN; both are terminal.
+enum PaymentPlanStatus {
+  PROPOSED
+  APPROVED
+  WITHDRAWN
+}
+
 // The deposit/installment structure for a Booking (blueprint Sections 11,
 // 13.6, 14.6), created only through explicit staff action — never
 // automatically (blueprint Section 5.1's non-automatic creation rule) —
 // the Payment Schema Foundation checkpoint, Stage A
 // (docs/HERITAGE_V3_DECISIONS_LOG.md D-019).
 //
-// `bookingId @unique`: one PaymentPlan per Booking for the MVP (D-019),
-// the same plain-unique (not partial-unique) pattern already used for
-// `VisaCase.bookingId` — this checkpoint has no "current vs. superseded"
-// PaymentPlan concept for a partial index to distinguish. `clientId` is a
+// `bookingId`: D-019 originally allowed one PaymentPlan per Booking
+// (`@unique`). D-057 superseded that with an explicit lifecycle (see
+// `status` below): at most one *active* (`PROPOSED` or `APPROVED`) plan
+// per Booking, enforced by the migration-only partial unique index
+//   CREATE UNIQUE INDEX "payment_plan_active_booking_key"
+//     ON "payment_plan"("bookingId") WHERE "status" <> 'WITHDRAWN';
+// (migration 20260928000000_payment_plan_status_withdrawal), while any
+// number of `WITHDRAWN` plans are retained as history. `clientId` is a
 // direct FK, mirroring this schema's established
 // Lead/Proposal/Booking/Document.clientId convention; the future
 // PaymentPlan-creation service must verify `clientId` equals
@@ -3218,15 +3234,35 @@ enum PaymentStatus {
 // relies on for corrections that have no dedicated history table of their
 // own.
 //
-// Migration-only CHECK Prisma's schema language cannot express — does not
-// exist in any database yet, Stage A being schema-only (D-019):
+// Lifecycle (D-057 §1): `status` is `PROPOSED` → `APPROVED` (approval) or
+// `PROPOSED` → `WITHDRAWN` (withdrawal); both are terminal. A withdrawn
+// plan and its installments are retained unchanged apart from `status`
+// and the `withdrawnAt`/`withdrawnByStaffUserId`/`withdrawalReason`
+// fields; it is never re-activated — a correction is a new plan.
+//
+// Migration-only CHECKs Prisma's schema language cannot express (D-019;
+// D-057 §2). Together they make a plan's approval and withdrawal fields
+// impossible to contradict its `status`:
 //   ALTER TABLE "payment_plan"
 //     ADD CONSTRAINT "payment_plan_approval_pairing"
 //     CHECK (("approvedAt" IS NULL) = ("approvedByStaffUserId" IS NULL));
+//   ALTER TABLE "payment_plan"
+//     ADD CONSTRAINT "payment_plan_status_approval"
+//     CHECK (("status" = 'APPROVED') = ("approvedAt" IS NOT NULL));
+//   ALTER TABLE "payment_plan"
+//     ADD CONSTRAINT "payment_plan_status_withdrawal"
+//     CHECK (("status" = 'WITHDRAWN') = ("withdrawnAt" IS NOT NULL));
+//   ALTER TABLE "payment_plan"
+//     ADD CONSTRAINT "payment_plan_withdrawal_pairing"
+//     CHECK (num_nonnulls("withdrawnAt", "withdrawnByStaffUserId",
+//       "withdrawalReason") IN (0, 3));
+//   ALTER TABLE "payment_plan"
+//     ADD CONSTRAINT "payment_plan_withdrawal_reason_required"
+//     CHECK ("withdrawalReason" IS NULL OR btrim("withdrawalReason") <> '');
 model PaymentPlan {
   id String @id
 
-  bookingId String  @unique
+  bookingId String
   booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
 
   clientId String
@@ -3239,14 +3275,24 @@ model PaymentPlan {
   approvedBy            User?     @relation("PaymentPlanApprover", fields: [approvedByStaffUserId], references: [id], onDelete: Restrict)
   approvedAt            DateTime?
 
+  // D-057: the plan's lifecycle state and, once withdrawn, who withdrew it,
+  // when, and why (all three set together, or none).
+  status                 PaymentPlanStatus @default(PROPOSED)
+  withdrawnAt            DateTime?
+  withdrawnByStaffUserId String?
+  withdrawnBy            User?             @relation("PaymentPlanWithdrawer", fields: [withdrawnByStaffUserId], references: [id], onDelete: Restrict)
+  withdrawalReason       String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   installments Installment[]
 
+  @@index([bookingId])
   @@index([clientId])
   @@index([proposedByStaffUserId])
   @@index([approvedByStaffUserId])
+  @@index([withdrawnByStaffUserId])
   @@map("payment_plan")
 }
 

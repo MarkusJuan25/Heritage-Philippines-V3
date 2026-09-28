@@ -1,0 +1,7 @@
+# Line endings: this repository has no repo-wide policy (core.autocrlf is
+# left to each clone; see docs/HERITAGE_V3_DECISIONS_LOG.md D-039 F6).
+#
+# D-057 §2: the rollout pre-check requires a migration's working-copy bytes
+# to match its committed bytes. Pin this migration to LF on every checkout.
+# Existing migrations are deliberately not listed; their checkout is unchanged.
+apps/web/prisma/migrations/20260928000000_payment_plan_status_withdrawal/migration.sql text eol=lf
