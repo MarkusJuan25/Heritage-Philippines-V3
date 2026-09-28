@@ -11,11 +11,41 @@ import {
   refundPaymentSchema,
   reverseAllocationSchema,
   reversePaymentSchema,
+  setBookingFinancialsSchema,
+  listPaymentBookingsSchema,
   withdrawPaymentPlanSchema,
 } from './schemas';
 
 const UUID_A = '11111111-1111-4111-8111-111111111111';
 const UUID_B = '22222222-2222-4222-8222-222222222222';
+
+describe('D-056 P4 inputs', () => {
+  const financials = { bookingId: UUID_A, totalAmount: '150.00', currencyCode: 'PHP' };
+  it('accepts PHP and trims a correction reason', () => {
+    expect(setBookingFinancialsSchema.parse({ ...financials, reason: ' corrected ' }).reason).toBe(
+      'corrected',
+    );
+  });
+  it.each(['USD', 'PHO', 'php'])('rejects unapproved currency %s', (currencyCode) => {
+    expect(setBookingFinancialsSchema.safeParse({ ...financials, currencyCode }).success).toBe(
+      false,
+    );
+  });
+  it('rejects malformed amount and extra fields', () => {
+    expect(
+      setBookingFinancialsSchema.safeParse({ ...financials, totalAmount: '150.001' }).success,
+    ).toBe(false);
+    expect(setBookingFinancialsSchema.safeParse({ ...financials, approvedAt: null }).success).toBe(
+      false,
+    );
+  });
+  it('bounds pagination and plan filter', () => {
+    expect(
+      listPaymentBookingsSchema.parse({ page: '2', pageSize: '20', planState: 'withdrawn' }),
+    ).toEqual({ page: 2, pageSize: 20, planState: 'withdrawn' });
+    expect(listPaymentBookingsSchema.safeParse({ pageSize: '1000' }).success).toBe(false);
+  });
+});
 
 describe('positiveMoneyAmountSchema', () => {
   it.each(['0.01', '1.00', '150.00', '9999999999999.99'])('accepts %s', (value) => {

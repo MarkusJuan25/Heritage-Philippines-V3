@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { Prisma } from '@/generated/prisma/client';
+import { SUPPORTED_CURRENCIES, hasSupportedCurrencyPrecision } from './currencies';
 
 // Every monetary amount in this feature is accepted as a decimal string,
 // never a JavaScript `number` (CLAUDE.md §8; .claude/rules/database-security.md's
@@ -44,6 +45,23 @@ const reasonSchema = z
   .max(1000, 'reason must be at most 1000 characters');
 
 const uuidSchema = z.string().uuid();
+
+export const supportedCurrencySchema = z.enum(
+  SUPPORTED_CURRENCIES.map((currency) => currency.code),
+);
+export const setBookingFinancialsSchema = z
+  .object({
+    bookingId: uuidSchema,
+    totalAmount: positiveMoneyAmountSchema,
+    currencyCode: supportedCurrencySchema,
+    reason: reasonSchema.optional(),
+  })
+  .strict()
+  .refine((value) => hasSupportedCurrencyPrecision(value.totalAmount, value.currencyCode), {
+    path: ['totalAmount'],
+    message: 'amount precision is not supported for this currency',
+  });
+export type SetBookingFinancialsInput = z.infer<typeof setBookingFinancialsSchema>;
 
 // --- Payment-plan proposal (D-054 §§3, 6; blueprint §11.3, §11.4) ---
 // `.strict()` throughout this file, matching features/bookings/schemas.ts's
@@ -227,3 +245,13 @@ export type ReverseAllocationInput = z.infer<typeof reverseAllocationSchema>;
 // --- Reads ---
 
 export const bookingIdParamSchema = z.object({ bookingId: uuidSchema });
+
+export const listPaymentBookingsSchema = z
+  .object({
+    search: z.string().trim().max(200).optional(),
+    planState: z.enum(['none', 'proposed', 'approved', 'withdrawn']).optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  })
+  .strict();
+export type ListPaymentBookingsInput = z.infer<typeof listPaymentBookingsSchema>;

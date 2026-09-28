@@ -90,6 +90,9 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
   let issueReceipt: (typeof import('./service'))['issueReceipt'];
   let getBookingPaymentSummaryForStaff: (typeof import('./service'))['getBookingPaymentSummaryForStaff'];
   let getClientPaymentSummaries: (typeof import('./service'))['getClientPaymentSummaries'];
+  let setBookingFinancials: (typeof import('./service'))['setBookingFinancials'];
+  let listPaymentBookingsForActor: (typeof import('./service'))['listPaymentBookingsForActor'];
+  let getPaymentBookingHeaderForActor: (typeof import('./service'))['getPaymentBookingHeaderForActor'];
   let PaymentError: (typeof import('./errors'))['PaymentError'];
   let createProposal: (typeof import('@/features/proposals/service'))['createProposal'];
   let publishProposalVersion: (typeof import('@/features/proposals/service'))['publishProposalVersion'];
@@ -141,6 +144,9 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       issueReceipt,
       getBookingPaymentSummaryForStaff,
       getClientPaymentSummaries,
+      setBookingFinancials,
+      listPaymentBookingsForActor,
+      getPaymentBookingHeaderForActor,
     } = await import('./service'));
     ({ PaymentError } = await import('./errors'));
     ({ createProposal, publishProposalVersion, recordProposalResponse } =
@@ -368,6 +374,154 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
 
     return { bookingId: booking.id, clientId: client.id };
   }
+
+  it('sets and locks Booking financials by active plan and independently by a Payment', async () => {
+    const { bookingId } = await createAssignedBookingFixture();
+    await prisma!.booking.update({
+      where: { id: bookingId },
+      data: { totalAmount: null, currencyCode: null },
+    });
+    const input = { bookingId, totalAmount: '500.00', currencyCode: 'PHP' as const };
+    await expect(setBookingFinancials(tcActor, input)).rejects.toMatchObject({
+      code: 'ROLE_NOT_PERMITTED',
+    });
+    await expect(setBookingFinancials(adminActor, input)).rejects.toMatchObject({
+      code: 'ROLE_NOT_PERMITTED',
+    });
+    await expect(
+      setBookingFinancials(financeActor, { ...input, currencyCode: 'USD' as 'PHP' }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_CONFLICT' });
+    const set = await setBookingFinancials(financeActor, input);
+    expect(set.totalAmount?.toFixed(2)).toBe('500.00');
+    await expect(
+      setBookingFinancials(financeActor, { ...input, totalAmount: '600.00' }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_CONFLICT' });
+    const corrected = await setBookingFinancials(financeActor, {
+      ...input,
+      totalAmount: '600.00',
+      reason: 'Agreed correction',
+    });
+    expect(corrected.totalAmount?.toFixed(2)).toBe('600.00');
+    const plan = await proposePaymentPlan(tcActor, {
+      bookingId,
+      installments: [
+        { sequenceNumber: 1, isDeposit: true, amount: '600.00', dueDate: '2026-10-01' },
+      ],
+    });
+    await expect(setBookingFinancials(financeActor, input)).rejects.toMatchObject({
+      code: 'BOOKING_FINANCIALS_LOCKED',
+    });
+    await withdrawPaymentPlan(tcActor, { paymentPlanId: plan.id, reason: 'Change terms' });
+    await expect(setBookingFinancials(financeActor, input)).resolves.toMatchObject({
+      currencyCode: 'PHP',
+    });
+    await recordPayment(financeActor, { bookingId, amount: '10.00', idempotencyKey: randomUUID() });
+    await expect(
+      setBookingFinancials(financeActor, { ...input, totalAmount: '700.00', reason: 'New quote' }),
+    ).rejects.toMatchObject({ code: 'BOOKING_FINANCIALS_LOCKED' });
+  });
+
+  it('scopes and pages the payment Booking list and header', async () => {
+    const { bookingId } = await createAssignedBookingFixture();
+    const listed = await listPaymentBookingsForActor(financeActor, {
+      page: 1,
+      pageSize: 20,
+      planState: 'none',
+    });
+    expect(listed.items.some((booking) => booking.id === bookingId)).toBe(true);
+    expect(listed.total).toBeGreaterThanOrEqual(1);
+    await expect(getPaymentBookingHeaderForActor(financeActor, bookingId)).resolves.toMatchObject({
+      id: bookingId,
+      client: { fullName: expect.any(String) },
+    });
+    const unassigned = await listPaymentBookingsForActor(
+      { ...financeActor, id: randomUUID() },
+      { page: 1, pageSize: 20 },
+    );
+    expect(unassigned.items.some((booking) => booking.id === bookingId)).toBe(false);
+    await expect(
+      getPaymentBookingHeaderForActor({ ...financeActor, id: randomUUID() }, bookingId),
+    ).rejects.toMatchObject({ code: 'BOOKING_FORBIDDEN' });
+  });
+
+  it('blocks new plan, payment and financial writes on CANCELLED while preserving a record replay', async () => {
+    const { bookingId } = await createAssignedBookingFixture();
+    const oldKey = `record-${randomUUID()}`;
+    const pending = await recordPayment(financeActor, {
+      bookingId,
+      amount: '25.00',
+      idempotencyKey: oldKey,
+    });
+    await prisma!.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED' } });
+    await expect(
+      proposePaymentPlan(tcActor, {
+        bookingId,
+        installments: [
+          { sequenceNumber: 1, isDeposit: true, amount: '500.00', dueDate: '2026-10-01' },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_STATUS_NOT_PERMITTED' });
+    await expect(
+      recordPayment(financeActor, { bookingId, amount: '25.00', idempotencyKey: randomUUID() }),
+    ).rejects.toMatchObject({ code: 'BOOKING_STATUS_NOT_PERMITTED' });
+    await expect(
+      confirmPayment(financeActor, {
+        paymentId: pending.id,
+        reason: 'received',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_STATUS_NOT_PERMITTED' });
+    await expect(
+      setBookingFinancials(financeActor, {
+        bookingId,
+        totalAmount: '600.00',
+        currencyCode: 'PHP',
+        reason: 'correction',
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_STATUS_NOT_PERMITTED' });
+    await expect(
+      recordPayment(financeActor, { bookingId, amount: '25.00', idempotencyKey: oldKey }),
+    ).resolves.toMatchObject({ id: pending.id });
+  });
+
+  it('blocks plan approval and allocation after cancellation, but allows withdrawing a proposed plan', async () => {
+    const { bookingId } = await createAssignedBookingFixture();
+    const plan = await proposePaymentPlan(tcActor, {
+      bookingId,
+      installments: [
+        { sequenceNumber: 1, isDeposit: true, amount: '500.00', dueDate: '2026-10-01' },
+      ],
+    });
+    const installment = await prisma!.installment.findFirstOrThrow({
+      where: { paymentPlanId: plan.id },
+      select: { id: true },
+    });
+    const payment = await recordPayment(financeActor, {
+      bookingId,
+      amount: '100.00',
+      idempotencyKey: randomUUID(),
+    });
+    await confirmPayment(financeActor, {
+      paymentId: payment.id,
+      reason: 'received',
+      idempotencyKey: randomUUID(),
+    });
+    await prisma!.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED' } });
+    await expect(
+      approvePaymentPlan(financeActor, { paymentPlanId: plan.id }),
+    ).rejects.toMatchObject({ code: 'BOOKING_STATUS_NOT_PERMITTED' });
+    await expect(
+      createAllocation(financeActor, {
+        paymentId: payment.id,
+        installmentId: installment.id,
+        amount: '50.00',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'BOOKING_STATUS_NOT_PERMITTED' });
+    await expect(
+      withdrawPaymentPlan(tcActor, { paymentPlanId: plan.id, reason: 'Cancelled Booking' }),
+    ).resolves.toMatchObject({ status: 'WITHDRAWN' });
+  });
 
   it('runs the full happy path: propose, approve, record, confirm, allocate — and the summary reflects D-019 formulas exactly', async () => {
     const { bookingId, clientId } = await createAssignedBookingFixture('500.00');

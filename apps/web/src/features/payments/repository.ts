@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Prisma, PaymentPlanStatus, PaymentStatus } from '@/generated/prisma/client';
+import { BookingStatus, Prisma, PaymentPlanStatus, PaymentStatus } from '@/generated/prisma/client';
 
 // The only layer that talks to the database for this feature
 // (.claude/rules/backend.md's "Repository/data-access layer"). Every
@@ -84,6 +84,7 @@ function bookingAssignmentFilter(actor: PaymentActor): Prisma.BookingWhereInput 
 export type BookingFinancials = {
   id: string;
   clientId: string;
+  status: BookingStatus;
   totalAmount: Prisma.Decimal | null;
   currencyCode: string | null;
 };
@@ -91,6 +92,7 @@ export type BookingFinancials = {
 const BOOKING_FINANCIALS_SELECT = {
   id: true,
   clientId: true,
+  status: true,
   totalAmount: true,
   currencyCode: true,
 } as const;
@@ -105,6 +107,115 @@ export async function findBookingFinancialsForActor(
     where: { id: bookingId, ...bookingAssignmentFilter(actor) },
     select: BOOKING_FINANCIALS_SELECT,
   });
+}
+
+/** Read both independent financial locks in the write transaction. */
+export async function hasFinancialLock(
+  db: Prisma.TransactionClient,
+  bookingId: string,
+): Promise<boolean> {
+  const [plan, payment] = await Promise.all([
+    db.paymentPlan.findFirst({
+      where: { bookingId, status: { not: PaymentPlanStatus.WITHDRAWN } },
+      select: { id: true },
+    }),
+    db.payment.findFirst({ where: { bookingId }, select: { id: true } }),
+  ]);
+  return plan !== null || payment !== null;
+}
+
+export async function updateBookingFinancials(
+  db: Prisma.TransactionClient,
+  bookingId: string,
+  totalAmount: string,
+  currencyCode: string,
+): Promise<BookingFinancials> {
+  return db.booking.update({
+    where: { id: bookingId },
+    data: { totalAmount, currencyCode },
+    select: BOOKING_FINANCIALS_SELECT,
+  });
+}
+
+export async function findBookingStatus(
+  db: Prisma.TransactionClient,
+  bookingId: string,
+): Promise<BookingStatus | null> {
+  const booking = await db.booking.findUnique({
+    where: { id: bookingId },
+    select: { status: true },
+  });
+  return booking?.status ?? null;
+}
+
+export type PaymentBookingHeader = {
+  id: string;
+  bookingReference: string;
+  status: BookingStatus;
+  client: { fullName: string };
+};
+
+const PAYMENT_BOOKING_HEADER_SELECT = {
+  id: true,
+  bookingReference: true,
+  status: true,
+  client: { select: { fullName: true } },
+} as const;
+
+export async function findPaymentBookingHeaderForActor(
+  db: Prisma.TransactionClient,
+  actor: PaymentActor,
+  bookingId: string,
+): Promise<PaymentBookingHeader | null> {
+  return db.booking.findFirst({
+    where: { id: bookingId, ...bookingAssignmentFilter(actor) },
+    select: PAYMENT_BOOKING_HEADER_SELECT,
+  });
+}
+
+export type PaymentBookingPlanFilter = 'none' | 'proposed' | 'approved' | 'withdrawn';
+
+export async function listPaymentBookingsForActor(
+  db: Prisma.TransactionClient,
+  actor: PaymentActor,
+  params: { search?: string; planState?: PaymentBookingPlanFilter; skip: number; take: number },
+): Promise<{ items: PaymentBookingHeader[]; total: number }> {
+  const activePlan = { status: { not: PaymentPlanStatus.WITHDRAWN } };
+  const planWhere: Prisma.BookingWhereInput =
+    params.planState === 'none'
+      ? { paymentPlans: { none: {} } }
+      : params.planState === 'withdrawn'
+        ? { paymentPlans: { some: { status: PaymentPlanStatus.WITHDRAWN }, none: activePlan } }
+        : params.planState === 'proposed' || params.planState === 'approved'
+          ? {
+              paymentPlans: {
+                some: {
+                  status:
+                    params.planState === 'proposed'
+                      ? PaymentPlanStatus.PROPOSED
+                      : PaymentPlanStatus.APPROVED,
+                },
+              },
+            }
+          : {};
+  const where: Prisma.BookingWhereInput = {
+    ...bookingAssignmentFilter(actor),
+    ...planWhere,
+    ...(params.search
+      ? { bookingReference: { contains: params.search, mode: 'insensitive' } }
+      : {}),
+  };
+  const [items, total] = await Promise.all([
+    db.booking.findMany({
+      where,
+      select: PAYMENT_BOOKING_HEADER_SELECT,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: params.skip,
+      take: params.take,
+    }),
+    db.booking.count({ where }),
+  ]);
+  return { items, total };
 }
 
 export type PaymentPlanRecord = {
