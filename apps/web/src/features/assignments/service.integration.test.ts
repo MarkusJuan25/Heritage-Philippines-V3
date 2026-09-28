@@ -619,6 +619,331 @@ describe.skipIf(!hasTestDatabaseUrl)('assignments service integration (real data
     expect(financeRow.updatedAt).toEqual(financeRow.createdAt);
   }, 20000);
 
+  // --- D-056 §1: Booking Finance/Accounting assignment — real database ---
+  describe('Booking Finance/Accounting assignment (D-056 §1) — real database', () => {
+    let service: typeof import('./service');
+    let payments: typeof import('@/features/payments/service');
+    let financeA: AuthenticatedUser;
+    let financeB: AuthenticatedUser;
+    let inactiveFinanceId: string;
+    const suffix = randomUUID();
+
+    async function createStaff(
+      label: string,
+      role: 'FINANCE_ACCOUNTING' | 'TRAVEL_CONSULTANT',
+      isActive = true,
+    ): Promise<AuthenticatedUser> {
+      const user: AuthenticatedUser = {
+        id: randomUUID(),
+        name: `${label} Finance-P1 ${suffix}`,
+        email: `finance-p1-${label.toLowerCase()}-${randomUUID()}@example.test`,
+        role,
+      };
+      await prisma!.user.create({ data: { ...user, isActive } });
+      createdUserIds.push(user.id);
+      return user;
+    }
+
+    async function financeAudits(bookingId: string) {
+      return prisma!.auditLog.findMany({
+        where: { entityType: 'Booking', entityId: bookingId, action: { contains: '_ASSIGNMENT_' } },
+        orderBy: { createdAt: 'asc' },
+        select: { action: true, actorId: true, beforeState: true, afterState: true },
+      });
+    }
+
+    async function activeFinanceRows(bookingId: string) {
+      return prisma!.staffAssignment.findMany({
+        where: { bookingId, role: 'FINANCE_ACCOUNTING', endedAt: null },
+      });
+    }
+
+    beforeAll(async () => {
+      service = await import('./service');
+      payments = await import('@/features/payments/service');
+      financeA = await createStaff('Anna', 'FINANCE_ACCOUNTING');
+      financeB = await createStaff('Boris', 'FINANCE_ACCOUNTING');
+      inactiveFinanceId = (await createStaff('Inactive', 'FINANCE_ACCOUNTING', false)).id;
+      await createStaff('Consultant', 'TRAVEL_CONSULTANT');
+    });
+
+    it('lists only active Finance/Accounting users, by name, and refuses non-Admin/Manager', async () => {
+      const result = await service.listEligibleFinanceStaff(adminActor, {
+        search: `Finance-P1 ${suffix}`,
+        page: 1,
+        pageSize: 20,
+      });
+      expect(result.items.map((item) => item.id)).toEqual([financeA.id, financeB.id]);
+      expect(result.total).toBe(2);
+      await expect(
+        service.listEligibleFinanceStaff(financeA, { page: 1, pageSize: 20 }),
+      ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED' });
+    });
+
+    it('creates, replaces, and ends the assignment, keeping history rows and writing only BOOKING_FINANCE_ASSIGNMENT_* audit entries', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+
+      const created = await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+      expect(created).toMatchObject({ assignedStaffId: financeA.id, role: 'FINANCE_ACCOUNTING' });
+
+      await expect(
+        service.setBookingFinanceAssignment(adminActor, bookingId, financeB.id),
+      ).rejects.toMatchObject({ code: 'REASON_REQUIRED' });
+
+      const replaced = await service.setBookingFinanceAssignment(
+        adminActor,
+        bookingId,
+        financeB.id,
+        'Anna on leave',
+      );
+      const ended = await service.endBookingFinanceAssignment(adminActor, bookingId, 'Closed out');
+      expect(ended?.id).toBe(replaced.id);
+      expect(ended?.endedAt).not.toBeNull();
+
+      const rows = await prisma!.staffAssignment.findMany({
+        where: { bookingId, role: 'FINANCE_ACCOUNTING' },
+        orderBy: { createdAt: 'asc' },
+      });
+      expect(rows.map((r) => [r.assignedStaffId, r.endedAt !== null])).toEqual([
+        [financeA.id, true],
+        [financeB.id, true],
+      ]);
+
+      const audits = await financeAudits(bookingId);
+      expect(audits.map((a) => a.action)).toEqual([
+        'BOOKING_FINANCE_ASSIGNMENT_CREATED',
+        'BOOKING_FINANCE_ASSIGNMENT_REPLACED',
+        'BOOKING_FINANCE_ASSIGNMENT_ENDED',
+      ]);
+      for (const audit of audits) expect(audit.actorId).toBe(adminActor.id);
+      expect(audits[0]!.beforeState).toBeNull();
+      expect(audits[0]!.afterState).toMatchObject({
+        id: created.id,
+        assignedStaffId: financeA.id,
+        bookingId,
+        role: 'FINANCE_ACCOUNTING',
+        endedAt: null,
+      });
+      expect(audits[1]!.beforeState).toMatchObject({
+        id: created.id,
+        assignedStaffId: financeA.id,
+      });
+      expect(audits[1]!.afterState).toMatchObject({
+        id: replaced.id,
+        assignedStaffId: financeB.id,
+        role: 'FINANCE_ACCOUNTING',
+        reason: 'Anna on leave',
+      });
+      expect(audits[2]!.beforeState).toMatchObject({ id: replaced.id, endedAt: null });
+      expect(audits[2]!.afterState).toMatchObject({ id: replaced.id, reason: 'Closed out' });
+      expect((audits[2]!.afterState as { endedAt: string | null }).endedAt).not.toBeNull();
+
+      // Ending again is a no-op.
+      await expect(
+        service.endBookingFinanceAssignment(adminActor, bookingId, 'Again'),
+      ).resolves.toBeNull();
+      expect(await financeAudits(bookingId)).toHaveLength(3);
+    }, 30000);
+
+    it('is idempotent for the already-active assignee: no new row and no audit entry', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+      const first = await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+      const again = await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+      expect(again.id).toBe(first.id);
+      expect(await activeFinanceRows(bookingId)).toHaveLength(1);
+      expect(await financeAudits(bookingId)).toHaveLength(1);
+    }, 30000);
+
+    it('refuses ineligible assignees and non-Admin/Manager actors without writing', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+      await expect(
+        service.setBookingFinanceAssignment(adminActor, bookingId, activeTc1Id),
+      ).rejects.toMatchObject({ code: 'ASSIGNEE_INELIGIBLE_ROLE' });
+      await expect(
+        service.setBookingFinanceAssignment(adminActor, bookingId, inactiveFinanceId),
+      ).rejects.toMatchObject({ code: 'ASSIGNEE_INACTIVE' });
+      await expect(
+        service.setBookingFinanceAssignment(adminActor, bookingId, adminActor.id),
+      ).rejects.toMatchObject({ code: 'ASSIGNEE_INELIGIBLE_ROLE' });
+      await expect(
+        service.setBookingFinanceAssignment(financeA, bookingId, financeA.id),
+      ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED' });
+      await expect(
+        service.setBookingFinanceAssignment(adminActor, randomUUID(), financeA.id),
+      ).rejects.toMatchObject({ code: 'BOOKING_NOT_FOUND' });
+      expect(await activeFinanceRows(bookingId)).toHaveLength(0);
+      expect(await financeAudits(bookingId)).toHaveLength(0);
+    }, 30000);
+
+    it('leaves the Travel Consultant Booking assignment untouched in both directions', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+      const tc = await setBookingAssignment(adminActor, bookingId, activeTc1Id);
+
+      await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+      await service.setBookingFinanceAssignment(adminActor, bookingId, financeB.id, 'Swap');
+      await service.endBookingFinanceAssignment(adminActor, bookingId, 'Closed out');
+      const tcAfterFinance = await prisma!.staffAssignment.findUniqueOrThrow({
+        where: { id: tc.id },
+      });
+      expect(tcAfterFinance.endedAt).toBeNull();
+      expect(tcAfterFinance.updatedAt).toEqual(tcAfterFinance.createdAt);
+
+      const finance = await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+      await setBookingAssignment(adminActor, bookingId, activeTc2Id, 'Consultant swap');
+      const financeAfterTc = await prisma!.staffAssignment.findUniqueOrThrow({
+        where: { id: finance.id },
+      });
+      expect(financeAfterTc.endedAt).toBeNull();
+
+      const actions = (await financeAudits(bookingId)).map((a) => a.action);
+      expect(actions.filter((a) => a.startsWith('BOOKING_ASSIGNMENT_'))).toEqual([
+        'BOOKING_ASSIGNMENT_CREATED',
+        'BOOKING_ASSIGNMENT_REPLACED',
+      ]);
+      expect(actions.filter((a) => a.startsWith('BOOKING_FINANCE_ASSIGNMENT_'))).toEqual([
+        'BOOKING_FINANCE_ASSIGNMENT_CREATED',
+        'BOOKING_FINANCE_ASSIGNMENT_REPLACED',
+        'BOOKING_FINANCE_ASSIGNMENT_ENDED',
+        'BOOKING_FINANCE_ASSIGNMENT_CREATED',
+      ]);
+    }, 30000);
+
+    it('resolves concurrent sets to exactly one active assignment, never a raw database error', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+      const results = await Promise.allSettled([
+        service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id),
+        service.setBookingFinanceAssignment(adminActor, bookingId, financeB.id),
+        service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id),
+        service.setBookingFinanceAssignment(adminActor, bookingId, financeB.id),
+      ]);
+
+      const active = await activeFinanceRows(bookingId);
+      expect(active).toHaveLength(1);
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          expect(result.value.id).toBe(active[0]!.id);
+        } else {
+          expect(result.reason).toBeInstanceOf(AssignmentError);
+          expect(['REASON_REQUIRED', 'ASSIGNMENT_CONFLICT']).toContain(result.reason.code);
+        }
+      }
+      // No reason was given, so nothing could be replaced: one CREATED entry.
+      expect((await financeAudits(bookingId)).map((a) => a.action)).toEqual([
+        'BOOKING_FINANCE_ASSIGNMENT_CREATED',
+      ]);
+    }, 30000);
+
+    it('keeps at most one active row and a matching audit trail under a concurrent replace and end', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+      await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+
+      const results = await Promise.allSettled([
+        service.setBookingFinanceAssignment(adminActor, bookingId, financeB.id, 'Swap'),
+        service.endBookingFinanceAssignment(adminActor, bookingId, 'Closed out'),
+      ]);
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          expect(result.reason).toBeInstanceOf(AssignmentError);
+          expect(result.reason.code).toBe('ASSIGNMENT_CONFLICT');
+        }
+      }
+
+      const active = await activeFinanceRows(bookingId);
+      expect(active.length).toBeLessThanOrEqual(1);
+      const all = await prisma!.staffAssignment.findMany({
+        where: { bookingId, role: 'FINANCE_ACCOUNTING' },
+      });
+      const actions = (await financeAudits(bookingId)).map((a) => a.action);
+      // One audit entry per row created, plus one per ENDED-without-replacement.
+      expect(actions.filter((a) => a !== 'BOOKING_FINANCE_ASSIGNMENT_ENDED')).toHaveLength(
+        all.length,
+      );
+      expect(all.filter((r) => r.endedAt === null)).toHaveLength(active.length);
+    }, 30000);
+
+    it('may be set on, and remain on, CANCELLED and COMPLETED bookings', async () => {
+      for (const status of ['CANCELLED', 'COMPLETED'] as const) {
+        const { bookingId } = await createAcceptedBookingFixture();
+        await prisma!.booking.update({ where: { id: bookingId }, data: { status } });
+        await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+        await service.setBookingFinanceAssignment(adminActor, bookingId, financeB.id, 'Swap');
+        const active = await activeFinanceRows(bookingId);
+        expect(active.map((r) => r.assignedStaffId)).toEqual([financeB.id]);
+      }
+    }, 60000);
+
+    it('authorizes the assignee for payment reads without overriding a payment operation guard, and stops when ended', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+      await expect(
+        payments.getBookingPaymentSummaryForStaff(financeA, bookingId),
+      ).rejects.toMatchObject({ code: 'BOOKING_FORBIDDEN' });
+
+      await service.setBookingFinanceAssignment(adminActor, bookingId, financeA.id);
+      const summary = await payments.getBookingPaymentSummaryForStaff(financeA, bookingId);
+      expect(summary.bookingId).toBe(bookingId);
+      // The assignment authorizes; recordPayment's own guard still applies.
+      await expect(
+        payments.recordPayment(financeA, {
+          bookingId,
+          amount: '100.00',
+          idempotencyKey: randomUUID(),
+        }),
+      ).rejects.toMatchObject({ code: 'BOOKING_CURRENCY_NOT_SET' });
+
+      await service.endBookingFinanceAssignment(adminActor, bookingId, 'Closed out');
+      await expect(
+        payments.getBookingPaymentSummaryForStaff(financeA, bookingId),
+      ).rejects.toMatchObject({ code: 'BOOKING_FORBIDDEN' });
+    }, 30000);
+
+    it('reads the current assignment for Admin/Manager only, flagging a stale assignee whose payment access has stopped', async () => {
+      const { bookingId } = await createAcceptedBookingFixture();
+      await expect(service.getBookingFinanceAssignment(adminActor, bookingId)).resolves.toBeNull();
+
+      const stale = await createStaff('Stale', 'FINANCE_ACCOUNTING');
+      await service.setBookingFinanceAssignment(adminActor, bookingId, stale.id);
+      await expect(
+        service.getBookingFinanceAssignment(adminActor, bookingId),
+      ).resolves.toMatchObject({ assignedStaffId: stale.id, assigneeEligible: true });
+      // Only Admin/Manager reads the assignment — never the assignee (D-056 §1).
+      for (const other of [stale, financeB, chainTcActor]) {
+        await expect(service.getBookingFinanceAssignment(other, bookingId)).rejects.toMatchObject({
+          code: 'ROLE_NOT_PERMITTED',
+        });
+      }
+      // While still Finance/Accounting, the assignee can read the payments.
+      await expect(
+        payments.getBookingPaymentSummaryForStaff(stale, bookingId),
+      ).resolves.toMatchObject({ bookingId });
+
+      // The assignee's staff role changes; the Finance row stays active.
+      await prisma!.user.update({ where: { id: stale.id }, data: { role: 'TRAVEL_CONSULTANT' } });
+      const staleNow: AuthenticatedUser = { ...stale, role: 'TRAVEL_CONSULTANT' };
+      await expect(
+        service.getBookingFinanceAssignment(adminActor, bookingId),
+      ).resolves.toMatchObject({
+        assignedStaffId: stale.id,
+        assigneeEligible: false,
+        assignee: { role: 'TRAVEL_CONSULTANT' },
+      });
+      // Regression (D-054 §16, D-056 §1): the stale FINANCE_ACCOUNTING row
+      // grants nothing once its holder's current role differs.
+      await expect(
+        payments.getBookingPaymentSummaryForStaff(staleNow, bookingId),
+      ).rejects.toMatchObject({ code: 'BOOKING_FORBIDDEN' });
+      expect(
+        await prisma!.staffAssignment.count({
+          where: {
+            bookingId,
+            assignedStaffId: stale.id,
+            role: 'FINANCE_ACCOUNTING',
+            endedAt: null,
+          },
+        }),
+      ).toBe(1);
+    }, 30000);
+  });
+
   // --- D-040 §9: one CLIENT-actor case for Contract F ---
   describe('getActiveConsultantNameForClient (D-040 Contract F) — real database', () => {
     let getActiveConsultantNameForClient: (typeof import('./service'))['getActiveConsultantNameForClient'];

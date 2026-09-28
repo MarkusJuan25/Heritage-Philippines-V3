@@ -289,3 +289,130 @@ export async function findActiveConsultantNameForClient(
   });
   return row ? { name: row.assignedStaff.name } : null;
 }
+
+// --- Booking Finance/Accounting assignment (D-056 §1) ---
+// A Booking carries at most one active FINANCE_ACCOUNTING assignment,
+// independent of its Travel Consultant assignment: the partial unique index
+// `staff_assignment_active_booking_role_key` (`(bookingId, role) WHERE
+// endedAt IS NULL`) permits one active row per Booking per role. Every
+// function below scopes by `role: 'FINANCE_ACCOUNTING'` in the query itself,
+// so it can never read, end, or replace the Travel Consultant row — and
+// `findActiveAssignmentForBooking` above stays Travel-Consultant-only.
+
+export type RoleAssignmentRecord = AssignmentRecord & { role: AppRole };
+
+const ROLE_ASSIGNMENT_SELECT = { ...ASSIGNMENT_SELECT, role: true } as const;
+
+/** The Booking's active Finance/Accounting assignment, if any. */
+export async function findActiveFinanceAssignmentForBooking(
+  db: Prisma.TransactionClient,
+  bookingId: string,
+): Promise<RoleAssignmentRecord | null> {
+  return db.staffAssignment.findFirst({
+    where: { bookingId, role: 'FINANCE_ACCOUNTING', endedAt: null },
+    select: ROLE_ASSIGNMENT_SELECT,
+  });
+}
+
+export async function createBookingFinanceAssignment(
+  db: Prisma.TransactionClient,
+  input: { id: string; assignedStaffId: string; assignedByUserId: string; bookingId: string },
+): Promise<RoleAssignmentRecord> {
+  return db.staffAssignment.create({
+    data: {
+      id: input.id,
+      assignedStaffId: input.assignedStaffId,
+      assignedByUserId: input.assignedByUserId,
+      role: 'FINANCE_ACCOUNTING',
+      bookingId: input.bookingId,
+    },
+    select: ROLE_ASSIGNMENT_SELECT,
+  });
+}
+
+// Ends a Finance/Accounting assignment by setting `endedAt` — never deletes
+// the row (see `endAssignmentById` above).
+export async function endRoleAssignmentById(
+  db: Prisma.TransactionClient,
+  id: string,
+): Promise<RoleAssignmentRecord> {
+  return db.staffAssignment.update({
+    where: { id },
+    data: { endedAt: new Date() },
+    select: ROLE_ASSIGNMENT_SELECT,
+  });
+}
+
+export type BookingFinanceAssignmentRow = {
+  id: string;
+  bookingId: string;
+  assignedStaffId: string;
+  assignedByUserId: string;
+  createdAt: Date;
+  assignedStaff: { id: string; name: string; email: string; role: AppRole; isActive: boolean };
+};
+
+/**
+ * The Booking's active Finance/Accounting assignment with its assignee's
+ * current account state, for the admin Booking view (D-056 §1: a stale row
+ * must be visible).
+ */
+export async function findActiveFinanceAssignmentView(
+  db: Prisma.TransactionClient,
+  bookingId: string,
+): Promise<BookingFinanceAssignmentRow | null> {
+  const row = await db.staffAssignment.findFirst({
+    where: { bookingId, role: 'FINANCE_ACCOUNTING', endedAt: null },
+    select: {
+      id: true,
+      bookingId: true,
+      assignedStaffId: true,
+      assignedByUserId: true,
+      createdAt: true,
+      assignedStaff: {
+        select: { id: true, name: true, email: true, role: true, isActive: true },
+      },
+    },
+  });
+  if (!row || row.bookingId === null) return null;
+  return { ...row, bookingId: row.bookingId };
+}
+
+export type EligibleFinanceStaff = { id: string; name: string; email: string };
+
+/**
+ * The eligible-assignee read for a Booking's Finance/Accounting picker.
+ * Scoped to active FINANCE_ACCOUNTING accounts only — the same rule the
+ * write path enforces (`assertEligibleFinanceAssignee`, service.ts) — and
+ * ordered by `name`, then `id`, mirroring `listEligibleTravelConsultants`.
+ */
+export async function listEligibleFinanceStaff(
+  db: Prisma.TransactionClient,
+  params: { search?: string; skip: number; take: number },
+): Promise<{ items: EligibleFinanceStaff[]; total: number }> {
+  const where: Prisma.UserWhereInput = {
+    role: 'FINANCE_ACCOUNTING',
+    isActive: true,
+    ...(params.search
+      ? {
+          OR: [
+            { name: { contains: params.search, mode: 'insensitive' } },
+            { email: { contains: params.search, mode: 'insensitive' } },
+          ],
+        }
+      : {}),
+  };
+
+  const [items, total] = await Promise.all([
+    db.user.findMany({
+      where,
+      select: { id: true, name: true, email: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      skip: params.skip,
+      take: params.take,
+    }),
+    db.user.count({ where }),
+  ]);
+
+  return { items, total };
+}
