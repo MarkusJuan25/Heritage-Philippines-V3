@@ -19,6 +19,9 @@ const repositoryMocks = vi.hoisted(() => ({
   createPaymentPlanWithInstallments: vi.fn(),
   sumInstallmentAmounts: vi.fn(),
   approvePaymentPlanRow: vi.fn(),
+  withdrawPaymentPlanRow: vi.fn(),
+  findInstallmentsForPlanSnapshot: vi.fn(),
+  countAllocationsForPlan: vi.fn(),
   findInstallmentForAllocation: vi.fn(),
   findPaymentForActor: vi.fn(),
   createPendingPayment: vi.fn(),
@@ -63,6 +66,7 @@ import {
   refundPayment,
   reverseAllocation,
   reversePayment,
+  withdrawPaymentPlan,
 } from './service';
 
 const TX_CLIENT = { marker: 'tx-client' };
@@ -96,6 +100,12 @@ const VISA: AuthenticatedUser = {
   email: 'visa@example.test',
   name: 'Visa',
   role: 'VISA_DOCUMENTATION',
+};
+const SYSTEM_ADMIN: AuthenticatedUser = {
+  id: 'sysadmin-1',
+  email: 'sysadmin@example.test',
+  name: 'System Admin',
+  role: 'SYSTEM_ADMINISTRATOR',
 };
 
 const d = (value: string) => new Prisma.Decimal(value);
@@ -132,6 +142,7 @@ function summaryDataFor(options: {
     },
     plan: {
       id: 'plan-1',
+      status: 'APPROVED' as const,
       approvedByStaffUserId: 'finance-1',
       approvedAt: new Date('2026-09-01'),
       installments: [
@@ -314,7 +325,7 @@ describe('approvePaymentPlan', () => {
 
   it('approves when installments sum exactly to the booking total', async () => {
     repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue({
-      plan: { id: 'plan-1', approvedAt: null },
+      plan: { id: 'plan-1', status: 'PROPOSED', approvedAt: null },
       booking: {
         id: 'booking-1',
         clientId: 'client-1',
@@ -325,6 +336,7 @@ describe('approvePaymentPlan', () => {
     repositoryMocks.sumInstallmentAmounts.mockResolvedValue(d('500.00'));
     repositoryMocks.approvePaymentPlanRow.mockResolvedValue({
       id: 'plan-1',
+      status: 'APPROVED',
       approvedAt: new Date(),
     });
 
@@ -338,7 +350,11 @@ describe('approvePaymentPlan', () => {
   });
 
   it('is an idempotent no-op when the plan is already approved', async () => {
-    const alreadyApproved = { id: 'plan-1', approvedAt: new Date('2026-01-01') };
+    const alreadyApproved = {
+      id: 'plan-1',
+      status: 'APPROVED',
+      approvedAt: new Date('2026-01-01'),
+    };
     repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue({
       plan: alreadyApproved,
       booking: {
@@ -358,7 +374,7 @@ describe('approvePaymentPlan', () => {
 
   it('rejects when installments do not sum to the booking total (reconciliation failure)', async () => {
     repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue({
-      plan: { id: 'plan-1', approvedAt: null },
+      plan: { id: 'plan-1', status: 'PROPOSED', approvedAt: null },
       booking: {
         id: 'booking-1',
         clientId: 'client-1',
@@ -375,6 +391,258 @@ describe('approvePaymentPlan', () => {
   it('rejects when the plan is not accessible to the actor', async () => {
     repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue(null);
     await expectPaymentError(approvePaymentPlan(FINANCE, input), 'PAYMENT_PLAN_FORBIDDEN');
+  });
+
+  it('never approves a WITHDRAWN plan (D-057 §4), writing nothing', async () => {
+    repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue({
+      plan: { id: 'plan-1', status: 'WITHDRAWN', approvedAt: null },
+      booking: {
+        id: 'booking-1',
+        clientId: 'client-1',
+        totalAmount: d('500.00'),
+        currencyCode: 'PHP',
+      },
+    });
+    await expectPaymentError(approvePaymentPlan(FINANCE, input), 'PAYMENT_PLAN_CONFLICT');
+    expect(repositoryMocks.approvePaymentPlanRow).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('answers a conditional update that matched no PROPOSED row with PAYMENT_PLAN_CONFLICT, writing no audit', async () => {
+    repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue({
+      plan: { id: 'plan-1', status: 'PROPOSED', approvedAt: null },
+      booking: {
+        id: 'booking-1',
+        clientId: 'client-1',
+        totalAmount: d('500.00'),
+        currencyCode: 'PHP',
+      },
+    });
+    repositoryMocks.sumInstallmentAmounts.mockResolvedValue(d('500.00'));
+    repositoryMocks.approvePaymentPlanRow.mockResolvedValue(null);
+    await expectPaymentError(approvePaymentPlan(FINANCE, input), 'PAYMENT_PLAN_CONFLICT');
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('audits the status transition PROPOSED -> APPROVED (D-057 §5)', async () => {
+    const approvedAt = new Date('2026-09-28T00:00:00.000Z');
+    repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue({
+      plan: { id: 'plan-1', status: 'PROPOSED', approvedAt: null },
+      booking: {
+        id: 'booking-1',
+        clientId: 'client-1',
+        totalAmount: d('500.00'),
+        currencyCode: 'PHP',
+      },
+    });
+    repositoryMocks.sumInstallmentAmounts.mockResolvedValue(d('500.00'));
+    repositoryMocks.approvePaymentPlanRow.mockResolvedValue({
+      id: 'plan-1',
+      bookingId: 'booking-1',
+      clientId: 'client-1',
+      approvedByStaffUserId: FINANCE.id,
+      approvedAt,
+      status: 'APPROVED',
+    });
+    await approvePaymentPlan(FINANCE, input);
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledWith(
+      TX_CLIENT,
+      expect.objectContaining({
+        beforeState: { status: 'PROPOSED', approvedAt: null },
+        afterState: expect.objectContaining({
+          status: 'APPROVED',
+          approvedAt: approvedAt.toISOString(),
+        }),
+      }),
+    );
+  });
+});
+
+describe('withdrawPaymentPlan (D-057)', () => {
+  const input = { paymentPlanId: 'plan-1', reason: 'Total should be 110,000.00' };
+  const booking = {
+    id: 'booking-1',
+    clientId: 'client-1',
+    totalAmount: d('115000.00'),
+    currencyCode: 'PHP',
+  };
+  const proposedPlan = {
+    id: 'plan-1',
+    bookingId: 'booking-1',
+    clientId: 'client-1',
+    proposedByStaffUserId: 'tc-1',
+    approvedByStaffUserId: null,
+    approvedAt: null,
+    status: 'PROPOSED',
+    withdrawnAt: null,
+    withdrawnByStaffUserId: null,
+    withdrawalReason: null,
+  };
+
+  function planFound(plan: Record<string, unknown>) {
+    repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue({ plan, booking });
+  }
+
+  it.each([ADMIN_MANAGER, VISA, CLIENT_USER, SYSTEM_ADMIN])(
+    'refuses $role with ROLE_NOT_PERMITTED before any database access',
+    async (actor) => {
+      await expectPaymentError(withdrawPaymentPlan(actor, input), 'ROLE_NOT_PERMITTED');
+      expect(transactionMock).not.toHaveBeenCalled();
+      expect(repositoryMocks.findPaymentPlanWithBookingForActor).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['TRAVEL_CONSULTANT', TRAVEL_CONSULTANT],
+    ['FINANCE_ACCOUNTING', FINANCE],
+  ] as const)(
+    'withdraws a PROPOSED plan for the assigned %s, scoped by their own role',
+    async (_role, actor) => {
+      planFound(proposedPlan);
+      repositoryMocks.countAllocationsForPlan.mockResolvedValue(0);
+      repositoryMocks.findInstallmentsForPlanSnapshot.mockResolvedValue([]);
+      const withdrawn = { ...proposedPlan, status: 'WITHDRAWN' };
+      repositoryMocks.withdrawPaymentPlanRow.mockResolvedValue(withdrawn);
+
+      await expect(withdrawPaymentPlan(actor, input)).resolves.toBe(withdrawn);
+      expect(repositoryMocks.findPaymentPlanWithBookingForActor).toHaveBeenCalledWith(
+        TX_CLIENT,
+        { id: actor.id, role: actor.role },
+        'plan-1',
+      );
+      expect(repositoryMocks.withdrawPaymentPlanRow).toHaveBeenCalledWith(TX_CLIENT, {
+        id: 'plan-1',
+        withdrawnByStaffUserId: actor.id,
+        withdrawnAt: expect.any(Date),
+        withdrawalReason: input.reason,
+      });
+    },
+  );
+
+  it('answers an unassigned or unknown plan with PAYMENT_PLAN_FORBIDDEN, writing nothing', async () => {
+    repositoryMocks.findPaymentPlanWithBookingForActor.mockResolvedValue(null);
+    await expectPaymentError(withdrawPaymentPlan(FINANCE, input), 'PAYMENT_PLAN_FORBIDDEN');
+    expect(repositoryMocks.withdrawPaymentPlanRow).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('refuses an APPROVED plan with PAYMENT_PLAN_CONFLICT before any write', async () => {
+    planFound({
+      ...proposedPlan,
+      status: 'APPROVED',
+      approvedAt: new Date('2026-09-01'),
+      approvedByStaffUserId: 'finance-1',
+    });
+    await expectPaymentError(withdrawPaymentPlan(FINANCE, input), 'PAYMENT_PLAN_CONFLICT');
+    expect(repositoryMocks.countAllocationsForPlan).not.toHaveBeenCalled();
+    expect(repositoryMocks.withdrawPaymentPlanRow).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('never passes caller-supplied extra fields to the write, even if a caller bypasses the schema', async () => {
+    planFound({ ...proposedPlan, status: 'APPROVED', approvedAt: new Date('2026-09-01') });
+    const smuggled = {
+      ...input,
+      status: 'WITHDRAWN',
+      approvedAt: null,
+      approvedByStaffUserId: null,
+    } as unknown as typeof input;
+    await expectPaymentError(withdrawPaymentPlan(FINANCE, smuggled), 'PAYMENT_PLAN_CONFLICT');
+    expect(repositoryMocks.withdrawPaymentPlanRow).not.toHaveBeenCalled();
+  });
+
+  it('returns an already WITHDRAWN plan unchanged and writes nothing, whatever the reason (D-057 §4)', async () => {
+    const alreadyWithdrawn = {
+      ...proposedPlan,
+      status: 'WITHDRAWN',
+      withdrawnAt: new Date('2026-09-27'),
+      withdrawnByStaffUserId: 'tc-1',
+      withdrawalReason: 'Original reason',
+    };
+    planFound(alreadyWithdrawn);
+    await expect(
+      withdrawPaymentPlan(FINANCE, { paymentPlanId: 'plan-1', reason: 'A different reason' }),
+    ).resolves.toBe(alreadyWithdrawn);
+    expect(repositoryMocks.withdrawPaymentPlanRow).not.toHaveBeenCalled();
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('refuses a plan whose installments have allocations (defense in depth)', async () => {
+    planFound(proposedPlan);
+    repositoryMocks.countAllocationsForPlan.mockResolvedValue(1);
+    await expectPaymentError(withdrawPaymentPlan(FINANCE, input), 'PAYMENT_PLAN_CONFLICT');
+    expect(repositoryMocks.withdrawPaymentPlanRow).not.toHaveBeenCalled();
+  });
+
+  it('answers a conditional update that matched no PROPOSED row (a concurrent approval) with PAYMENT_PLAN_CONFLICT', async () => {
+    planFound(proposedPlan);
+    repositoryMocks.countAllocationsForPlan.mockResolvedValue(0);
+    repositoryMocks.findInstallmentsForPlanSnapshot.mockResolvedValue([]);
+    repositoryMocks.withdrawPaymentPlanRow.mockResolvedValue(null);
+    await expectPaymentError(
+      withdrawPaymentPlan(TRAVEL_CONSULTANT, input),
+      'PAYMENT_PLAN_CONFLICT',
+    );
+    expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('writes one PAYMENT_PLAN_WITHDRAWN record with the full snapshot', async () => {
+    planFound(proposedPlan);
+    repositoryMocks.countAllocationsForPlan.mockResolvedValue(0);
+    repositoryMocks.findInstallmentsForPlanSnapshot.mockResolvedValue([
+      {
+        sequenceNumber: 1,
+        isDeposit: true,
+        amount: d('35000.00'),
+        dueDate: new Date('2026-10-01'),
+      },
+      {
+        sequenceNumber: 2,
+        isDeposit: false,
+        amount: d('80000.00'),
+        dueDate: new Date('2026-11-01'),
+      },
+    ]);
+    repositoryMocks.withdrawPaymentPlanRow.mockResolvedValue({
+      ...proposedPlan,
+      status: 'WITHDRAWN',
+    });
+
+    await withdrawPaymentPlan(FINANCE, input);
+
+    expect(repositoryMocks.insertAuditLog).toHaveBeenCalledTimes(1);
+    const entry = repositoryMocks.insertAuditLog.mock.calls[0]?.[1];
+    const withdrawnAt = repositoryMocks.withdrawPaymentPlanRow.mock.calls[0]?.[1]
+      .withdrawnAt as Date;
+    expect(entry).toEqual({
+      actorId: FINANCE.id,
+      action: 'PAYMENT_PLAN_WITHDRAWN',
+      entityType: 'PaymentPlan',
+      entityId: 'plan-1',
+      beforeState: {
+        id: 'plan-1',
+        bookingId: 'booking-1',
+        clientId: 'client-1',
+        approvedByStaffUserId: null,
+        approvedAt: null,
+        status: 'PROPOSED',
+        installments: [
+          { sequenceNumber: 1, isDeposit: true, amount: '35000.00', dueDate: '2026-10-01' },
+          { sequenceNumber: 2, isDeposit: false, amount: '80000.00', dueDate: '2026-11-01' },
+        ],
+      },
+      afterState: {
+        status: 'WITHDRAWN',
+        withdrawnAt: withdrawnAt.toISOString(),
+        withdrawnByStaffUserId: FINANCE.id,
+        reason: input.reason,
+      },
+    });
+  });
+
+  it('maps exhausted write-conflict retries to PAYMENT_PLAN_CONFLICT, never a raw error', async () => {
+    transactionMock.mockRejectedValue(rawAdapterWriteConflict());
+    await expectPaymentError(withdrawPaymentPlan(FINANCE, input), 'PAYMENT_PLAN_CONFLICT');
   });
 });
 
@@ -1204,7 +1472,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-1',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
     repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('0.00'));
     repositoryMocks.sumNetActiveAllocationsForPayment.mockResolvedValue(d('0.00'));
@@ -1226,10 +1494,36 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-1',
       amount: d('100.00'),
-      planApprovedAt: null,
+      planStatus: 'PROPOSED',
     });
 
     await expectPaymentError(createAllocation(FINANCE, input), 'ALLOCATION_NOT_PERMITTED');
+    expect(repositoryMocks.createAllocation).not.toHaveBeenCalled();
+  });
+
+  it('rejects an installment of a WITHDRAWN plan (D-057 §3)', async () => {
+    repositoryMocks.findPaymentForActor.mockResolvedValue({
+      id: 'payment-1',
+      bookingId: 'booking-1',
+      status: 'CONFIRMED',
+      amount: d('100.00'),
+    });
+    repositoryMocks.findInstallmentForAllocation.mockResolvedValue({
+      id: 'inst-1',
+      paymentPlanId: 'plan-1',
+      bookingId: 'booking-1',
+      amount: d('100.00'),
+      planStatus: 'WITHDRAWN',
+    });
+    await expectPaymentError(
+      createAllocation(FINANCE, {
+        paymentId: 'payment-1',
+        installmentId: 'inst-1',
+        amount: '50.00',
+        idempotencyKey: 'k',
+      }),
+      'ALLOCATION_NOT_PERMITTED',
+    );
     expect(repositoryMocks.createAllocation).not.toHaveBeenCalled();
   });
 
@@ -1245,7 +1539,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-2',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
 
     await expectPaymentError(createAllocation(FINANCE, input), 'ALLOCATION_NOT_PERMITTED');
@@ -1262,7 +1556,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-1',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
     repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('0.00'));
     // 60.00 of the 100.00 installment is already covered: 40.00 remains.
@@ -1291,7 +1585,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-1',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
     repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('0.00'));
     repositoryMocks.sumNetActiveAllocationsForInstallment.mockResolvedValue(d('60.00'));
@@ -1314,7 +1608,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-1',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
     repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('0.00'));
     repositoryMocks.sumNetActiveAllocationsForPayment.mockResolvedValue(d('0.00'));
@@ -1335,7 +1629,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-1',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
     // 50.00 allocated with 30.00 refunded through it: net contribution
     // 70.00, net active allocation 20.00. A gross count (50.00) would
@@ -1359,7 +1653,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-1',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
     repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('0.00'));
     repositoryMocks.sumNetActiveAllocationsForPayment.mockResolvedValue(d('0.00'));
@@ -1405,7 +1699,7 @@ describe('createAllocation', () => {
       id: 'inst-1',
       bookingId: 'booking-2',
       amount: d('100.00'),
-      planApprovedAt: new Date(),
+      planStatus: 'APPROVED',
     });
     const otherBooking = await createAllocation(FINANCE, input).catch((error: unknown) => error);
 
@@ -1519,6 +1813,7 @@ describe('getBookingPaymentSummaryForStaff', () => {
     },
     plan: {
       id: 'plan-1',
+      status: 'APPROVED' as const,
       approvedByStaffUserId: 'finance-1',
       approvedAt: new Date('2026-09-01'),
       installments: [
@@ -1575,6 +1870,21 @@ describe('getBookingPaymentSummaryForStaff', () => {
     expect(result.confirmedAmountPaid.toFixed(2)).toBe('200.00');
     expect(result.remainingBalance?.toFixed(2)).toBe('300.00');
     expect(result.planApproved).toBe(true);
+  });
+
+  it('reports a PROPOSED active plan as not approved (D-057 §3)', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue(summaryData.booking);
+    repositoryMocks.findBookingPaymentSummaryData.mockResolvedValue({
+      ...summaryData,
+      plan: {
+        ...summaryData.plan,
+        status: 'PROPOSED',
+        approvedAt: null,
+        approvedByStaffUserId: null,
+      },
+    });
+    const result = await getBookingPaymentSummaryForStaff(FINANCE, 'booking-1');
+    expect(result.planApproved).toBe(false);
     expect(result.installments[0]?.outstandingAmount.toFixed(2)).toBe('300.00');
     expect(result.installments[0]?.allocations).toEqual([
       {

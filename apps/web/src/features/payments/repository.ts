@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Prisma, PaymentStatus } from '@/generated/prisma/client';
+import { Prisma, PaymentPlanStatus, PaymentStatus } from '@/generated/prisma/client';
 
 // The only layer that talks to the database for this feature
 // (.claude/rules/backend.md's "Repository/data-access layer"). Every
@@ -114,6 +114,10 @@ export type PaymentPlanRecord = {
   proposedByStaffUserId: string;
   approvedByStaffUserId: string | null;
   approvedAt: Date | null;
+  status: PaymentPlanStatus;
+  withdrawnAt: Date | null;
+  withdrawnByStaffUserId: string | null;
+  withdrawalReason: string | null;
 };
 
 const PAYMENT_PLAN_SELECT = {
@@ -123,26 +127,41 @@ const PAYMENT_PLAN_SELECT = {
   proposedByStaffUserId: true,
   approvedByStaffUserId: true,
   approvedAt: true,
+  status: true,
+  withdrawnAt: true,
+  withdrawnByStaffUserId: true,
+  withdrawalReason: true,
 } as const;
 
-/** The PaymentPlan for a Booking, if any (D-019: at most one per Booking) — scoped to what `actor` may see via the owning Booking. */
+/**
+ * The Booking's *active* PaymentPlan (`PROPOSED` or `APPROVED`), if any —
+ * scoped to what `actor` may see via the owning Booking. D-057 §3: withdrawn
+ * plans are history, never the Booking's plan; the partial unique index
+ * `payment_plan_active_booking_key` guarantees at most one active plan.
+ * Also `proposePaymentPlan`'s existing-plan check (service.ts).
+ */
 export async function findPaymentPlanByBookingIdForActor(
   db: Prisma.TransactionClient,
   actor: PaymentActor,
   bookingId: string,
 ): Promise<PaymentPlanRecord | null> {
   return db.paymentPlan.findFirst({
-    where: { bookingId, booking: { ...bookingAssignmentFilter(actor) } },
+    where: {
+      bookingId,
+      status: { not: PaymentPlanStatus.WITHDRAWN },
+      booking: { ...bookingAssignmentFilter(actor) },
+    },
     select: PAYMENT_PLAN_SELECT,
   });
 }
 
 /**
- * A PaymentPlan by its own id, together with its owning Booking's
- * financials — scoped to what `actor` may see. Used by `approvePaymentPlan`
- * (service.ts), which needs both the plan (to write `approvedAt`/
- * `approvedByStaffUserId`) and the Booking's `totalAmount` (for the
- * reconciliation check, the PaymentPlan model's own doc comment in
+ * A PaymentPlan by its own id, in any state, together with its owning
+ * Booking's financials — scoped to what `actor` may see. Used by
+ * `approvePaymentPlan` and `withdrawPaymentPlan` (service.ts), each of which
+ * applies its own state guard (D-057 §3: id-based reads return the plan in
+ * any state). Approval also needs the Booking's `totalAmount` for the
+ * reconciliation check (the PaymentPlan model's own doc comment in
  * schema.prisma).
  */
 export async function findPaymentPlanWithBookingForActor(
@@ -192,6 +211,7 @@ export async function createPaymentPlanWithInstallments(
       bookingId: input.bookingId,
       clientId: input.clientId,
       proposedByStaffUserId: input.proposedByStaffUserId,
+      status: PaymentPlanStatus.PROPOSED,
       installments: {
         create: input.installments.map((installment) => ({
           id: installment.id,
@@ -229,15 +249,97 @@ export type ApprovePaymentPlanRowInput = {
   approvedAt: Date;
 };
 
+/**
+ * `PROPOSED → APPROVED` as a conditional update (D-057 §4): the row changes
+ * only while it is still `PROPOSED`, and `status` is written together with
+ * the approval fields, as `payment_plan_status_approval` requires. Returns
+ * `null` when no row matched — the plan is no longer `PROPOSED` — so the
+ * caller answers with a conflict rather than overwriting a withdrawal.
+ */
 export async function approvePaymentPlanRow(
   db: Prisma.TransactionClient,
   input: ApprovePaymentPlanRowInput,
-): Promise<PaymentPlanRecord> {
-  return db.paymentPlan.update({
+): Promise<PaymentPlanRecord | null> {
+  const { count } = await db.paymentPlan.updateMany({
+    where: { id: input.id, status: PaymentPlanStatus.PROPOSED },
+    data: {
+      status: PaymentPlanStatus.APPROVED,
+      approvedByStaffUserId: input.approvedByStaffUserId,
+      approvedAt: input.approvedAt,
+    },
+  });
+  if (count === 0) return null;
+  return db.paymentPlan.findUniqueOrThrow({
     where: { id: input.id },
-    data: { approvedByStaffUserId: input.approvedByStaffUserId, approvedAt: input.approvedAt },
     select: PAYMENT_PLAN_SELECT,
   });
+}
+
+export type WithdrawPaymentPlanRowInput = {
+  id: string;
+  withdrawnByStaffUserId: string;
+  withdrawnAt: Date;
+  withdrawalReason: string;
+};
+
+/**
+ * `PROPOSED → WITHDRAWN` as a conditional update (D-057 §4). It writes
+ * exactly the status and the three withdrawal fields — never an approval
+ * field, and never the installments — and only while the row is still
+ * `PROPOSED`. An `APPROVED` plan therefore never matches, even though the
+ * database CHECK constraints alone would accept a withdrawal that also
+ * cleared the approval fields. Returns `null` when no row matched.
+ */
+export async function withdrawPaymentPlanRow(
+  db: Prisma.TransactionClient,
+  input: WithdrawPaymentPlanRowInput,
+): Promise<PaymentPlanRecord | null> {
+  const { count } = await db.paymentPlan.updateMany({
+    where: { id: input.id, status: PaymentPlanStatus.PROPOSED },
+    data: {
+      status: PaymentPlanStatus.WITHDRAWN,
+      withdrawnAt: input.withdrawnAt,
+      withdrawnByStaffUserId: input.withdrawnByStaffUserId,
+      withdrawalReason: input.withdrawalReason,
+    },
+  });
+  if (count === 0) return null;
+  return db.paymentPlan.findUniqueOrThrow({
+    where: { id: input.id },
+    select: PAYMENT_PLAN_SELECT,
+  });
+}
+
+export type PlanInstallmentSnapshotRow = {
+  sequenceNumber: number;
+  isDeposit: boolean;
+  amount: Prisma.Decimal;
+  dueDate: Date;
+};
+
+/** A plan's installments in sequence order, for `withdrawPaymentPlan`'s audit snapshot (D-057 §5). */
+export async function findInstallmentsForPlanSnapshot(
+  db: Prisma.TransactionClient,
+  paymentPlanId: string,
+): Promise<PlanInstallmentSnapshotRow[]> {
+  return db.installment.findMany({
+    where: { paymentPlanId },
+    orderBy: { sequenceNumber: 'asc' },
+    select: { sequenceNumber: true, isDeposit: true, amount: true, dueDate: true },
+  });
+}
+
+/**
+ * How many PaymentAllocations target any of a plan's installments,
+ * including reversed ones — `withdrawPaymentPlan`'s defense-in-depth guard
+ * (D-057 §4). Allocation already requires an approved plan, so this is
+ * zero for every `PROPOSED` plan.
+ */
+export async function countAllocationsForPlan(
+  db: Prisma.TransactionClient,
+  paymentPlanId: string,
+): Promise<number> {
+  return db.paymentAllocation.count({ where: { installment: { paymentPlanId } } });
 }
 
 export type InstallmentForAllocation = {
@@ -245,11 +347,11 @@ export type InstallmentForAllocation = {
   paymentPlanId: string;
   bookingId: string;
   amount: Prisma.Decimal;
-  planApprovedAt: Date | null;
+  planStatus: PaymentPlanStatus;
 };
 
 /**
- * An Installment together with its owning PaymentPlan's `approvedAt` and
+ * An Installment together with its owning PaymentPlan's `status` and
  * `bookingId` — everything `createAllocation` (service.ts) needs to enforce
  * D-054 §4's decided invariant ("A PaymentAllocation may only target an
  * Installment belonging to an already-approved PaymentPlan") and D-019's
@@ -267,7 +369,7 @@ export async function findInstallmentForAllocation(
       id: true,
       paymentPlanId: true,
       amount: true,
-      paymentPlan: { select: { bookingId: true, approvedAt: true } },
+      paymentPlan: { select: { bookingId: true, status: true } },
     },
   });
   if (!row) return null;
@@ -276,7 +378,7 @@ export async function findInstallmentForAllocation(
     paymentPlanId: row.paymentPlanId,
     bookingId: row.paymentPlan.bookingId,
     amount: row.amount,
-    planApprovedAt: row.paymentPlan.approvedAt,
+    planStatus: row.paymentPlan.status,
   };
 }
 
@@ -829,7 +931,8 @@ export async function insertAuditLog(
 // --- Booking payment summary (D-054 §§5, 6, 7) ---
 // One nested-include read composing everything the D-019 formulas
 // (calculations.ts) and the staff/client summary DTOs (service.ts) need for
-// one Booking: the Booking's own financials, its PaymentPlan (if any) with
+// one Booking: the Booking's own financials, its active PaymentPlan (if
+// any — withdrawn plans are excluded, D-057 §3) with
 // every Installment and each Installment's active allocations (with their
 // own Payment status and refund-allocation total), and every Payment under
 // the Booking with its own refund total. Deliberately one query, not one
@@ -842,6 +945,7 @@ export type BookingPaymentSummaryData = {
   booking: BookingFinancials;
   plan: {
     id: string;
+    status: PaymentPlanStatus;
     approvedByStaffUserId: string | null;
     approvedAt: Date | null;
     installments: {
@@ -875,9 +979,14 @@ export async function findBookingPaymentSummaryData(
     where: { id: bookingId },
     select: {
       ...BOOKING_FINANCIALS_SELECT,
-      paymentPlan: {
+      // At most one row matches: `payment_plan_active_booking_key` allows
+      // one non-withdrawn plan per Booking (D-057 §2(5)).
+      paymentPlans: {
+        where: { status: { not: PaymentPlanStatus.WITHDRAWN } },
+        take: 1,
         select: {
           id: true,
+          status: true,
           approvedByStaffUserId: true,
           approvedAt: true,
           installments: {
@@ -915,13 +1024,15 @@ export async function findBookingPaymentSummaryData(
   });
   if (!booking) return null;
 
-  const { paymentPlan, payments, ...financials } = booking;
+  const { paymentPlans, payments, ...financials } = booking;
+  const paymentPlan = paymentPlans[0];
 
   return {
     booking: financials,
     plan: paymentPlan
       ? {
           id: paymentPlan.id,
+          status: paymentPlan.status,
           approvedByStaffUserId: paymentPlan.approvedByStaffUserId,
           approvedAt: paymentPlan.approvedAt,
           installments: paymentPlan.installments.map((installment) => ({
@@ -958,7 +1069,8 @@ export async function findBookingPaymentSummaryData(
 /**
  * The ids of a Client's own Bookings that have an *approved* PaymentPlan
  * only (D-054 §7: "an unapproved, proposed-only plan is never
- * client-visible") — used by the client-portal summary read (service.ts) to
+ * client-visible"; D-057 §3: `status = 'APPROVED'`, so a withdrawn plan
+ * never reaches the client) — used by the client-portal summary read (service.ts) to
  * decide which Bookings to build a `findBookingPaymentSummaryData` summary
  * for. Scoped by `clientId` directly (a direct FK, mirroring
  * features/bookings/repository.ts's client-portal reads) — the caller's own
@@ -970,7 +1082,7 @@ export async function findApprovedBookingIdsForClient(
   clientId: string,
 ): Promise<string[]> {
   const rows = await db.booking.findMany({
-    where: { clientId, paymentPlan: { approvedAt: { not: null } } },
+    where: { clientId, paymentPlans: { some: { status: PaymentPlanStatus.APPROVED } } },
     select: { id: true },
     orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
   });

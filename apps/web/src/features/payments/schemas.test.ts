@@ -11,6 +11,7 @@ import {
   refundPaymentSchema,
   reverseAllocationSchema,
   reversePaymentSchema,
+  withdrawPaymentPlanSchema,
 } from './schemas';
 
 const UUID_A = '11111111-1111-4111-8111-111111111111';
@@ -156,6 +157,45 @@ describe('proposePaymentPlanSchema', () => {
     });
     expect(result.success).toBe(false);
   });
+});
+
+describe('withdrawPaymentPlanSchema (D-057 §4)', () => {
+  it('accepts a plan id and a reason, trimming the reason', () => {
+    const parsed = withdrawPaymentPlanSchema.parse({
+      paymentPlanId: UUID_A,
+      reason: '  Wrong installment structure  ',
+    });
+    expect(parsed).toEqual({ paymentPlanId: UUID_A, reason: 'Wrong installment structure' });
+  });
+
+  it.each(['', '   '])('rejects a blank reason (%j)', (reason) => {
+    expect(withdrawPaymentPlanSchema.safeParse({ paymentPlanId: UUID_A, reason }).success).toBe(
+      false,
+    );
+  });
+
+  it('requires a reason and a uuid plan id', () => {
+    expect(withdrawPaymentPlanSchema.safeParse({ paymentPlanId: UUID_A }).success).toBe(false);
+    expect(
+      withdrawPaymentPlanSchema.safeParse({ paymentPlanId: 'not-a-uuid', reason: 'r' }).success,
+    ).toBe(false);
+  });
+
+  it.each([
+    ['status', 'WITHDRAWN'],
+    ['approvedAt', null],
+    ['approvedByStaffUserId', null],
+    ['withdrawnByStaffUserId', UUID_B],
+    ['installments', []],
+  ])(
+    'rejects any other field (%s), so a request can only ask for the withdrawal',
+    (field, value) => {
+      expect(
+        withdrawPaymentPlanSchema.safeParse({ paymentPlanId: UUID_A, reason: 'r', [field]: value })
+          .success,
+      ).toBe(false);
+    },
+  );
 });
 
 describe('approvePaymentPlanSchema', () => {

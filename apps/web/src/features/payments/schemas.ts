@@ -129,6 +129,19 @@ export const approvePaymentPlanSchema = z
   .strict();
 export type ApprovePaymentPlanInput = z.infer<typeof approvePaymentPlanSchema>;
 
+// D-057 §4: withdrawal names the plan by id and requires a reason. No
+// idempotency key: like approval, the explicit state makes a repeat safe —
+// withdrawing an already-withdrawn plan returns it unchanged. `.strict()`
+// rejects any other field (a status, approval or installment value, a
+// different withdrawer), so a request can only ever ask for the withdrawal.
+export const withdrawPaymentPlanSchema = z
+  .object({
+    paymentPlanId: uuidSchema,
+    reason: reasonSchema,
+  })
+  .strict();
+export type WithdrawPaymentPlanInput = z.infer<typeof withdrawPaymentPlanSchema>;
+
 // --- Manual/external payment recording and confirmation (D-054 §6) ---
 // No payment-gateway field of any kind is accepted here (D-054 §12's
 // explicit exclusion) — this schema only ever records that money was

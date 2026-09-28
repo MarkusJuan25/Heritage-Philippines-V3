@@ -4,6 +4,7 @@
 export const PAYMENT_AUDIT_ACTIONS = {
   PAYMENT_PLAN_PROPOSED: 'PAYMENT_PLAN_PROPOSED',
   PAYMENT_PLAN_APPROVED: 'PAYMENT_PLAN_APPROVED',
+  PAYMENT_PLAN_WITHDRAWN: 'PAYMENT_PLAN_WITHDRAWN',
   PAYMENT_RECORDED: 'PAYMENT_RECORDED',
   PAYMENT_STATUS_CHANGED: 'PAYMENT_STATUS_CHANGED',
   PAYMENT_REFUNDED: 'PAYMENT_REFUNDED',
@@ -28,16 +29,17 @@ export type AuditPaymentPlanSnapshot = {
   clientId: string;
   approvedByStaffUserId: string | null;
   approvedAt: string | null;
+  status: string;
 };
 
 /**
  * Explicit allow-list snapshot for a PaymentPlan audit entry — matches
  * features/bookings/audit.ts's `sanitizeBookingSnapshot` discipline exactly:
  * a fresh object built from exactly the named fields, never a spread of the
- * source record. Never includes installment amounts/due dates (those are
- * audited on their own terms only if a future correction workflow needs it,
- * D-019's own open item) — only which plan changed, for which booking/
- * client, and its approval state.
+ * source record. Only which plan changed, for which booking/client, its
+ * approval state, and its lifecycle `status` (D-057 §5: every plan audit
+ * record carries it). Installments are added only by the withdrawal
+ * snapshot below, which must preserve the withdrawn terms in full.
  */
 export function sanitizePaymentPlanSnapshot(record: {
   id: string;
@@ -45,6 +47,7 @@ export function sanitizePaymentPlanSnapshot(record: {
   clientId: string;
   approvedByStaffUserId: string | null;
   approvedAt: Date | null;
+  status: string;
 }): AuditPaymentPlanSnapshot {
   return {
     id: record.id,
@@ -52,6 +55,65 @@ export function sanitizePaymentPlanSnapshot(record: {
     clientId: record.clientId,
     approvedByStaffUserId: record.approvedByStaffUserId,
     approvedAt: record.approvedAt ? record.approvedAt.toISOString() : null,
+    status: record.status,
+  };
+}
+
+export type AuditInstallmentSnapshot = {
+  sequenceNumber: number;
+  isDeposit: boolean;
+  amount: string;
+  dueDate: string;
+};
+
+export type AuditPaymentPlanWithdrawalBeforeSnapshot = AuditPaymentPlanSnapshot & {
+  installments: AuditInstallmentSnapshot[];
+};
+
+/**
+ * The beforeState of a `PAYMENT_PLAN_WITHDRAWN` entry (D-057 §5): the plan
+ * snapshot plus every installment's sequence number, deposit flag, amount
+ * (a decimal string, never a binary float — CLAUDE.md §8), and due date
+ * (`YYYY-MM-DD`, matching `Installment.dueDate`'s `@db.Date` column).
+ */
+export function sanitizePaymentPlanWithdrawalBeforeSnapshot(
+  plan: Parameters<typeof sanitizePaymentPlanSnapshot>[0],
+  installments: {
+    sequenceNumber: number;
+    isDeposit: boolean;
+    amount: { toFixed(decimalPlaces: number): string };
+    dueDate: Date;
+  }[],
+): AuditPaymentPlanWithdrawalBeforeSnapshot {
+  return {
+    ...sanitizePaymentPlanSnapshot(plan),
+    installments: installments.map((installment) => ({
+      sequenceNumber: installment.sequenceNumber,
+      isDeposit: installment.isDeposit,
+      amount: installment.amount.toFixed(2),
+      dueDate: installment.dueDate.toISOString().slice(0, 10),
+    })),
+  };
+}
+
+export type AuditPaymentPlanWithdrawalAfterSnapshot = {
+  status: 'WITHDRAWN';
+  withdrawnAt: string;
+  withdrawnByStaffUserId: string;
+  reason: string;
+};
+
+/** The afterState of a `PAYMENT_PLAN_WITHDRAWN` entry, exactly D-057 §5's four fields. */
+export function sanitizePaymentPlanWithdrawalAfterSnapshot(record: {
+  withdrawnAt: Date;
+  withdrawnByStaffUserId: string;
+  reason: string;
+}): AuditPaymentPlanWithdrawalAfterSnapshot {
+  return {
+    status: 'WITHDRAWN',
+    withdrawnAt: record.withdrawnAt.toISOString(),
+    withdrawnByStaffUserId: record.withdrawnByStaffUserId,
+    reason: record.reason,
   };
 }
 

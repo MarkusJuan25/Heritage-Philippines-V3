@@ -4,6 +4,7 @@ import { Prisma, type Prisma as PrismaNamespace } from '@/generated/prisma/clien
 
 import {
   approvePaymentPlanRow,
+  countAllocationsForPlan,
   createAllocation,
   createAllocationReversal,
   createPaymentPlanWithInstallments,
@@ -16,6 +17,7 @@ import {
   findBookingFinancialsForActor,
   findBookingPaymentSummaryData,
   findInstallmentForAllocation,
+  findInstallmentsForPlanSnapshot,
   findPaymentForActor,
   findPaymentPlanByBookingIdForActor,
   findReceiptByPaymentId,
@@ -27,6 +29,7 @@ import {
   sumInstallmentAmounts,
   sumRefundsForPayment,
   transitionPaymentStatus,
+  withdrawPaymentPlanRow,
 } from './repository';
 
 const ADMIN_MANAGER = { id: 'admin-1', role: 'ADMIN_MANAGER' as const };
@@ -80,7 +83,7 @@ describe('findBookingFinancialsForActor (booking-level assignment scoping)', () 
 });
 
 describe('findPaymentPlanByBookingIdForActor', () => {
-  it('scopes through the owning Booking', async () => {
+  it('reads only the active (non-withdrawn) plan, scoped through the owning Booking (D-057 §3)', async () => {
     const findFirst = vi.fn().mockResolvedValue(null);
     await findPaymentPlanByBookingIdForActor(
       db({ paymentPlan: { findFirst } }),
@@ -90,6 +93,7 @@ describe('findPaymentPlanByBookingIdForActor', () => {
     expect(findFirst).toHaveBeenCalledWith({
       where: {
         bookingId: BOOKING_ID,
+        status: { not: 'WITHDRAWN' },
         booking: { ...BOOKING_ASSIGNMENT_FILTER(FINANCE.id, FINANCE.role) },
       },
       select: expect.any(Object),
@@ -126,6 +130,7 @@ describe('createPaymentPlanWithInstallments', () => {
       data: expect.objectContaining({
         id: 'plan-1',
         bookingId: BOOKING_ID,
+        status: 'PROPOSED',
         installments: {
           create: [
             expect.objectContaining({
@@ -163,29 +168,98 @@ describe('sumInstallmentAmounts', () => {
 });
 
 describe('approvePaymentPlanRow', () => {
-  it('sets approvedByStaffUserId and approvedAt', async () => {
-    const update = vi.fn().mockResolvedValue({ id: 'plan-1' });
+  it('sets status and the approval fields only while the plan is PROPOSED (conditional update)', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const findUniqueOrThrow = vi.fn().mockResolvedValue({ id: 'plan-1', status: 'APPROVED' });
     const approvedAt = new Date('2026-09-23T00:00:00.000Z');
-    await approvePaymentPlanRow(db({ paymentPlan: { update } }), {
+    const result = await approvePaymentPlanRow(
+      db({ paymentPlan: { updateMany, findUniqueOrThrow } }),
+      { id: 'plan-1', approvedByStaffUserId: FINANCE.id, approvedAt },
+    );
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: 'plan-1', status: 'PROPOSED' },
+      data: { status: 'APPROVED', approvedByStaffUserId: FINANCE.id, approvedAt },
+    });
+    expect(result).toEqual({ id: 'plan-1', status: 'APPROVED' });
+  });
+
+  it('returns null, reading nothing back, when the plan is no longer PROPOSED', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const findUniqueOrThrow = vi.fn();
+    const result = await approvePaymentPlanRow(
+      db({ paymentPlan: { updateMany, findUniqueOrThrow } }),
+      { id: 'plan-1', approvedByStaffUserId: FINANCE.id, approvedAt: new Date() },
+    );
+    expect(result).toBeNull();
+    expect(findUniqueOrThrow).not.toHaveBeenCalled();
+  });
+});
+
+describe('withdrawPaymentPlanRow (D-057 §4)', () => {
+  it('writes exactly the status and the three withdrawal fields, only while the plan is PROPOSED', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const findUniqueOrThrow = vi.fn().mockResolvedValue({ id: 'plan-1', status: 'WITHDRAWN' });
+    const withdrawnAt = new Date('2026-09-28T00:00:00.000Z');
+    await withdrawPaymentPlanRow(db({ paymentPlan: { updateMany, findUniqueOrThrow } }), {
       id: 'plan-1',
-      approvedByStaffUserId: FINANCE.id,
-      approvedAt,
+      withdrawnByStaffUserId: TRAVEL_CONSULTANT.id,
+      withdrawnAt,
+      withdrawalReason: 'Wrong structure',
     });
-    expect(update).toHaveBeenCalledWith({
-      where: { id: 'plan-1' },
-      data: { approvedByStaffUserId: FINANCE.id, approvedAt },
-      select: expect.any(Object),
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: 'plan-1', status: 'PROPOSED' },
+      data: {
+        status: 'WITHDRAWN',
+        withdrawnAt,
+        withdrawnByStaffUserId: TRAVEL_CONSULTANT.id,
+        withdrawalReason: 'Wrong structure',
+      },
     });
+  });
+
+  it('returns null when no PROPOSED row matched (approved or already withdrawn)', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const findUniqueOrThrow = vi.fn();
+    const result = await withdrawPaymentPlanRow(
+      db({ paymentPlan: { updateMany, findUniqueOrThrow } }),
+      {
+        id: 'plan-1',
+        withdrawnByStaffUserId: FINANCE.id,
+        withdrawnAt: new Date(),
+        withdrawalReason: 'r',
+      },
+    );
+    expect(result).toBeNull();
+    expect(findUniqueOrThrow).not.toHaveBeenCalled();
+  });
+});
+
+describe('findInstallmentsForPlanSnapshot / countAllocationsForPlan', () => {
+  it('reads the snapshot fields in sequence order', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    await findInstallmentsForPlanSnapshot(db({ installment: { findMany } }), 'plan-1');
+    expect(findMany).toHaveBeenCalledWith({
+      where: { paymentPlanId: 'plan-1' },
+      orderBy: { sequenceNumber: 'asc' },
+      select: { sequenceNumber: true, isDeposit: true, amount: true, dueDate: true },
+    });
+  });
+
+  it("counts every allocation (reversed included) targeting the plan's installments", async () => {
+    const count = vi.fn().mockResolvedValue(2);
+    const result = await countAllocationsForPlan(db({ paymentAllocation: { count } }), 'plan-1');
+    expect(result).toBe(2);
+    expect(count).toHaveBeenCalledWith({ where: { installment: { paymentPlanId: 'plan-1' } } });
   });
 });
 
 describe('findInstallmentForAllocation', () => {
-  it('maps the nested paymentPlan relation to bookingId/planApprovedAt', async () => {
+  it('maps the nested paymentPlan relation to bookingId/planStatus', async () => {
     const findUnique = vi.fn().mockResolvedValue({
       id: 'inst-1',
       paymentPlanId: 'plan-1',
       amount: new Prisma.Decimal('100.00'),
-      paymentPlan: { bookingId: BOOKING_ID, approvedAt: null },
+      paymentPlan: { bookingId: BOOKING_ID, status: 'WITHDRAWN' },
     });
     const result = await findInstallmentForAllocation(
       db({ installment: { findUnique } }),
@@ -196,7 +270,10 @@ describe('findInstallmentForAllocation', () => {
       paymentPlanId: 'plan-1',
       bookingId: BOOKING_ID,
       amount: new Prisma.Decimal('100.00'),
-      planApprovedAt: null,
+      planStatus: 'WITHDRAWN',
+    });
+    expect(findUnique.mock.calls[0]?.[0].select.paymentPlan).toEqual({
+      select: { bookingId: true, status: true },
     });
   });
 
@@ -615,18 +692,21 @@ describe('findBookingPaymentSummaryData', () => {
     expect(result).toBeNull();
   });
 
-  it('maps a null paymentPlan to plan: null', async () => {
+  it('maps no active plan to plan: null, selecting only non-withdrawn plans (D-057 §3)', async () => {
     const findUnique = vi.fn().mockResolvedValue({
       id: BOOKING_ID,
       clientId: 'client-1',
       totalAmount: new Prisma.Decimal('500.00'),
       currencyCode: 'PHP',
-      paymentPlan: null,
+      paymentPlans: [],
       payments: [],
     });
     const result = await findBookingPaymentSummaryData(db({ booking: { findUnique } }), BOOKING_ID);
     expect(result?.plan).toBeNull();
     expect(result?.payments).toEqual([]);
+    const planSelect = findUnique.mock.calls[0]?.[0].select.paymentPlans;
+    expect(planSelect.where).toEqual({ status: { not: 'WITHDRAWN' } });
+    expect(planSelect.take).toBe(1);
   });
 
   it('sums refundAllocations per allocation and refunds per payment', async () => {
@@ -635,28 +715,31 @@ describe('findBookingPaymentSummaryData', () => {
       clientId: 'client-1',
       totalAmount: new Prisma.Decimal('500.00'),
       currencyCode: 'PHP',
-      paymentPlan: {
-        id: 'plan-1',
-        approvedByStaffUserId: FINANCE.id,
-        approvedAt: new Date('2026-09-01'),
-        installments: [
-          {
-            id: 'inst-1',
-            dueDate: new Date('2026-10-01'),
-            amount: new Prisma.Decimal('500.00'),
-            allocations: [
-              {
-                id: 'alloc-1',
-                paymentId: 'payment-1',
-                amount: new Prisma.Decimal('100.00'),
-                reversal: null,
-                refundAllocations: [{ amount: new Prisma.Decimal('20.00') }],
-                payment: { status: 'CONFIRMED' },
-              },
-            ],
-          },
-        ],
-      },
+      paymentPlans: [
+        {
+          id: 'plan-1',
+          status: 'APPROVED',
+          approvedByStaffUserId: FINANCE.id,
+          approvedAt: new Date('2026-09-01'),
+          installments: [
+            {
+              id: 'inst-1',
+              dueDate: new Date('2026-10-01'),
+              amount: new Prisma.Decimal('500.00'),
+              allocations: [
+                {
+                  id: 'alloc-1',
+                  paymentId: 'payment-1',
+                  amount: new Prisma.Decimal('100.00'),
+                  reversal: null,
+                  refundAllocations: [{ amount: new Prisma.Decimal('20.00') }],
+                  payment: { status: 'CONFIRMED' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
       payments: [
         {
           id: 'payment-1',
@@ -672,6 +755,7 @@ describe('findBookingPaymentSummaryData', () => {
       '20.00',
     );
     expect(result?.payments[0]?.refundedTotal.toFixed(2)).toBe('20.00');
+    expect(result?.plan).toMatchObject({ id: 'plan-1', status: 'APPROVED' });
     expect(result?.plan?.installments[0]?.allocations[0]).toMatchObject({
       id: 'alloc-1',
       paymentId: 'payment-1',
@@ -685,12 +769,12 @@ describe('findBookingPaymentSummaryData', () => {
 });
 
 describe('findApprovedBookingIdsForClient', () => {
-  it('filters to bookings with a non-null paymentPlan.approvedAt', async () => {
+  it('filters to bookings with an APPROVED plan (D-057 §3)', async () => {
     const findMany = vi.fn().mockResolvedValue([{ id: 'booking-1' }, { id: 'booking-2' }]);
     const result = await findApprovedBookingIdsForClient(db({ booking: { findMany } }), 'client-1');
     expect(result).toEqual(['booking-1', 'booking-2']);
     expect(findMany).toHaveBeenCalledWith({
-      where: { clientId: 'client-1', paymentPlan: { approvedAt: { not: null } } },
+      where: { clientId: 'client-1', paymentPlans: { some: { status: 'APPROVED' } } },
       select: { id: true },
       orderBy: expect.any(Array),
     });
