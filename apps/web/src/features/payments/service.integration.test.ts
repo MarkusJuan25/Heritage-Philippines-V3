@@ -412,9 +412,9 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       code: 'BOOKING_FINANCIALS_LOCKED',
     });
     await withdrawPaymentPlan(tcActor, { paymentPlanId: plan.id, reason: 'Change terms' });
-    await expect(setBookingFinancials(financeActor, input)).resolves.toMatchObject({
-      currencyCode: 'PHP',
-    });
+    await expect(
+      setBookingFinancials(financeActor, { ...input, reason: 'Requoted after plan withdrawal' }),
+    ).resolves.toMatchObject({ currencyCode: 'PHP' });
     await recordPayment(financeActor, { bookingId, amount: '10.00', idempotencyKey: randomUUID() });
     await expect(
       setBookingFinancials(financeActor, { ...input, totalAmount: '700.00', reason: 'New quote' }),
