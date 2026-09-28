@@ -80,6 +80,7 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
   let prisma: (typeof import('@/lib/db'))['prisma'] | undefined;
   let proposePaymentPlan: (typeof import('./service'))['proposePaymentPlan'];
   let approvePaymentPlan: (typeof import('./service'))['approvePaymentPlan'];
+  let withdrawPaymentPlan: (typeof import('./service'))['withdrawPaymentPlan'];
   let recordPayment: (typeof import('./service'))['recordPayment'];
   let confirmPayment: (typeof import('./service'))['confirmPayment'];
   let reversePayment: (typeof import('./service'))['reversePayment'];
@@ -130,6 +131,7 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     ({
       proposePaymentPlan,
       approvePaymentPlan,
+      withdrawPaymentPlan,
       recordPayment,
       confirmPayment,
       reversePayment,
@@ -378,9 +380,11 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       ],
     });
     expect(plan.approvedAt).toBeNull();
+    expect(plan.status).toBe('PROPOSED');
 
     const approved = await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
     expect(approved.approvedAt).not.toBeNull();
+    expect(approved.status).toBe('APPROVED');
 
     const payment = await recordPayment(financeActor, {
       bookingId,
@@ -1916,6 +1920,448 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
       expect(uniqueViolation(idError)).toEqual({ modelName: 'Payment', fields: ['id'] });
       expect(isUniqueViolationOn(idError, 'Payment', ['idempotencyKey'])).toBe(false);
       expect((await recordedRowCounts(bookingId)).payments).toBe(2);
+    });
+  });
+
+  describe('plan withdrawal and state-aware plan reads (D-057)', () => {
+    const ONE_INSTALLMENT = [
+      { sequenceNumber: 1, isDeposit: true, amount: '500.00', dueDate: '2026-10-01' },
+    ];
+
+    async function proposedPlanFixture(): Promise<{
+      bookingId: string;
+      clientId: string;
+      planId: string;
+    }> {
+      const { bookingId, clientId } = await createAssignedBookingFixture('500.00');
+      const plan = await proposePaymentPlan(tcActor, { bookingId, installments: ONE_INSTALLMENT });
+      return { bookingId, clientId, planId: plan.id };
+    }
+
+    async function planAudits(planId: string, action: string) {
+      return prisma!.auditLog.findMany({ where: { entityId: planId, action } });
+    }
+
+    function actorWithRole(role: AuthenticatedUser['role']): AuthenticatedUser {
+      return {
+        id: randomUUID(),
+        name: `Integration ${role}`,
+        email: `${randomUUID()}@example.test`,
+        role,
+      };
+    }
+
+    it('lets the assigned Travel Consultant and the assigned Finance/Accounting user each withdraw a PROPOSED plan, retaining it and its installments', async () => {
+      for (const actor of [tcActor, financeActor]) {
+        const { bookingId, planId } = await proposedPlanFixture();
+        const withdrawn = await withdrawPaymentPlan(actor, {
+          paymentPlanId: planId,
+          reason: 'Wrong installment structure',
+        });
+        expect(withdrawn).toMatchObject({
+          id: planId,
+          status: 'WITHDRAWN',
+          withdrawnByStaffUserId: actor.id,
+          withdrawalReason: 'Wrong installment structure',
+          approvedAt: null,
+        });
+        expect(withdrawn.withdrawnAt).toBeInstanceOf(Date);
+        expect(await prisma!.paymentPlan.count({ where: { bookingId } })).toBe(1);
+        expect(await prisma!.installment.count({ where: { paymentPlanId: planId } })).toBe(1);
+      }
+    });
+
+    it('refuses Admin/Manager, Visa Documentation, Client, and System Administrator before any read, and an unassigned Travel Consultant without revealing the plan', async () => {
+      const { planId } = await proposedPlanFixture();
+      for (const role of [
+        'ADMIN_MANAGER',
+        'VISA_DOCUMENTATION',
+        'CLIENT',
+        'SYSTEM_ADMINISTRATOR',
+      ] as const) {
+        await expect(
+          withdrawPaymentPlan(role === 'ADMIN_MANAGER' ? adminActor : actorWithRole(role), {
+            paymentPlanId: planId,
+            reason: 'Not allowed',
+          }),
+        ).rejects.toMatchObject({ code: 'ROLE_NOT_PERMITTED' });
+      }
+      await expect(
+        withdrawPaymentPlan(unassignedTcActor, { paymentPlanId: planId, reason: 'Not allowed' }),
+      ).rejects.toMatchObject({ code: 'PAYMENT_PLAN_FORBIDDEN' });
+      await expect(
+        withdrawPaymentPlan(unassignedTcActor, { paymentPlanId: randomUUID(), reason: 'Missing' }),
+      ).rejects.toMatchObject({ code: 'PAYMENT_PLAN_FORBIDDEN' });
+
+      const unchanged = await prisma!.paymentPlan.findUniqueOrThrow({ where: { id: planId } });
+      expect(unchanged.status).toBe('PROPOSED');
+      expect(await planAudits(planId, 'PAYMENT_PLAN_WITHDRAWN')).toHaveLength(0);
+    });
+
+    it('never withdraws an APPROVED plan, even when the request smuggles status or approval fields, leaving the row and audit unchanged', async () => {
+      const { planId } = await proposedPlanFixture();
+      const approved = await approvePaymentPlan(financeActor, { paymentPlanId: planId });
+
+      const smuggled = {
+        paymentPlanId: planId,
+        reason: 'Try to withdraw',
+        status: 'WITHDRAWN',
+        approvedAt: null,
+        approvedByStaffUserId: null,
+      } as unknown as { paymentPlanId: string; reason: string };
+      for (const actor of [tcActor, financeActor]) {
+        await expect(
+          withdrawPaymentPlan(actor, { paymentPlanId: planId, reason: 'Try to withdraw' }),
+        ).rejects.toMatchObject({ code: 'PAYMENT_PLAN_CONFLICT', status: 409 });
+        await expect(withdrawPaymentPlan(actor, smuggled)).rejects.toMatchObject({
+          code: 'PAYMENT_PLAN_CONFLICT',
+        });
+      }
+
+      // The repository write itself never matches an APPROVED row.
+      const repository = await import('./repository');
+      await expect(
+        repository.withdrawPaymentPlanRow(prisma!, {
+          id: planId,
+          withdrawnByStaffUserId: financeActor.id,
+          withdrawnAt: new Date(),
+          withdrawalReason: 'Direct write',
+        }),
+      ).resolves.toBeNull();
+
+      const row = await prisma!.paymentPlan.findUniqueOrThrow({ where: { id: planId } });
+      expect(row).toMatchObject({
+        status: 'APPROVED',
+        approvedAt: approved.approvedAt,
+        approvedByStaffUserId: financeActor.id,
+        withdrawnAt: null,
+        withdrawnByStaffUserId: null,
+        withdrawalReason: null,
+      });
+      expect(await planAudits(planId, 'PAYMENT_PLAN_WITHDRAWN')).toHaveLength(0);
+    });
+
+    it('withdraws a PROPOSED plan on a CANCELLED booking', async () => {
+      const { bookingId, planId } = await proposedPlanFixture();
+      await prisma!.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED' } });
+      await expect(
+        withdrawPaymentPlan(financeActor, { paymentPlanId: planId, reason: 'Booking cancelled' }),
+      ).resolves.toMatchObject({ status: 'WITHDRAWN' });
+    });
+
+    it('returns an already withdrawn plan unchanged to any authorized repeat, whatever its reason, writing nothing', async () => {
+      const { planId } = await proposedPlanFixture();
+      const first = await withdrawPaymentPlan(tcActor, {
+        paymentPlanId: planId,
+        reason: 'Original reason',
+      });
+      const updatedAt = (await prisma!.paymentPlan.findUniqueOrThrow({ where: { id: planId } }))
+        .updatedAt;
+
+      const repeat = await withdrawPaymentPlan(financeActor, {
+        paymentPlanId: planId,
+        reason: 'A different reason',
+      });
+      expect(repeat).toEqual(first);
+      const row = await prisma!.paymentPlan.findUniqueOrThrow({ where: { id: planId } });
+      expect(row.updatedAt).toEqual(updatedAt);
+      expect(row.withdrawalReason).toBe('Original reason');
+      expect(row.withdrawnByStaffUserId).toBe(tcActor.id);
+      expect(await planAudits(planId, 'PAYMENT_PLAN_WITHDRAWN')).toHaveLength(1);
+
+      // A repeat still requires access: an unassigned caller learns nothing.
+      await expect(
+        withdrawPaymentPlan(unassignedTcActor, { paymentPlanId: planId, reason: 'Repeat' }),
+      ).rejects.toMatchObject({ code: 'PAYMENT_PLAN_FORBIDDEN' });
+    });
+
+    it('records one PAYMENT_PLAN_WITHDRAWN entry with the complete snapshot', async () => {
+      const { bookingId, clientId } = await createAssignedBookingFixture('500.00');
+      const plan = await proposePaymentPlan(tcActor, {
+        bookingId,
+        installments: [
+          { sequenceNumber: 1, isDeposit: true, amount: '150.00', dueDate: '2026-10-01' },
+          { sequenceNumber: 2, isDeposit: false, amount: '350.00', dueDate: '2026-11-15' },
+        ],
+      });
+      const withdrawn = await withdrawPaymentPlan(financeActor, {
+        paymentPlanId: plan.id,
+        reason: 'Total should be 450.00',
+      });
+
+      const [entry, ...rest] = await planAudits(plan.id, 'PAYMENT_PLAN_WITHDRAWN');
+      expect(rest).toHaveLength(0);
+      expect(entry).toMatchObject({
+        actorId: financeActor.id,
+        entityType: 'PaymentPlan',
+        entityId: plan.id,
+        beforeState: {
+          id: plan.id,
+          bookingId,
+          clientId,
+          approvedByStaffUserId: null,
+          approvedAt: null,
+          status: 'PROPOSED',
+          installments: [
+            { sequenceNumber: 1, isDeposit: true, amount: '150.00', dueDate: '2026-10-01' },
+            { sequenceNumber: 2, isDeposit: false, amount: '350.00', dueDate: '2026-11-15' },
+          ],
+        },
+        afterState: {
+          status: 'WITHDRAWN',
+          withdrawnAt: withdrawn.withdrawnAt!.toISOString(),
+          withdrawnByStaffUserId: financeActor.id,
+          reason: 'Total should be 450.00',
+        },
+      });
+      const proposed = await planAudits(plan.id, 'PAYMENT_PLAN_PROPOSED');
+      expect(proposed[0]?.afterState).toMatchObject({ status: 'PROPOSED' });
+    });
+
+    it('refuses to approve a withdrawn plan, and accepts a corrected new plan for the same booking', async () => {
+      const { bookingId, planId } = await proposedPlanFixture();
+      await withdrawPaymentPlan(tcActor, { paymentPlanId: planId, reason: 'Wrong structure' });
+      await expect(
+        approvePaymentPlan(financeActor, { paymentPlanId: planId }),
+      ).rejects.toMatchObject({ code: 'PAYMENT_PLAN_CONFLICT' });
+
+      const replacement = await proposePaymentPlan(tcActor, {
+        bookingId,
+        installments: [
+          { sequenceNumber: 1, isDeposit: true, amount: '200.00', dueDate: '2026-10-01' },
+          { sequenceNumber: 2, isDeposit: false, amount: '300.00', dueDate: '2026-11-01' },
+        ],
+      });
+      expect(replacement.id).not.toBe(planId);
+      const approved = await approvePaymentPlan(financeActor, { paymentPlanId: replacement.id });
+      expect(approved.status).toBe('APPROVED');
+      const [approvalAudit, ...otherApprovals] = await planAudits(
+        replacement.id,
+        'PAYMENT_PLAN_APPROVED',
+      );
+      expect(otherApprovals).toHaveLength(0);
+      expect(approvalAudit?.beforeState).toEqual({ status: 'PROPOSED', approvedAt: null });
+      expect(approvalAudit?.afterState).toMatchObject({
+        status: 'APPROVED',
+        approvedAt: approved.approvedAt!.toISOString(),
+        approvedByStaffUserId: financeActor.id,
+      });
+
+      const withdrawnRow = await prisma!.paymentPlan.findUniqueOrThrow({ where: { id: planId } });
+      expect(withdrawnRow.status).toBe('WITHDRAWN');
+      expect(withdrawnRow.approvedAt).toBeNull();
+      expect(
+        await prisma!.paymentPlan.count({ where: { bookingId, status: { not: 'WITHDRAWN' } } }),
+      ).toBe(1);
+    });
+
+    it('reports a second active plan as a P2002 on PaymentPlan.bookingId from payment_plan_active_booking_key, and allows one after a withdrawal', async () => {
+      const repository = await import('./repository');
+      const { isUniqueViolationOn, uniqueViolation } = await import('@/lib/prisma-errors');
+      const { bookingId, clientId, planId } = await proposedPlanFixture();
+
+      const insert = () =>
+        repository
+          .createPaymentPlanWithInstallments(prisma!, {
+            id: randomUUID(),
+            bookingId,
+            clientId,
+            proposedByStaffUserId: tcActor.id,
+            installments: [
+              {
+                id: randomUUID(),
+                sequenceNumber: 1,
+                isDeposit: true,
+                amount: '500.00',
+                dueDate: new Date('2026-10-01T00:00:00.000Z'),
+              },
+            ],
+          })
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+
+      const duplicate = await insert();
+      expect(uniqueViolation(duplicate)).toEqual({
+        modelName: 'PaymentPlan',
+        fields: ['bookingId'],
+      });
+      expect(isUniqueViolationOn(duplicate, 'PaymentPlan', ['bookingId'])).toBe(true);
+      expect(JSON.stringify((duplicate as { meta?: unknown }).meta)).toContain(
+        'payment_plan_active_booking_key',
+      );
+
+      await withdrawPaymentPlan(tcActor, { paymentPlanId: planId, reason: 'Superseded' });
+      expect(await insert()).toBeNull();
+      expect(await prisma!.paymentPlan.count({ where: { bookingId } })).toBe(2);
+    });
+
+    it('enforces the D-057 §2 CHECK constraints in the database', async () => {
+      const { planId } = await proposedPlanFixture();
+      const attempts: [string, () => Promise<unknown>][] = [
+        [
+          'payment_plan_status_approval',
+          () =>
+            prisma!.paymentPlan.update({
+              where: { id: planId },
+              data: { approvedAt: new Date(), approvedByStaffUserId: financeActor.id },
+            }),
+        ],
+        [
+          'payment_plan_status_withdrawal',
+          () =>
+            prisma!.paymentPlan.update({ where: { id: planId }, data: { status: 'WITHDRAWN' } }),
+        ],
+        [
+          'payment_plan_withdrawal_pairing',
+          () =>
+            prisma!.paymentPlan.update({
+              where: { id: planId },
+              data: {
+                status: 'WITHDRAWN',
+                withdrawnAt: new Date(),
+                withdrawnByStaffUserId: tcActor.id,
+              },
+            }),
+        ],
+        [
+          'payment_plan_withdrawal_reason_required',
+          () =>
+            prisma!.paymentPlan.update({
+              where: { id: planId },
+              data: {
+                status: 'WITHDRAWN',
+                withdrawnAt: new Date(),
+                withdrawnByStaffUserId: tcActor.id,
+                withdrawalReason: '   ',
+              },
+            }),
+        ],
+      ];
+      for (const [constraint, attempt] of attempts) {
+        const error = await attempt().then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+        expect(error, constraint).not.toBeNull();
+        expect(String((error as Error).message) + JSON.stringify(error), constraint).toContain(
+          constraint,
+        );
+      }
+      const row = await prisma!.paymentPlan.findUniqueOrThrow({ where: { id: planId } });
+      expect(row).toMatchObject({ status: 'PROPOSED', approvedAt: null, withdrawnAt: null });
+    });
+
+    it('resolves concurrent approval and withdrawal of one plan to exactly one outcome, never both', async () => {
+      for (let run = 0; run < 4; run += 1) {
+        const { planId } = await proposedPlanFixture();
+        const [approval, withdrawal] = await Promise.allSettled([
+          approvePaymentPlan(financeActor, { paymentPlanId: planId }),
+          withdrawPaymentPlan(tcActor, { paymentPlanId: planId, reason: 'Race' }),
+        ]);
+        const fulfilled = [approval, withdrawal].filter((r) => r.status === 'fulfilled');
+        expect(fulfilled).toHaveLength(1);
+        for (const result of [approval, withdrawal]) {
+          if (result.status === 'rejected') {
+            expect(result.reason).toBeInstanceOf(PaymentError);
+            expect(result.reason).toMatchObject({ code: 'PAYMENT_PLAN_CONFLICT' });
+          }
+        }
+        const row = await prisma!.paymentPlan.findUniqueOrThrow({ where: { id: planId } });
+        expect(row.status).toBe(approval.status === 'fulfilled' ? 'APPROVED' : 'WITHDRAWN');
+        expect(
+          (await planAudits(planId, 'PAYMENT_PLAN_APPROVED')).length +
+            (await planAudits(planId, 'PAYMENT_PLAN_WITHDRAWN')).length,
+        ).toBe(1);
+      }
+    }, 60000);
+
+    it('never leaves two active plans when a new proposal races a withdrawal', async () => {
+      for (let run = 0; run < 4; run += 1) {
+        const { bookingId, planId } = await proposedPlanFixture();
+        const [withdrawal, proposal] = await Promise.allSettled([
+          withdrawPaymentPlan(financeActor, { paymentPlanId: planId, reason: 'Race' }),
+          proposePaymentPlan(tcActor, { bookingId, installments: ONE_INSTALLMENT }),
+        ]);
+        expect(withdrawal.status).toBe('fulfilled');
+        if (proposal.status === 'rejected') {
+          expect(proposal.reason).toBeInstanceOf(PaymentError);
+          expect(proposal.reason).toMatchObject({ code: 'PAYMENT_PLAN_CONFLICT' });
+        }
+        expect(
+          await prisma!.paymentPlan.count({ where: { bookingId, status: { not: 'WITHDRAWN' } } }),
+        ).toBe(proposal.status === 'fulfilled' ? 1 : 0);
+      }
+    }, 60000);
+
+    it("ignores a withdrawn plan's installments for allocation, and never shows a withdrawn plan to the client", async () => {
+      const { bookingId, clientId, planId } = await proposedPlanFixture();
+      const payment = await recordPayment(financeActor, {
+        bookingId,
+        amount: '100.00',
+        idempotencyKey: randomUUID(),
+      });
+      await confirmPayment(financeActor, {
+        paymentId: payment.id,
+        reason: 'Verified',
+        idempotencyKey: randomUUID(),
+      });
+      const withdrawnInstallment = await prisma!.installment.findFirstOrThrow({
+        where: { paymentPlanId: planId },
+      });
+      await withdrawPaymentPlan(tcActor, { paymentPlanId: planId, reason: 'Wrong structure' });
+
+      await expect(
+        createAllocation(financeActor, {
+          paymentId: payment.id,
+          installmentId: withdrawnInstallment.id,
+          amount: '50.00',
+          idempotencyKey: randomUUID(),
+        }),
+      ).rejects.toMatchObject({ code: 'ALLOCATION_NOT_PERMITTED' });
+
+      const clientUser = await createUserFixture('CLIENT');
+      await prisma!.clientProfile.create({
+        data: { id: randomUUID(), userId: clientUser.id, clientId },
+      });
+      expect(await getClientPaymentSummaries(clientUser, clientId)).toEqual([]);
+      const staffWithoutPlan = await getBookingPaymentSummaryForStaff(financeActor, bookingId);
+      expect(staffWithoutPlan.planApproved).toBe(false);
+      expect(staffWithoutPlan.installments).toEqual([]);
+      expect(staffWithoutPlan.confirmedAmountPaid.toFixed(2)).toBe('100.00');
+
+      // The replacement plan is the one every read now uses.
+      const replacement = await proposePaymentPlan(tcActor, {
+        bookingId,
+        installments: [
+          { sequenceNumber: 1, isDeposit: true, amount: '400.00', dueDate: '2026-10-01' },
+          { sequenceNumber: 2, isDeposit: false, amount: '100.00', dueDate: '2026-11-01' },
+        ],
+      });
+      expect(await getClientPaymentSummaries(clientUser, clientId)).toEqual([]);
+      await approvePaymentPlan(financeActor, { paymentPlanId: replacement.id });
+      const replacementInstallments = await prisma!.installment.findMany({
+        where: { paymentPlanId: replacement.id },
+        orderBy: { sequenceNumber: 'asc' },
+      });
+      await createAllocation(financeActor, {
+        paymentId: payment.id,
+        installmentId: replacementInstallments[0]!.id,
+        amount: '100.00',
+        idempotencyKey: randomUUID(),
+      });
+
+      const staff = await getBookingPaymentSummaryForStaff(financeActor, bookingId);
+      expect(staff.planApproved).toBe(true);
+      expect(staff.installments.map((i) => i.id)).toEqual(replacementInstallments.map((i) => i.id));
+      const [clientSummary, ...others] = await getClientPaymentSummaries(clientUser, clientId);
+      expect(others).toHaveLength(0);
+      expect(clientSummary?.installments.map((i) => i.id)).toEqual(
+        replacementInstallments.map((i) => i.id),
+      );
+      expect(JSON.stringify(clientSummary)).not.toContain(withdrawnInstallment.id);
+      expect(JSON.stringify(clientSummary)).not.toContain(planId);
     });
   });
 });

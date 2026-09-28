@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Prisma, PaymentStatus } from '@/generated/prisma/client';
+import { Prisma, PaymentPlanStatus, PaymentStatus } from '@/generated/prisma/client';
 import { prisma } from '@/lib/db';
 import { isResidualDatabaseConflict, isUniqueViolationOn } from '@/lib/prisma-errors';
 import { runSerializableWithRetry } from '@/lib/serializable-transaction';
@@ -16,6 +16,8 @@ import {
   RECEIPT_AUDIT_ENTITY_TYPE,
   sanitizeAllocationSnapshot,
   sanitizePaymentPlanSnapshot,
+  sanitizePaymentPlanWithdrawalAfterSnapshot,
+  sanitizePaymentPlanWithdrawalBeforeSnapshot,
   sanitizePaymentRefundBeforeSnapshot,
   sanitizePaymentRefundSnapshot,
   sanitizePaymentStatusChangeSnapshot,
@@ -53,6 +55,7 @@ import type {
   RefundPaymentInput,
   ReverseAllocationInput,
   ReversePaymentInput,
+  WithdrawPaymentPlanInput,
 } from './schemas';
 
 // --- Defense-in-depth actor assertions (.claude/rules/backend.md
@@ -80,6 +83,18 @@ function assertFinanceActor(actor: AuthenticatedUser): PaymentActor {
   throw new PaymentError(
     'ROLE_NOT_PERMITTED',
     'Only Finance/Accounting may perform this payment operation.',
+  );
+}
+
+// D-057 §4: the Booking's assigned Travel Consultant or its assigned
+// Finance/Accounting user. Admin/Manager stays read-only (D-054 §3).
+function assertWithdrawerActor(actor: AuthenticatedUser): PaymentActor {
+  if (actor.role === 'TRAVEL_CONSULTANT' || actor.role === 'FINANCE_ACCOUNTING') {
+    return { id: actor.id, role: actor.role };
+  }
+  throw new PaymentError(
+    'ROLE_NOT_PERMITTED',
+    'Only the assigned Travel Consultant or Finance/Accounting user may withdraw a payment plan.',
   );
 }
 
@@ -306,16 +321,18 @@ function installmentStructureViolation(
  * invariant — a PaymentPlan may not exist before both are non-null).
  *
  * Deliberately NOT idempotent by a caller-supplied key (see schemas.ts's
- * `proposePaymentPlanSchema` doc comment): `PaymentPlan.bookingId @unique`
- * is the only natural uniqueness this operation has, and unlike
+ * `proposePaymentPlanSchema` doc comment): at most one *active* plan per
+ * Booking (`payment_plan_active_booking_key`, D-057 §2(5)) is the only
+ * natural uniqueness this operation has, and unlike
  * `createBooking`'s `proposalVersionId` race (where the racing request is
  * provably requesting the *same* outcome), a second `proposePaymentPlan`
- * call for a Booking that already has a plan could carry entirely different
- * installment content — silently returning the already-persisted plan would
- * misrepresent what was actually stored. Both an explicit pre-check and the
- * `bookingId` unique-constraint race (two concurrent first proposals) are
- * therefore treated identically as `PAYMENT_PLAN_CONFLICT`, never as a
- * silent idempotent success.
+ * call for a Booking that already has an active plan could carry entirely
+ * different installment content — silently returning the already-persisted
+ * plan would misrepresent what was actually stored. Both an explicit
+ * pre-check and the partial-unique-index race (two concurrent proposals, or
+ * a proposal racing a withdrawal) are therefore treated identically as
+ * `PAYMENT_PLAN_CONFLICT`, never as a silent idempotent success. Withdrawn
+ * plans never block a new proposal (D-057 §1).
  */
 export async function proposePaymentPlan(
   actor: AuthenticatedUser,
@@ -353,7 +370,7 @@ export async function proposePaymentPlan(
       if (existing) {
         throw new PaymentError(
           'PAYMENT_PLAN_CONFLICT',
-          'A payment plan already exists for this booking.',
+          'An active payment plan already exists for this booking.',
         );
       }
 
@@ -383,10 +400,12 @@ export async function proposePaymentPlan(
     });
   } catch (error) {
     if (error instanceof PaymentError) throw error;
+    // `payment_plan_active_booking_key` reports as a P2002 on
+    // PaymentPlan.bookingId (verified in service.integration.test.ts).
     if (isUniqueViolationOn(error, 'PaymentPlan', ['bookingId']) || isOtherKnownConflict(error)) {
       throw new PaymentError(
         'PAYMENT_PLAN_CONFLICT',
-        'A payment plan already exists for this booking.',
+        'An active payment plan already exists for this booking.',
       );
     }
     throw error;
@@ -402,7 +421,10 @@ export async function proposePaymentPlan(
  * already-approved plan is an idempotent no-op (see schemas.ts's doc
  * comment on why no caller-supplied key is needed here), mirroring
  * `updateBookingStatus`'s identical "no-op if already in the target state"
- * pattern.
+ * pattern. A withdrawn plan is never approved (D-057 §4): the plan must be
+ * `PROPOSED`, and the write is a conditional update on `status = 'PROPOSED'`,
+ * so an approval racing a withdrawal either commits first or ends in
+ * `PAYMENT_PLAN_CONFLICT`.
  */
 export async function approvePaymentPlan(
   actor: AuthenticatedUser,
@@ -425,8 +447,14 @@ export async function approvePaymentPlan(
       }
       const { plan, booking } = found;
 
-      if (plan.approvedAt !== null) {
+      if (plan.status === PaymentPlanStatus.APPROVED) {
         return plan;
+      }
+      if (plan.status !== PaymentPlanStatus.PROPOSED) {
+        throw new PaymentError(
+          'PAYMENT_PLAN_CONFLICT',
+          'This payment plan has been withdrawn and cannot be approved.',
+        );
       }
 
       if (booking.totalAmount === null) {
@@ -449,13 +477,21 @@ export async function approvePaymentPlan(
         approvedByStaffUserId: paymentActor.id,
         approvedAt: new Date(),
       });
+      if (!updated) {
+        throw new PaymentError(
+          'PAYMENT_PLAN_CONFLICT',
+          'This payment plan is no longer proposed and cannot be approved.',
+        );
+      }
 
       await repository.insertAuditLog(tx, {
         actorId: paymentActor.id,
         action: PAYMENT_AUDIT_ACTIONS.PAYMENT_PLAN_APPROVED,
         entityType: PAYMENT_PLAN_AUDIT_ENTITY_TYPE,
         entityId: updated.id,
-        beforeState: { approvedAt: null },
+        // The status the transition left (D-057 §5: every plan audit record
+        // carries `status`), as payment and booking status changes record it.
+        beforeState: { status: plan.status, approvedAt: null },
         afterState: sanitizePaymentPlanSnapshot(updated),
       });
 
@@ -465,6 +501,103 @@ export async function approvePaymentPlan(
     if (error instanceof PaymentError) throw error;
     if (isOtherKnownConflict(error)) {
       throw new PaymentError('PAYMENT_PLAN_CONFLICT', 'This payment plan could not be approved.');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Withdraws an unapproved PaymentPlan (D-057), so a wrong structure or total
+ * can be corrected by proposing a new plan. Only the Booking's currently
+ * assigned Travel Consultant or Finance/Accounting user may withdraw, with a
+ * reason; the plan is looked up only through that actor-scoped read, so an
+ * unassigned caller gets `PAYMENT_PLAN_FORBIDDEN` and learns nothing about
+ * it. Permitted in every Booking status (D-057 §1; D-056 §5).
+ *
+ * - `WITHDRAWN` already: returned unchanged, nothing written — whoever sends
+ *   the repeat and whatever reason it carries (D-057 §4).
+ * - `APPROVED`: `PAYMENT_PLAN_CONFLICT`. An approved plan is never
+ *   withdrawn; the input schema accepts no other field, and the write
+ *   below changes only the status and withdrawal fields of a row that is
+ *   still `PROPOSED`.
+ * - `PROPOSED`: refused if any allocation targets its installments (defense
+ *   in depth), otherwise withdrawn by a conditional update, with the
+ *   `PAYMENT_PLAN_WITHDRAWN` audit record in the same serializable
+ *   transaction. A concurrent approval either commits first (this then fails
+ *   its guard or updates no row, `PAYMENT_PLAN_CONFLICT`) or fails the same
+ *   way itself. The plan and its installments are retained.
+ */
+export async function withdrawPaymentPlan(
+  actor: AuthenticatedUser,
+  input: WithdrawPaymentPlanInput,
+): Promise<PaymentPlanRecord> {
+  const paymentActor = assertWithdrawerActor(actor);
+
+  try {
+    return await runSerializableWithRetry(async (tx) => {
+      const found = await repository.findPaymentPlanWithBookingForActor(
+        tx,
+        paymentActor,
+        input.paymentPlanId,
+      );
+      if (!found) {
+        throw new PaymentError(
+          'PAYMENT_PLAN_FORBIDDEN',
+          'Payment plan not found or not accessible.',
+        );
+      }
+      const { plan } = found;
+
+      if (plan.status === PaymentPlanStatus.WITHDRAWN) {
+        return plan;
+      }
+      if (plan.status !== PaymentPlanStatus.PROPOSED) {
+        throw new PaymentError(
+          'PAYMENT_PLAN_CONFLICT',
+          'An approved payment plan cannot be withdrawn.',
+        );
+      }
+      if ((await repository.countAllocationsForPlan(tx, plan.id)) > 0) {
+        throw new PaymentError(
+          'PAYMENT_PLAN_CONFLICT',
+          'This payment plan has allocations and cannot be withdrawn.',
+        );
+      }
+
+      const installments = await repository.findInstallmentsForPlanSnapshot(tx, plan.id);
+      const withdrawnAt = new Date();
+      const withdrawn = await repository.withdrawPaymentPlanRow(tx, {
+        id: plan.id,
+        withdrawnByStaffUserId: paymentActor.id,
+        withdrawnAt,
+        withdrawalReason: input.reason,
+      });
+      if (!withdrawn) {
+        throw new PaymentError(
+          'PAYMENT_PLAN_CONFLICT',
+          'This payment plan is no longer proposed and cannot be withdrawn.',
+        );
+      }
+
+      await repository.insertAuditLog(tx, {
+        actorId: paymentActor.id,
+        action: PAYMENT_AUDIT_ACTIONS.PAYMENT_PLAN_WITHDRAWN,
+        entityType: PAYMENT_PLAN_AUDIT_ENTITY_TYPE,
+        entityId: plan.id,
+        beforeState: sanitizePaymentPlanWithdrawalBeforeSnapshot(plan, installments),
+        afterState: sanitizePaymentPlanWithdrawalAfterSnapshot({
+          withdrawnAt,
+          withdrawnByStaffUserId: paymentActor.id,
+          reason: input.reason,
+        }),
+      });
+
+      return withdrawn;
+    });
+  } catch (error) {
+    if (error instanceof PaymentError) throw error;
+    if (isOtherKnownConflict(error)) {
+      throw new PaymentError('PAYMENT_PLAN_CONFLICT', 'This payment plan could not be withdrawn.');
     }
     throw error;
   }
@@ -1028,7 +1161,9 @@ export async function createAllocation(
           "The installment does not belong to this payment's booking.",
         );
       }
-      if (installment.planApprovedAt === null) {
+      // D-057 §3: `status = 'APPROVED'`, so a withdrawn plan's installments
+      // can never be targeted.
+      if (installment.planStatus !== PaymentPlanStatus.APPROVED) {
         throw new PaymentError(
           'ALLOCATION_NOT_PERMITTED',
           'An allocation may only target an installment belonging to an already-approved payment plan.',
@@ -1293,7 +1428,7 @@ function buildBookingPaymentSummary(
     bookingId,
     totalAmount: data.booking.totalAmount,
     currencyCode: data.booking.currencyCode,
-    planApproved: data.plan !== null && data.plan.approvedAt !== null,
+    planApproved: data.plan?.status === PaymentPlanStatus.APPROVED,
     confirmedAmountPaid: netConfirmedAmountPaid,
     remainingBalance:
       data.booking.totalAmount !== null

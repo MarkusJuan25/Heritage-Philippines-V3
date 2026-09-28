@@ -63,8 +63,10 @@ const STATUS_BY_CODE: Record<PaymentErrorCode, 403 | 404 | 409> = {
  *
  * `PAYMENT_PLAN_CONFLICT`/`PAYMENT_CONFLICT` cover both a genuine residual
  * database conflict (exhausted write-conflict retries, or an unmatched
- * P2002) and a business-rule conflict this entry defines (a PaymentPlan that
- * already exists for a Booking, one that is already approved, one whose
+ * P2002) and a business-rule conflict this entry defines (an active
+ * PaymentPlan that already exists for a Booking, approving a withdrawn plan
+ * or withdrawing an approved one (D-057), a withdrawal of a plan with
+ * allocations, one whose
  * installments do not yet sum to Booking.totalAmount, one whose installment
  * structure breaks D-019's sequence/deposit rules, or a Booking whose
  * totalAmount/currencyCode are not yet both set — D-019's reconciliation and
