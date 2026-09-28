@@ -302,8 +302,7 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
 
   /**
    * A real Booking, with `totalAmount`/`currencyCode` set (D-019's own
-   * creation-order invariant — no service in this repository populates
-   * these yet, so this fixture sets them directly, exactly as
+   * creation-order invariant — this fixture sets them directly, exactly as
    * features/bookings/service.integration.test.ts's own
    * `createAcceptedProposalVersionFixture` builds its Booking prerequisite
    * chain via the real, unmodified `createProposal` ->
@@ -392,6 +391,18 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     await expect(
       setBookingFinancials(financeActor, { ...input, currencyCode: 'USD' as 'PHP' }),
     ).rejects.toMatchObject({ code: 'PAYMENT_CONFLICT' });
+    await expect(
+      setBookingFinancials(financeActor, { ...input, currencyCode: 'PHO' as 'PHP' }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_CONFLICT' });
+    await expect(
+      setBookingFinancials(financeActor, { ...input, totalAmount: '500.001' }),
+    ).rejects.toMatchObject({ code: 'PAYMENT_CONFLICT' });
+    expect(
+      await prisma!.booking.findUniqueOrThrow({
+        where: { id: bookingId },
+        select: { totalAmount: true, currencyCode: true },
+      }),
+    ).toMatchObject({ totalAmount: null, currencyCode: null });
     const set = await setBookingFinancials(financeActor, input);
     expect(set.totalAmount?.toFixed(2)).toBe('500.00');
     await expect(
@@ -581,6 +592,64 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     await expect(
       withdrawPaymentPlan(tcActor, { paymentPlanId: plan.id, reason: 'Cancelled Booking' }),
     ).resolves.toMatchObject({ status: 'WITHDRAWN' });
+  });
+
+  it('preserves refunds, reversals, receipts, and reads after cancellation', async () => {
+    const { bookingId } = await createAssignedBookingFixture();
+    const plan = await proposePaymentPlan(tcActor, {
+      bookingId,
+      installments: [
+        { sequenceNumber: 1, isDeposit: true, amount: '500.00', dueDate: '2026-10-01' },
+      ],
+    });
+    await approvePaymentPlan(financeActor, { paymentPlanId: plan.id });
+    const installment = await prisma!.installment.findFirstOrThrow({
+      where: { paymentPlanId: plan.id },
+      select: { id: true },
+    });
+    const refundableId = await confirmedPayment(bookingId, '100.00');
+    const reversibleId = await confirmedPayment(bookingId, '50.00');
+    const allocatedId = await confirmedPayment(bookingId, '75.00');
+    const allocation = await createAllocation(financeActor, {
+      paymentId: allocatedId,
+      installmentId: installment.id,
+      amount: '25.00',
+      idempotencyKey: randomUUID(),
+    });
+    await prisma!.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED' } });
+
+    await expect(
+      refundPayment(financeActor, {
+        paymentId: refundableId,
+        amount: '20.00',
+        reason: 'Refund after cancellation',
+        idempotencyKey: randomUUID(),
+      }),
+    ).resolves.toMatchObject({ payment: { status: 'CONFIRMED' } });
+    await expect(
+      reversePayment(financeActor, {
+        paymentId: reversibleId,
+        reason: 'Payment recorded in error',
+        idempotencyKey: randomUUID(),
+      }),
+    ).resolves.toMatchObject({ status: 'REVERSED' });
+    await expect(
+      reverseAllocation(financeActor, {
+        allocationId: allocation.id,
+        reason: 'Allocation recorded in error',
+        idempotencyKey: randomUUID(),
+      }),
+    ).resolves.toMatchObject({ paymentAllocationId: allocation.id });
+    await expect(issueReceipt(financeActor, { paymentId: allocatedId })).resolves.toMatchObject({
+      paymentStatus: 'CONFIRMED',
+      receipt: { paymentId: allocatedId },
+    });
+    await expect(getBookingPaymentSummaryForStaff(adminActor, bookingId)).resolves.toMatchObject({
+      bookingId,
+    });
+    await expect(getPaymentBookingHeaderForActor(financeActor, bookingId)).resolves.toMatchObject({
+      status: 'CANCELLED',
+    });
   });
 
   it.each([
