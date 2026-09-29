@@ -11,12 +11,21 @@ import { bookingIdParamSchema } from '@/features/bookings/schemas';
 import { getBookingById } from '@/features/bookings/service';
 import { isTransitionAllowed } from '@/features/bookings/transitions';
 import { findActiveAssignmentForBooking } from '@/features/assignments/repository';
+import {
+  getBookingFinanceAssignment,
+  listEligibleFinanceStaff,
+} from '@/features/assignments/service';
 import { prisma } from '@/lib/db';
 
 import styles from '../bookings.module.css';
 import { BookingStatusTransitionPanel } from './_components/BookingStatusTransitionPanel';
 import { BookingAssignmentPanel } from './_components/BookingAssignmentPanel';
 import type { BookingAssignmentSummary } from './_components/BookingAssignmentPanel';
+import { FinanceAssignmentPanel } from './_components/FinanceAssignmentPanel';
+import type {
+  EligibleFinanceStaff,
+  FinanceAssigneeSummary,
+} from './_components/FinanceAssignmentPanel';
 
 // D-028 §3: exactly ADMIN_MANAGER and TRAVEL_CONSULTANT may read a
 // Booking's detail — mirrors admin/proposals/[id]/page.tsx's/
@@ -47,6 +56,42 @@ const BOOKING_STATUS_LABELS: Record<BookingStatus, string> = {
 };
 
 type PageParams = Promise<{ id: string }>;
+
+const ELIGIBLE_FINANCE_PAGE_SIZE = 100;
+
+/**
+ * D-056 §1/§3 (D-054 Stage 3): the Finance/Accounting assignment panel's
+ * data, for Admin/Manager only — the only role those reads permit. Every
+ * eligible page is aggregated, never silently only the first.
+ */
+async function loadFinanceAssignment(
+  user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
+  bookingId: string,
+): Promise<{ current: FinanceAssigneeSummary; eligible: EligibleFinanceStaff[] }> {
+  const assignment = await getBookingFinanceAssignment(user, bookingId);
+  const eligible: EligibleFinanceStaff[] = [];
+  for (let page = 1; ; page += 1) {
+    const result = await listEligibleFinanceStaff(user, {
+      page,
+      pageSize: ELIGIBLE_FINANCE_PAGE_SIZE,
+    });
+    eligible.push(
+      ...result.items.map((staff) => ({ id: staff.id, name: staff.name, email: staff.email })),
+    );
+    if (result.items.length === 0 || eligible.length >= result.total) break;
+  }
+  return {
+    current: assignment
+      ? {
+          name: assignment.assignee.name,
+          email: assignment.assignee.email,
+          role: assignment.assignee.role,
+          eligible: assignment.assigneeEligible,
+        }
+      : null,
+    eligible: eligible.filter((staff) => staff.id !== assignment?.assignedStaffId),
+  };
+}
 
 function TextValue({ value }: { value: string | null }) {
   return <>{value === null ? NOT_SET_PLACEHOLDER : value}</>;
@@ -186,10 +231,17 @@ export default async function AdminBookingDetailPage({ params }: { params: PageP
     isTransitionAllowed(booking.status, status),
   );
 
+  // Also sequenced after the actor-scoped Booking read, Admin/Manager only.
+  const financeAssignment =
+    user.role === 'ADMIN_MANAGER' ? await loadFinanceAssignment(user, booking.id) : null;
+
   return (
     <div>
       <Link href="/admin/bookings">← Back to Bookings</Link>
       <h1>{booking.bookingReference}</h1>
+      <p>
+        <Link href={`/admin/payments/${booking.id}`}>View payments for this booking</Link>
+      </p>
 
       <dl className={styles.detailFields}>
         <div className={styles.detailField}>
@@ -295,6 +347,14 @@ export default async function AdminBookingDetailPage({ params }: { params: PageP
         role={user.role}
         currentAssignment={assignmentSummary}
       />
+
+      {financeAssignment ? (
+        <FinanceAssignmentPanel
+          bookingId={bookingId}
+          current={financeAssignment.current}
+          eligible={financeAssignment.eligible}
+        />
+      ) : null}
     </div>
   );
 }

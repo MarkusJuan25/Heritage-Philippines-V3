@@ -23,6 +23,14 @@ vi.mock('@/features/assignments/repository', () => ({
 }));
 vi.mock('@/lib/db', () => ({ prisma: { marker: 'prisma-singleton' } }));
 
+// D-054 Stage 3: the Finance/Accounting assignment panel's reads
+// (Admin/Manager only, D-056 §1).
+const financeAssignmentMocks = vi.hoisted(() => ({
+  getBookingFinanceAssignment: vi.fn(),
+  listEligibleFinanceStaff: vi.fn(),
+}));
+vi.mock('@/features/assignments/service', () => financeAssignmentMocks);
+
 const { redirectMock, routerRefreshMock } = vi.hoisted(() => ({
   redirectMock: vi.fn((url: string) => {
     throw new Error(`REDIRECT:${url}`);
@@ -125,6 +133,13 @@ beforeEach(() => {
   // Safe default for every test that doesn't specifically exercise
   // assignment behavior: no active assignment.
   findActiveAssignmentForBookingMock.mockResolvedValue(null);
+  financeAssignmentMocks.getBookingFinanceAssignment.mockResolvedValue(null);
+  financeAssignmentMocks.listEligibleFinanceStaff.mockResolvedValue({
+    items: [],
+    page: 1,
+    pageSize: 100,
+    total: 0,
+  });
   // BookingAssignmentPanel (rendered by this page, Stage 2D) fetches the
   // eligible Travel Consultant list on mount for an ADMIN_MANAGER actor —
   // stubbed globally here so every existing test unrelated to that panel's
@@ -691,6 +706,119 @@ describe('AdminBookingDetailPage', () => {
 
       expect(screen.queryByText('Assignment')).not.toBeInTheDocument();
       expect(screen.queryByText('Unassigned')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Finance/Accounting assignment panel (D-056 §1, D-054 Stage 3)', () => {
+    const FINANCE_A = { id: 'finance-a', name: 'Ben Finance', email: 'ben@example.test' };
+    const FINANCE_B = { id: 'finance-b', name: 'Cora Finance', email: 'cora@example.test' };
+
+    function financeView(overrides: { role?: string; assigneeEligible?: boolean } = {}) {
+      return {
+        id: 'assignment-1',
+        bookingId: BOOKING_ID,
+        assignedStaffId: FINANCE_A.id,
+        assignedByUserId: 'admin-1',
+        createdAt: new Date('2026-09-28T00:00:00Z'),
+        assignee: {
+          ...FINANCE_A,
+          role: overrides.role ?? 'FINANCE_ACCOUNTING',
+          isActive: true,
+        },
+        assigneeEligible: overrides.assigneeEligible ?? true,
+      };
+    }
+
+    it('reads the assignment and every eligible page for ADMIN_MANAGER, only after the Booking read', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getBookingByIdMock.mockResolvedValue(bookingDetail());
+      financeAssignmentMocks.getBookingFinanceAssignment.mockResolvedValue(financeView());
+      financeAssignmentMocks.listEligibleFinanceStaff
+        .mockResolvedValueOnce({ items: [FINANCE_A], page: 1, pageSize: 100, total: 2 })
+        .mockResolvedValueOnce({ items: [FINANCE_B], page: 2, pageSize: 100, total: 2 });
+
+      const jsx = await AdminBookingDetailPage({ params: params() });
+      render(jsx);
+
+      expect(financeAssignmentMocks.getBookingFinanceAssignment).toHaveBeenCalledWith(
+        ADMIN_MANAGER,
+        BOOKING_ID,
+      );
+      expect(financeAssignmentMocks.listEligibleFinanceStaff.mock.calls).toEqual([
+        [ADMIN_MANAGER, { page: 1, pageSize: 100 }],
+        [ADMIN_MANAGER, { page: 2, pageSize: 100 }],
+      ]);
+      expect(getBookingByIdMock.mock.invocationCallOrder[0]).toBeLessThan(
+        financeAssignmentMocks.getBookingFinanceAssignment.mock.invocationCallOrder[0]!,
+      );
+      expect(
+        screen.getByRole('heading', { name: 'Finance/Accounting assignment' }),
+      ).toBeInTheDocument();
+      expect(screen.getByText('Ben Finance (ben@example.test)')).toBeInTheDocument();
+      // The current assignee is not offered as their own replacement.
+      const select = screen.getByLabelText('Replace with');
+      const optionLabels = Array.from((select as HTMLSelectElement).options).map(
+        (option) => option.textContent,
+      );
+      expect(optionLabels).toEqual([
+        'Select a Finance/Accounting user…',
+        'Cora Finance (cora@example.test)',
+      ]);
+    });
+
+    it('flags a stale assignee whose current role no longer grants payment access', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getBookingByIdMock.mockResolvedValue(bookingDetail());
+      financeAssignmentMocks.getBookingFinanceAssignment.mockResolvedValue(
+        financeView({ role: 'TRAVEL_CONSULTANT', assigneeEligible: false }),
+      );
+
+      const jsx = await AdminBookingDetailPage({ params: params() });
+      render(jsx);
+
+      expect(
+        screen.getByText(/no longer an active Finance\/Accounting user \(current role:/),
+      ).toBeInTheDocument();
+    });
+
+    it('never renders the panel or reads the assignment for TRAVEL_CONSULTANT', async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getBookingByIdMock.mockResolvedValue(bookingDetail());
+
+      const jsx = await AdminBookingDetailPage({ params: params() });
+      render(jsx);
+
+      expect(
+        screen.queryByRole('heading', { name: 'Finance/Accounting assignment' }),
+      ).not.toBeInTheDocument();
+      expect(financeAssignmentMocks.getBookingFinanceAssignment).not.toHaveBeenCalled();
+      expect(financeAssignmentMocks.listEligibleFinanceStaff).not.toHaveBeenCalled();
+    });
+
+    it('never reads the assignment for a not-found or forbidden Booking', async () => {
+      getCurrentUserMock.mockResolvedValue(ADMIN_MANAGER);
+      getBookingByIdMock.mockRejectedValue(
+        new BookingError('BOOKING_NOT_FOUND', 'Booking not found.'),
+      );
+
+      const jsx = await AdminBookingDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.getByRole('heading', { name: 'Booking not found' })).toBeInTheDocument();
+      expect(financeAssignmentMocks.getBookingFinanceAssignment).not.toHaveBeenCalled();
+    });
+
+    it("links to the Booking's payments view", async () => {
+      getCurrentUserMock.mockResolvedValue(TRAVEL_CONSULTANT);
+      getBookingByIdMock.mockResolvedValue(bookingDetail());
+
+      const jsx = await AdminBookingDetailPage({ params: params() });
+      render(jsx);
+
+      expect(screen.getByRole('link', { name: 'View payments for this booking' })).toHaveAttribute(
+        'href',
+        `/admin/payments/${BOOKING_ID}`,
+      );
     });
   });
 });
