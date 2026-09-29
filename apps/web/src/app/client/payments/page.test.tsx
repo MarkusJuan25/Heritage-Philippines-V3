@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
@@ -28,6 +29,8 @@ vi.mock('next/navigation', () => ({ redirect: redirectMock }));
 import { Prisma } from '@/generated/prisma/client';
 import { ClientError } from '@/features/clients/errors';
 import { PaymentError } from '@/features/payments/errors';
+
+import Link from 'next/link';
 
 import ClientPaymentsPage from './page';
 
@@ -91,6 +94,33 @@ function summary(overrides: Record<string, unknown> = {}) {
     ],
     ...overrides,
   };
+}
+
+/**
+ * The values this page's RSC payload would carry, which Next.js inlines into
+ * the HTML: every element's key, and the props of every host element and
+ * client component (`next/link`). Every other function component here is a
+ * server component, rendered on the server, so it is expanded rather than
+ * serialized. Visible-markup checks alone cannot see keys.
+ */
+function rscSerializedValues(node: ReactNode, out: unknown[] = []): unknown[] {
+  if (Array.isArray(node)) {
+    for (const child of node) rscSerializedValues(child as ReactNode, out);
+    return out;
+  }
+  if (!isValidElement(node)) {
+    out.push(node);
+    return out;
+  }
+  const element = node as ReactElement<Record<string, unknown>>;
+  out.push(element.key);
+  if (typeof element.type === 'function' && element.type !== Link) {
+    const component = element.type as (props: Record<string, unknown>) => ReactNode;
+    return rscSerializedValues(component(element.props), out);
+  }
+  const { children, ...props } = element.props;
+  out.push(props);
+  return rscSerializedValues(children as ReactNode, out);
 }
 
 async function renderPage() {
@@ -236,6 +266,18 @@ describe('ClientPaymentsPage — client-safe output (D-054 §7)', () => {
     for (const id of [BOOKING_ID, OWN_CLIENT_ID, ...INSTALLMENT_IDS, ...PAYMENT_IDS]) {
       expect(html).not.toContain(id);
     }
+  });
+
+  it('never serializes internal record ids into the RSC payload, including as React keys', async () => {
+    const payload = JSON.stringify(rscSerializedValues(await ClientPaymentsPage()));
+
+    for (const id of [BOOKING_ID, OWN_CLIENT_ID, ...INSTALLMENT_IDS, ...PAYMENT_IDS]) {
+      expect(payload).not.toContain(id);
+    }
+    // Positive control: the walk does see keys and rendered values.
+    expect(payload).toContain('installment-1');
+    expect(payload).toContain('payment-3');
+    expect(payload).toContain('HPB-ANA0001');
   });
 
   it('never renders staff-only values such as unapplied credit or overpayment', async () => {
