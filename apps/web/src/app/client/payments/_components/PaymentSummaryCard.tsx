@@ -46,7 +46,10 @@ function IssuedDate({ date }: { date: Date }) {
  * no action of any kind is rendered. Receipts are shown as their number and
  * issue date beside the payment they belong to, marked by that payment's
  * current status (blueprint §11.5); there is no receipt link or file.
- * Internal record ids are never rendered.
+ * Internal record ids are never rendered — including as React keys: this is
+ * a server component, and the RSC payload inlined into the HTML serializes
+ * every element's key. These read-only lists keep the server's order and are
+ * never reordered on the client, so each item is keyed by its position.
  */
 export function PaymentSummaryCard({ summary }: { summary: BookingPaymentSummary }) {
   const currency = summary.currencyCode;
@@ -94,7 +97,7 @@ export function PaymentSummaryCard({ summary }: { summary: BookingPaymentSummary
           <h3 className={styles.bookingDetailSectionHeading}>Installment schedule</h3>
           <ol className={styles.paymentItemList}>
             {summary.installments.map((installment, index) => (
-              <li key={installment.id} className={styles.paymentItem}>
+              <li key={`installment-${index + 1}`} className={styles.paymentItem}>
                 <span>Installment {index + 1}</span>
                 <span>
                   Due <CalendarDate date={installment.dueDate} />
@@ -116,8 +119,8 @@ export function PaymentSummaryCard({ summary }: { summary: BookingPaymentSummary
             <p className={styles.emptyState}>No payments have been recorded yet.</p>
           ) : (
             <ul className={styles.paymentItemList}>
-              {summary.payments.map((payment) => (
-                <li key={payment.id} className={styles.paymentItem}>
+              {summary.payments.map((payment, index) => (
+                <li key={`payment-${index + 1}`} className={styles.paymentItem}>
                   <span>{formatMoney(payment.amount, currency)}</span>
                   <span>{PAYMENT_STATUS_LABELS[payment.status]}</span>
                   <span>
