@@ -142,3 +142,25 @@ export function computeNextPaymentDue(installments: InstallmentForNextDue[]): Da
   }
   return earliest;
 }
+
+/**
+ * The amount due at the next payment due date (D-054 Stage 4; correction of
+ * September 29, 2026): the sum of the outstanding amounts of every
+ * Installment whose dueDate is `computeNextPaymentDue`'s date. Returns `null`
+ * exactly when that date is `null`. Computed here, server-side, so the client
+ * portal never adds up installments itself.
+ */
+export function computeNextPaymentDueAmount(
+  installments: InstallmentForNextDue[],
+): Prisma.Decimal | null {
+  const nextDue = computeNextPaymentDue(installments);
+  if (nextDue === null) return null;
+  return installments.reduce(
+    (total, installment) =>
+      installment.dueDate.getTime() === nextDue.getTime() &&
+      installment.outstandingAmount.greaterThan(ZERO)
+        ? total.plus(installment.outstandingAmount)
+        : total,
+    ZERO,
+  );
+}

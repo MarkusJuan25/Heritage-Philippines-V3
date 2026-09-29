@@ -7,6 +7,7 @@ import {
   computeNetConfirmedAmountPaid,
   computeNetContribution,
   computeNextPaymentDue,
+  computeNextPaymentDueAmount,
   computeOutstandingInstallmentAmount,
   computeOverpayment,
   computeRemainingBalance,
@@ -200,5 +201,44 @@ describe('computeNextPaymentDue', () => {
 
   it('returns null for an empty installment list', () => {
     expect(computeNextPaymentDue([])).toBeNull();
+  });
+});
+
+describe('computeNextPaymentDueAmount (D-054 Stage 4 correction)', () => {
+  const at = (date: string) => new Date(`${date}T00:00:00.000Z`);
+
+  it('is the outstanding amount of the installment on the next due date', () => {
+    expect(
+      computeNextPaymentDueAmount([
+        { dueDate: at('2026-12-01'), outstandingAmount: d('70000.00') },
+        { dueDate: at('2026-10-15'), outstandingAmount: d('30000.00') },
+      ])?.toFixed(2),
+    ).toBe('30000.00');
+  });
+
+  it('adds every installment due on that same date', () => {
+    expect(
+      computeNextPaymentDueAmount([
+        { dueDate: at('2026-10-15'), outstandingAmount: d('1000.00') },
+        { dueDate: at('2026-10-15'), outstandingAmount: d('250.50') },
+        { dueDate: at('2026-11-15'), outstandingAmount: d('9000.00') },
+      ])?.toFixed(2),
+    ).toBe('1250.50');
+  });
+
+  it('skips a fully paid earlier installment and uses its partial remainder only when outstanding', () => {
+    expect(
+      computeNextPaymentDueAmount([
+        { dueDate: at('2026-10-15'), outstandingAmount: d('0.00') },
+        { dueDate: at('2026-11-15'), outstandingAmount: d('12000.00') },
+      ])?.toFixed(2),
+    ).toBe('12000.00');
+  });
+
+  it('is null exactly when nothing is due', () => {
+    expect(
+      computeNextPaymentDueAmount([{ dueDate: at('2026-10-15'), outstandingAmount: d('0.00') }]),
+    ).toBeNull();
+    expect(computeNextPaymentDueAmount([])).toBeNull();
   });
 });

@@ -12,19 +12,18 @@ vi.mock('next/navigation', () => ({
 
 import { ClientPortalNav } from './ClientPortalNav';
 
-// D-040 §7/§9 + D-047 §2 + D-049 §7 + D-051 §10 + D-052 §4. The ten
-// canonical labels, verbatim and in order. "Home / Overview" (`/client`),
-// "My Journey" (`/client/my-journey`), "Bookings" (`/client/bookings`),
+// D-040 §7/§9 + D-047 §2 + D-049 §7 + D-051 §10 + D-052 §4 + D-054
+// Stage 4. The ten canonical labels, verbatim and in order. "Home /
+// Overview" (`/client`), "My Journey" (`/client/my-journey`), "Bookings"
+// (`/client/bookings`), "Payments & Receipts" (`/client/payments`),
 // "Regional Tours" (`/client/regional-tours`), and "Support & Messages"
 // (`/client/support`) are active-aware: the current path's label is a
 // non-link `<span aria-current="page">`, every other real item is an
 // ordinary in-app <Link>. The real items are not contiguous in canonical
-// order — three inert labels (Payments & Receipts, Documents, Visa
-// Center) sit between "Bookings" and "Regional Tours" (D-051 §10 was the
-// first promotion to skip past inert labels), and two more (Profile,
-// Settings) follow "Support & Messages" — so the remaining five inert
-// items are identified by label set membership, not by a contiguous array
-// slice. The inert items remain plain-text (no href / anchor / button /
+// order — two inert labels (Documents, Visa Center) sit between "Payments
+// & Receipts" and "Regional Tours", and two more (Profile, Settings)
+// follow "Support & Messages" — so the remaining four inert items are
+// identified by label set membership, not by a contiguous array slice. The inert items remain plain-text (no href / anchor / button /
 // onClick / tabindex / role), each showing a visible "Coming soon". The
 // focusable controls inside <nav> are the mobile drawer toggle and
 // whichever real nav items are not the current page.
@@ -45,10 +44,11 @@ const REAL_LABELS = [
   'Home / Overview',
   'My Journey',
   'Bookings',
+  'Payments & Receipts',
   'Regional Tours',
   'Support & Messages',
 ];
-const INERT_FIVE = TEN_LABELS.filter((label) => !REAL_LABELS.includes(label));
+const INERT_FOUR = TEN_LABELS.filter((label) => !REAL_LABELS.includes(label));
 
 function getNav() {
   return screen.getByRole('navigation', { name: 'Client portal' });
@@ -97,6 +97,29 @@ describe('ClientPortalNav', () => {
     const link = screen.getByRole('link', { name: 'Bookings' });
     expect(link).toHaveAttribute('href', '/client/bookings');
     expect(link).not.toHaveAttribute('aria-current');
+  });
+
+  it('renders "Payments & Receipts" as a real in-app link to /client/payments in its canonical fourth position (D-054 Stage 4)', () => {
+    render(<ClientPortalNav />);
+
+    const link = screen.getByRole('link', { name: 'Payments & Receipts' });
+    expect(link).toHaveAttribute('href', '/client/payments');
+    expect(link).not.toHaveAttribute('aria-current');
+    expect(link.closest('li')).not.toHaveTextContent('Coming soon');
+    expect(link.closest('li')).toBe(Array.from(getNav().querySelectorAll('li'))[3]);
+  });
+
+  it('marks "Payments & Receipts" as a non-link <span aria-current="page"> when the path is /client/payments', () => {
+    usePathnameMock.mockReturnValue('/client/payments');
+    render(<ClientPortalNav />);
+
+    const current = screen.getByText('Payments & Receipts');
+    expect(current.tagName).toBe('SPAN');
+    expect(current).toHaveAttribute('aria-current', 'page');
+    expect(current.closest('a')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Payments & Receipts' })).not.toBeInTheDocument();
+    expect(Array.from(getNav().querySelectorAll('li'))[3]).toBe(current.closest('li'));
+    expect(screen.getAllByRole('link')).toHaveLength(5);
   });
 
   it('renders "Regional Tours" as a real in-app link to /client/regional-tours when it is not the current page', () => {
@@ -161,6 +184,10 @@ describe('ClientPortalNav', () => {
       'href',
       '/client/regional-tours',
     );
+    expect(screen.getByRole('link', { name: 'Payments & Receipts' })).toHaveAttribute(
+      'href',
+      '/client/payments',
+    );
 
     // Still in true canonical position — item index 7 of 10, unaffected by
     // which label happens to be current.
@@ -195,14 +222,14 @@ describe('ClientPortalNav', () => {
       'href',
       '/client/support',
     );
-    expect(screen.getAllByRole('link')).toHaveLength(4);
+    expect(screen.getAllByRole('link')).toHaveLength(5);
 
-    // The current item is not focusable: the toggle plus the four other
+    // The current item is not focusable: the toggle plus the five other
     // real links are the only focusable controls.
     expect(current.closest('li')?.querySelector('a[href], button, [tabindex]')).toBeNull();
     expect(
       getNav().querySelectorAll('a[href], button, [tabindex], input, select, textarea'),
-    ).toHaveLength(5);
+    ).toHaveLength(6);
 
     // Still in true canonical position — item index 6 of 10, unaffected by
     // which label happens to be current.
@@ -216,6 +243,7 @@ describe('ClientPortalNav', () => {
       '/client/my-journey',
       '/client/support',
       '/client/regional-tours',
+      '/client/payments',
       '/client/unknown',
     ]) {
       usePathnameMock.mockReturnValue(path);
@@ -227,16 +255,16 @@ describe('ClientPortalNav', () => {
     }
   });
 
-  it('renders the remaining five later-phase items as inert plain text: no href/anchor/button/tabindex/role, each with a visible "Coming soon"', () => {
+  it('renders the remaining four later-phase items as inert plain text: no href/anchor/button/tabindex/role, each with a visible "Coming soon"', () => {
     render(<ClientPortalNav />);
 
     const items = Array.from(getNav().querySelectorAll('li'));
     const inert = items.filter(
       (li) => !REAL_LABELS.includes(li.textContent?.replace('Coming soon', '').trim() ?? ''),
     );
-    expect(inert).toHaveLength(5);
+    expect(inert).toHaveLength(4);
     expect(inert.map((li) => li.textContent?.replace('Coming soon', '').trim())).toEqual(
-      INERT_FIVE,
+      INERT_FOUR,
     );
 
     for (const li of inert) {
@@ -253,31 +281,32 @@ describe('ClientPortalNav', () => {
     }
   });
 
-  it('exposes exactly four nav links — every real item that is not the current page', () => {
+  it('exposes exactly five nav links — every real item that is not the current page', () => {
     render(<ClientPortalNav />);
 
     const links = screen.getAllByRole('link');
-    expect(links).toHaveLength(4);
+    expect(links).toHaveLength(5);
     expect(links.map((link) => link.textContent)).toEqual([
       'My Journey',
       'Bookings',
+      'Payments & Receipts',
       'Regional Tours',
       'Support & Messages',
     ]);
   });
 
-  it('exposes exactly five focusable controls inside <nav> — the mobile toggle and the four non-current nav links', () => {
+  it('exposes exactly six focusable controls inside <nav> — the mobile toggle and the five non-current nav links', () => {
     render(<ClientPortalNav />);
 
     const focusables = getNav().querySelectorAll(
       'a[href], button, [tabindex], input, select, textarea',
     );
-    expect(focusables).toHaveLength(5);
+    expect(focusables).toHaveLength(6);
     expect(
       Array.from(focusables)
         .map((el) => el.tagName)
         .sort(),
-    ).toEqual(['A', 'A', 'A', 'A', 'BUTTON']);
+    ).toEqual(['A', 'A', 'A', 'A', 'A', 'BUTTON']);
     expect(screen.getByRole('button', { name: 'Client portal menu' })).toBeInTheDocument();
   });
 
@@ -288,6 +317,7 @@ describe('ClientPortalNav', () => {
     const toggle = screen.getByRole('button', { name: 'Client portal menu' });
     const myJourneyLink = screen.getByRole('link', { name: 'My Journey' });
     const bookingsLink = screen.getByRole('link', { name: 'Bookings' });
+    const paymentsLink = screen.getByRole('link', { name: 'Payments & Receipts' });
     const regionalToursLink = screen.getByRole('link', { name: 'Regional Tours' });
     const supportLink = screen.getByRole('link', { name: 'Support & Messages' });
 
@@ -299,6 +329,9 @@ describe('ClientPortalNav', () => {
 
     await user.tab();
     expect(bookingsLink).toHaveFocus();
+
+    await user.tab();
+    expect(paymentsLink).toHaveFocus();
 
     await user.tab();
     expect(regionalToursLink).toHaveFocus();

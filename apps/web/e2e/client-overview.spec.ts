@@ -1031,10 +1031,10 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
         // Navigation — ten labels verbatim. On `/client`, "Home / Overview" is
         // the current item (a non-link <span aria-current="page">); "My
         // Journey" (D-047 §2), "Bookings" (D-049 §7), "Regional Tours"
-        // (D-052 §4, Stage 3), and "Support & Messages" (D-051 §10, Stage
-        // 4) are the four real in-app <Link>s; the remaining five
-        // later-phase items are inert with a visible "Coming soon" and no
-        // href.
+        // (D-052 §4, Stage 3), "Support & Messages" (D-051 §10, Stage
+        // 4), and "Payments & Receipts" (D-054 Stage 4) are the five real
+        // in-app <Link>s; the remaining four later-phase items are inert
+        // with a visible "Coming soon" and no href.
         const navItems = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .locator('li');
@@ -1049,18 +1049,19 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
           .getByText('Home / Overview', { exact: true });
         await expect(current).toHaveAttribute('aria-current', 'page');
         expect(await current.evaluate((node) => node.tagName)).toBe('SPAN');
-        // Exactly four real navigation links: "My Journey" ->
+        // Exactly five real navigation links: "My Journey" ->
         // /client/my-journey, "Bookings" -> /client/bookings (D-049 §7
         // promoted the previously-inert "Bookings" label to a real link),
         // "Regional Tours" -> /client/regional-tours (D-052 §4, Stage 3,
         // promoted the previously-inert "Regional Tours" label to a real
         // link), and "Support & Messages" -> /client/support (D-051 §10,
         // Stage 4, promoted the previously-inert "Support & Messages" label
-        // to a real link).
+        // to a real link), and "Payments & Receipts" -> /client/payments
+        // (D-054 Stage 4).
         const navLinks = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .getByRole('link');
-        await expect(navLinks).toHaveCount(4);
+        await expect(navLinks).toHaveCount(5);
         const myJourneyLink = navLinks.filter({ hasText: 'My Journey' });
         await expect(myJourneyLink).toHaveAccessibleName('My Journey');
         await expect(myJourneyLink).toHaveAttribute('href', '/client/my-journey');
@@ -1073,7 +1074,10 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
         const regionalToursLink = navLinks.filter({ hasText: 'Regional Tours' });
         await expect(regionalToursLink).toHaveAccessibleName('Regional Tours');
         await expect(regionalToursLink).toHaveAttribute('href', '/client/regional-tours');
-        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(5);
+        const paymentsLink = navLinks.filter({ hasText: 'Payments & Receipts' });
+        await expect(paymentsLink).toHaveAccessibleName('Payments & Receipts');
+        await expect(paymentsLink).toHaveAttribute('href', '/client/payments');
+        await expect(navItems.filter({ hasText: 'Coming soon' })).toHaveCount(4);
 
         // Consultant card + support-guidance line (the converting TC is
         // auto-assigned during Lead -> Client conversion).
@@ -1206,7 +1210,7 @@ test('D-040 §9: two activated clients see an isolated, header-hardened Client H
         const regionalToursNavLinks = clientPage
           .getByRole('navigation', { name: 'Client portal' })
           .getByRole('link');
-        await expect(regionalToursNavLinks).toHaveCount(4);
+        await expect(regionalToursNavLinks).toHaveCount(5);
         await expect(regionalToursNavLinks.filter({ hasText: 'Home / Overview' })).toHaveAttribute(
           'href',
           '/client',
