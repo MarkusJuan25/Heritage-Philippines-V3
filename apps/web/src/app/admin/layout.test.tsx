@@ -193,6 +193,43 @@ describe('AdminLayout', () => {
     },
   );
 
+  it.each(['ADMIN_MANAGER', 'TRAVEL_CONSULTANT', 'FINANCE_ACCOUNTING'])(
+    'renders a Payments navigation link to /admin/payments for %s (D-054 Stage 3)',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.getByRole('link', { name: 'Payments' })).toHaveAttribute(
+        'href',
+        '/admin/payments',
+      );
+    },
+  );
+
+  it.each(['VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR'])(
+    'never renders a Payments navigation link for excluded staff role %s',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role });
+
+      const jsx = await AdminLayout({ children: <div /> });
+      render(jsx);
+
+      expect(screen.queryByRole('link', { name: 'Payments' })).not.toBeInTheDocument();
+    },
+  );
+
+  it('gives Finance/Accounting only the Leads and Payments links', async () => {
+    getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role: 'FINANCE_ACCOUNTING' });
+
+    const jsx = await AdminLayout({ children: <div /> });
+    const { container } = render(jsx);
+
+    const labels = Array.from(container.querySelectorAll('nav a')).map((a) => a.textContent);
+    expect(labels).toEqual(['Leads', 'Payments']);
+  });
+
   it('renders Dashboard as the first navigation item, before Leads (D-029 §2)', async () => {
     getCurrentUserMock.mockResolvedValue({ ...BASE_USER, role: 'ADMIN_MANAGER' });
 

@@ -1877,6 +1877,15 @@ describe('getBookingPaymentSummaryForStaff', () => {
     expect(result.confirmedAmountPaid.toFixed(2)).toBe('200.00');
     expect(result.remainingBalance?.toFixed(2)).toBe('300.00');
     expect(result.planApproved).toBe(true);
+    expect(result.activePlan).toEqual({ id: 'plan-1', status: 'APPROVED' });
+  });
+
+  it('names no active plan when the booking has none', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue(summaryData.booking);
+    repositoryMocks.findBookingPaymentSummaryData.mockResolvedValue({ ...summaryData, plan: null });
+    const result = await getBookingPaymentSummaryForStaff(ADMIN_MANAGER, 'booking-1');
+    expect(result.activePlan).toBeNull();
+    expect(result.installments).toEqual([]);
   });
 
   it('reports a PROPOSED active plan as not approved (D-057 §3)', async () => {
@@ -1963,6 +1972,8 @@ describe('getClientPaymentSummaries', () => {
       outstandingAmount: d('400.00'),
     });
     expect(summary?.installments[0]).not.toHaveProperty('allocations');
+    // The staff-only active-plan id never reaches the client view.
+    expect(summary).not.toHaveProperty('activePlan');
     expect(summary?.payments[0]?.receipt?.receiptNumber).toBe('r-1');
   });
 });

@@ -48,6 +48,16 @@ const BOOKING_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_C
 // management capability (D-051 §5).
 const CONVERSATION_MANAGEMENT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'TRAVEL_CONSULTANT'];
 
+// D-054 Stage 3's Payments navigation: exactly the roles the payments reads
+// permit (D-054 §3/§6). Unlike every link above, this one is also shown to
+// FINANCE_ACCOUNTING, whose access D-056 §1 limits to features/payments —
+// payments is the only admin area it works in.
+const PAYMENT_ROLES: readonly AppRole[] = [
+  'ADMIN_MANAGER',
+  'TRAVEL_CONSULTANT',
+  'FINANCE_ACCOUNTING',
+];
+
 // Layer 2 of D-023 §2's defense-in-depth authorization: independently
 // resolves the real, database-backed authenticated user via the existing
 // getCurrentUser() guard — never trusting proxy.ts's cookie-presence-only
@@ -132,6 +142,11 @@ export default async function AdminLayout({
             {CONVERSATION_MANAGEMENT_ROLES.includes(user.role) ? (
               <li>
                 <Link href="/admin/conversations">Conversations</Link>
+              </li>
+            ) : null}
+            {PAYMENT_ROLES.includes(user.role) ? (
+              <li>
+                <Link href="/admin/payments">Payments</Link>
               </li>
             ) : null}
           </ul>

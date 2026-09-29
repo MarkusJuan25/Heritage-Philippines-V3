@@ -1505,8 +1505,18 @@ export type BookingPaymentSummary = {
   payments: PaymentSummaryItem[];
 };
 
-export type StaffBookingPaymentSummary = Omit<BookingPaymentSummary, 'installments'> & {
+type StaffBookingPaymentBalances = Omit<BookingPaymentSummary, 'installments'> & {
   installments: StaffInstallmentSummary[];
+};
+
+/**
+ * The staff view additionally names the Booking's active plan (D-057 §3:
+ * `PROPOSED` or `APPROVED`; `null` when none), so D-054 Stage 3's admin UI
+ * can address `approvePaymentPlan`/`withdrawPaymentPlan` by plan id. Staff
+ * only — `getClientPaymentSummaries` never carries it.
+ */
+export type StaffBookingPaymentSummary = StaffBookingPaymentBalances & {
+  activePlan: { id: string; status: PaymentPlanStatus } | null;
 };
 
 /**
@@ -1520,7 +1530,7 @@ export type StaffBookingPaymentSummary = Omit<BookingPaymentSummary, 'installmen
 function buildBookingPaymentSummary(
   bookingId: string,
   data: BookingPaymentSummaryData,
-): StaffBookingPaymentSummary {
+): StaffBookingPaymentBalances {
   const netConfirmedAmountPaid = computeNetConfirmedAmountPaid(
     data.payments.map((payment) => ({
       status: payment.status,
@@ -1622,7 +1632,10 @@ export async function getBookingPaymentSummaryForStaff(
     throw new PaymentError('BOOKING_NOT_FOUND', 'Booking not found.');
   }
 
-  return buildBookingPaymentSummary(bookingId, data);
+  return {
+    ...buildBookingPaymentSummary(bookingId, data),
+    activePlan: data.plan ? { id: data.plan.id, status: data.plan.status } : null,
+  };
 }
 
 /**
