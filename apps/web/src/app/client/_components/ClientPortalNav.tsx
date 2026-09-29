@@ -44,7 +44,7 @@ const NAV_ITEMS: readonly NavEntry[] = [
   { kind: 'real', label: 'Home / Overview', href: '/client' },
   { kind: 'real', label: 'My Journey', href: '/client/my-journey' },
   { kind: 'real', label: 'Bookings', href: '/client/bookings' },
-  { kind: 'inert', label: 'Payments & Receipts' },
+  { kind: 'real', label: 'Payments & Receipts', href: '/client/payments' },
   { kind: 'inert', label: 'Documents' },
   { kind: 'inert', label: 'Visa Center' },
   { kind: 'real', label: 'Regional Tours', href: '/client/regional-tours' },

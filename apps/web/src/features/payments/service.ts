@@ -29,6 +29,7 @@ import {
   computeNetConfirmedAmountPaid,
   computeNetContribution,
   computeNextPaymentDue,
+  computeNextPaymentDueAmount,
   computeOutstandingInstallmentAmount,
   computeOverpayment,
   computeRemainingBalance,
@@ -1493,6 +1494,7 @@ export type PaymentSummaryItem = {
 
 export type BookingPaymentSummary = {
   bookingId: string;
+  bookingReference: string;
   totalAmount: Prisma.Decimal | null;
   currencyCode: string | null;
   planApproved: boolean;
@@ -1501,6 +1503,8 @@ export type BookingPaymentSummary = {
   overpayment: Prisma.Decimal | null;
   unappliedCredit: Prisma.Decimal;
   nextPaymentDue: Date | null;
+  /** The amount due on `nextPaymentDue` (null exactly when it is null). */
+  nextPaymentDueAmount: Prisma.Decimal | null;
   installments: InstallmentSummary[];
   payments: PaymentSummaryItem[];
 };
@@ -1573,8 +1577,14 @@ function buildBookingPaymentSummary(
     allocations: installment.allocations,
   }));
 
+  const nextDueInputs = installments.map((installment) => ({
+    dueDate: installment.dueDate,
+    outstandingAmount: installment.outstandingAmount,
+  }));
+
   return {
     bookingId,
+    bookingReference: data.booking.bookingReference,
     totalAmount: data.booking.totalAmount,
     currencyCode: data.booking.currencyCode,
     planApproved: data.plan?.status === PaymentPlanStatus.APPROVED,
@@ -1591,12 +1601,8 @@ function buildBookingPaymentSummary(
       netConfirmedAmountPaid,
       netActiveAllocationsByInstallment,
     ),
-    nextPaymentDue: computeNextPaymentDue(
-      installments.map((installment) => ({
-        dueDate: installment.dueDate,
-        outstandingAmount: installment.outstandingAmount,
-      })),
-    ),
+    nextPaymentDue: computeNextPaymentDue(nextDueInputs),
+    nextPaymentDueAmount: computeNextPaymentDueAmount(nextDueInputs),
     installments,
     payments: data.payments.map((payment) => ({
       id: payment.id,

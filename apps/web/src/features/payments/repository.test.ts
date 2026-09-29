@@ -779,6 +779,7 @@ describe('findBookingPaymentSummaryData', () => {
     const result = await findBookingPaymentSummaryData(db({ booking: { findUnique } }), BOOKING_ID);
     expect(result?.plan).toBeNull();
     expect(result?.payments).toEqual([]);
+    expect(findUnique.mock.calls[0]?.[0].select.bookingReference).toBe(true);
     const planSelect = findUnique.mock.calls[0]?.[0].select.paymentPlans;
     expect(planSelect.where).toEqual({ status: { not: 'WITHDRAWN' } });
     expect(planSelect.take).toBe(1);

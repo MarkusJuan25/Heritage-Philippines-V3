@@ -1847,6 +1847,13 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     expect(summaries.map((s) => s.bookingId)).toEqual([own.bookingId]);
     expect(summaries[0]!.confirmedAmountPaid.toFixed(2)).toBe('120.00');
     expect(summaries[0]!.remainingBalance?.toFixed(2)).toBe('380.00');
+    // D-054 Stage 4: the client-facing reference and the server-computed
+    // amount due on the next due date (the one 500.00 installment, not yet
+    // allocated to, so all of it is outstanding).
+    const ownBooking = await prisma!.booking.findUniqueOrThrow({ where: { id: own.bookingId } });
+    expect(summaries[0]!.bookingReference).toBe(ownBooking.bookingReference);
+    expect(summaries[0]!.nextPaymentDue?.toISOString().slice(0, 10)).toBe('2026-10-01');
+    expect(summaries[0]!.nextPaymentDueAmount?.toFixed(2)).toBe('500.00');
     expect(summaries[0]!.payments.map((p) => p.id)).toEqual([own.paymentId]);
     const serialized = JSON.stringify(summaries);
     expect(serialized).not.toContain(other.bookingId);

@@ -1053,7 +1053,8 @@ export async function insertAuditLog(
 // dataset rather than to a list).
 
 export type BookingPaymentSummaryData = {
-  booking: BookingFinancials;
+  // `bookingReference` is the client-facing Booking identifier (D-054 Stage 4).
+  booking: BookingFinancials & { bookingReference: string };
   plan: {
     id: string;
     status: PaymentPlanStatus;
@@ -1090,6 +1091,7 @@ export async function findBookingPaymentSummaryData(
     where: { id: bookingId },
     select: {
       ...BOOKING_FINANCIALS_SELECT,
+      bookingReference: true,
       // At most one row matches: `payment_plan_active_booking_key` allows
       // one non-withdrawn plan per Booking (D-057 §2(5)).
       paymentPlans: {

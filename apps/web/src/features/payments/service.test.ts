@@ -143,6 +143,7 @@ function summaryDataFor(options: {
   return {
     booking: {
       id: 'booking-1',
+      bookingReference: 'HPB-CLIENT1',
       clientId: 'client-1',
       totalAmount: d('500.00'),
       currencyCode: 'PHP',
@@ -1975,6 +1976,28 @@ describe('getClientPaymentSummaries', () => {
     // The staff-only active-plan id never reaches the client view.
     expect(summary).not.toHaveProperty('activePlan');
     expect(summary?.payments[0]?.receipt?.receiptNumber).toBe('r-1');
+    // D-054 Stage 4: the client-facing reference and the server-computed
+    // amount due on the next due date.
+    expect(summary?.bookingReference).toBe('HPB-CLIENT1');
+    expect(summary?.nextPaymentDue).toEqual(new Date('2026-10-01'));
+    expect(summary?.nextPaymentDueAmount?.toFixed(2)).toBe('400.00');
+  });
+
+  it('reports no next due amount once every installment is covered', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+    repositoryMocks.findApprovedBookingIdsForClient.mockResolvedValue(['booking-1']);
+    repositoryMocks.findBookingPaymentSummaryData.mockResolvedValue(
+      summaryDataFor({
+        paymentAmount: '500.00',
+        refunded: '0.00',
+        allocations: [{ id: 'alloc-1', amount: '500.00', refundAllocated: '0.00' }],
+      }),
+    );
+
+    const [summary] = await getClientPaymentSummaries(CLIENT_USER, 'client-1');
+    expect(summary?.nextPaymentDue).toBeNull();
+    expect(summary?.nextPaymentDueAmount).toBeNull();
+    expect(summary?.remainingBalance?.toFixed(2)).toBe('0.00');
   });
 });
 
