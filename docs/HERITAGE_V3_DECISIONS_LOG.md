@@ -2668,6 +2668,24 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 
 ---
 
+## D-058 — Unresolved E2E Findings: Admin Refresh/Navigation Results Not Shown, and "Destination Stream Closed Early" on Next 16.3.8
+
+- **Status:** Open
+- **Date recorded:** October 2, 2026
+- **Context:** Recorded during D-054 Stage 5 (payments E2E verification) and the validation of the Next.js 16.3.8 security upgrade. This entry records findings only. It proposes no decision, assigns no cause, changes no accepted entry, and marks nothing fixed. This repository does not commit test-run logs (D-033 §12 practice), so the observations below are session execution records, not committed artifacts. All runs used the local `heritage_v3_test` database and the isolated E2E server on port 3100.
+- **Finding 1 — admin in-place results intermittently not shown.** Observed on `main`@`f3c28a8` with Next 16.2.10, production build. D-054 Stage 5's spec (`apps/web/e2e/client-payments.spec.ts`) deliberately has no reload-and-retry helper, unlike the other specs' `expectAfterRefresh` (D-042; D-049 Stage 4). Without that fallback, three symptoms were observed in the staff provisioning steps that precede any payments screen. They are recorded separately; no shared cause is established.
+  - **(a) Clients navigation renders an empty page.** After Lead-to-Client conversion, clicking the admin "Clients" link changes the URL to `/admin/clients`, but `<main>` stays empty for 45 seconds: no list, no loading state, no error. Seen four times. Where the page state was captured, the navigation's RSC request had returned 200.
+  - **(b) Converted Lead still rendered as Qualified.** After a successful conversion `POST`, the Lead page's server-rendered content stayed on its pre-conversion render for 45 seconds while the conversion panel showed its own success message; the refresh RSC request had returned 200. Seen once, under a temporary test-only gate.
+  - **(c) Qualified Lead still rendered as New.** After a successful status change, the database row read `QUALIFIED`, the status panel showed "Status updated.", and the server-rendered status badge still read "New" with no "Convert to Client" panel for 45 seconds; the refresh RSC request had returned 200. Seen once.
+  - **Frequency observed.** Six failing trials were recorded on October 1–2, 2026 (four of (a), one each of (b) and (c)) among thirty trials of varying design that ran these steps without a reload fallback. No failure occurred at a moment when a network observer was attached. The failures clustered in one period and did not occur in the last fifteen of those trials, so no rate, and no effect of observation, is inferred.
+  - **What is not known.** What a failing response contained, how the failing request ended, why the result was not shown, whether (a)–(c) share a cause, and whether they relate to the pending-form stall seen on `/admin/conversations` and `/client/support`, which is a separate observation and is not recorded here as the same defect. In passing cases, the same kind of request often ended as aborted after its 200 response while the page still updated, so an aborted request is not by itself evidence of this failure.
+  - **Existing coverage.** The other E2E specs reload on exactly these waits, so their passing runs cannot detect this finding. A failure between conversion and the Clients list previously left the created Client outside the spec's own residue check; the Stage 5 spec now records the Client id from the conversion response to close that gap.
+- **Finding 2 — "destination stream closed early" on Next 16.3.8.** With the upgrade applied, the production server logs `Error: The destination stream closed early.` during E2E runs: four times in the upgrade's own validation (one in a 20-trial `client-support` run, three in the eight-test suite) and seven times in the nine-test suite that includes the payments spec. Every test in those runs passed. The line does not appear in the Next 16.2.x logs from the same work. A targeted six-trial check produced no occurrence, so no request was correlated with it. Cause not established; whether any response is truncated for a live page is not known.
+- **Next 16.3.8 and Finding 1.** One complete nine-test suite execution and one provisioning-only trial on Next 16.3.8 showed no occurrence of Finding 1. A side-by-side comparison with 16.2.10 was started and not completed. This is not evidence that the upgrade changes Finding 1.
+- **Effect:** None on any accepted entry. D-054 Stage 5's spec keeps its strict in-place checks, so a recurrence of Finding 1 fails the E2E suite instead of being reloaded away. A decision is needed on how these findings are investigated or accepted; until then they remain open.
+
+---
+
 ---
 
 Update this log when a decision's status changes; do not delete entries — supersede them.
