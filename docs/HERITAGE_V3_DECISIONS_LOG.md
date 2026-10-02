@@ -2668,6 +2668,23 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 
 ---
 
+## D-058 — Unresolved Finding: "Destination Stream Closed Early" Server Errors on Next 16.3.8
+
+- **Status:** Open
+- **Date recorded:** October 2, 2026
+- **Decision needed:** How this finding is investigated or accepted, and at which gate it must be resolved or explicitly accepted. No proposal is made here.
+- **Blocks:** Nothing is declared blocked by this entry. Whether it must be resolved or accepted before staging exposure (D-053) is the user's decision.
+- **Context:** Recorded with the Next.js 16.2.10 → 16.3.8 security upgrade, so that the finding is tracked from the moment the upgrade is on `main`. This entry records a finding only. It proposes no decision, assigns no cause, changes no accepted entry, and marks nothing fixed. This repository does not commit test-run logs (D-033 §12 practice), so the observations below are session execution records, not committed artifacts. All runs used the local `heritage_v3_test` database and the isolated E2E server on port 3100.
+- **Finding.** With Next 16.3.8, the production server (`next start`) logs `Error: The destination stream closed early.` during E2E runs. Twenty occurrences are known as of this entry, in every multi-spec run on 16.3.8 so far: four on October 1 on an earlier candidate at `979a52e` (three in a 20-trial `client-support` run, one in the eight-test suite); four on October 2 on `f3c28a8` plus the upgrade (one in a 20-trial `client-support` run, three in the eight-test suite); and seven, then five, on October 2 in two executions of a nine-test suite that adds the payments spec. Every test in those runs passed. The line does not appear in the Next 16.2.x logs from the same work. A targeted six-trial check produced no occurrence, so no request was correlated with it.
+- **What is not known.** The cause in this application; which requests produce it; whether any response is truncated for a live page. No effect on test outcomes, client isolation or response headers was observed.
+- **Upstream information (read October 2, 2026; not verified against this application).**
+  - The Next.js 16.3 release notes state: "We replaced web streams with native Node.js streams in the App Router rendering layer". The change (vercel/next.js#94311) makes `experimental.useNodeStreams` default to `true`, with `false` as an opt-out. The release notes list no breaking change or migration step for existing applications.
+  - vercel/next.js#96704, "Client-aborted RSC stream is reported to onRequestError as 'The destination stream closed early.'", reported against 16.3.0, describes a client cancelling an RSC request mid-stream being logged as a server error. It is closed with a linked change (#96715). Whether that change is in 16.3.8, and whether this application's occurrences are the same case, has not been established. In this application's E2E runs, RSC requests are frequently cancelled by the browser after a 200 response while the page still updates.
+  - The opt-out has not been applied or tested here.
+- **Effect:** None on any accepted entry. Until a decision is recorded, the finding remains open.
+
+---
+
 ---
 
 Update this log when a decision's status changes; do not delete entries — supersede them.
