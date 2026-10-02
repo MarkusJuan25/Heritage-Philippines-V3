@@ -2685,6 +2685,26 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 
 ---
 
+## D-059 — Unresolved E2E Finding: Admin Refresh/Navigation Results Not Shown
+
+- **Status:** Open
+- **Date recorded:** October 2, 2026
+- **Decision needed:** How this finding is investigated or accepted, and at which gate it must be resolved or explicitly accepted. No proposal is made here.
+- **Blocks:** Staging exposure. Per the user's decision of October 2, 2026, this finding must be assessed and then either resolved or explicitly accepted, with that outcome recorded in this log, before staging exposure (D-053). It does not block D-054 Stage 5: the user accepted Stage 5's E2E evidence on October 2, 2026 with this finding open and with the spec's strict in-place checks kept.
+- **Context:** Recorded during D-054 Stage 5 (payments E2E verification). This entry records a finding only. It proposes no decision, assigns no cause, changes no accepted entry, and marks nothing fixed. This repository does not commit test-run logs (D-033 §12 practice), so the observations below are session execution records, not committed artifacts. All runs used the local `heritage_v3_test` database and the isolated E2E server on port 3100. D-058 records a separate finding from the same work: "destination stream closed early" server errors on Next 16.3.8.
+- **Finding — admin in-place results intermittently not shown.** Observed on `main`@`f3c28a8` with Next 16.2.10, production build. D-054 Stage 5's spec (`apps/web/e2e/client-payments.spec.ts`), as submitted, has no reload-and-retry helper, unlike the other specs' `expectAfterRefresh` (D-042; D-049 Stage 4). Without that fallback, three symptoms were observed in the staff provisioning steps that precede any payments screen. They are recorded separately; no shared cause is established.
+  - **(a) Clients navigation renders an empty page.** After Lead-to-Client conversion, clicking the admin "Clients" link changes the URL to `/admin/clients`, but `<main>` stays empty for 45 seconds: no list, no loading state, no error. Seen four times. Where the page state was captured, the navigation's RSC request had returned 200.
+  - **(b) Converted Lead still rendered as Qualified.** After a successful conversion `POST`, the Lead page's server-rendered content stayed on its pre-conversion render for 45 seconds while the conversion panel showed its own success message; the refresh RSC request had returned 200. Seen once, under a temporary test-only gate that is not part of the submitted spec.
+  - **(c) Qualified Lead still rendered as New.** After a successful status change, the database row read `QUALIFIED`, the status panel showed "Status updated.", and the server-rendered status badge still read "New" with no "Convert to Client" panel for 45 seconds; the refresh RSC request had returned 200. Seen once.
+  - **Frequency observed.** Six failing trials were recorded on October 1–2, 2026 (four of (a), one each of (b) and (c)) among thirty trials of varying design that ran these steps without a reload fallback. No failure occurred at a moment when a network observer was attached. Five of the six failures fell between 01:24Z and 02:49Z on October 2; the first was about seventeen hours earlier, on October 1. None occurred in the twelve trials that followed the last failure. The trials differ in spec, sequence, build and time of day, so no rate, and no effect of observation, is inferred.
+  - **What is not known.** What a failing response contained, how the failing request ended, why the result was not shown, whether (a)–(c) share a cause, and whether they relate to a separate observation — reply and conversation-creation forms on `/admin/conversations` and `/client/support` intermittently staying in their pending state — which has no entry in this log and is not recorded here as the same defect. In passing cases, the same kind of request often ended as aborted after its 200 response while the page still updated, so an aborted request is not by itself evidence of this failure.
+  - **Relation to D-042.** D-042 §§2–3 attribute the same visible symptom as (c) to the timing of the refreshed render and added a reload-retry helper. In (c) the refresh request had returned 200 and the page had still not updated after 45 seconds. Whether D-042's explanation covers (c) was not tested.
+  - **Existing coverage.** The other E2E specs reload on exactly these waits, so their passing runs cannot detect this finding. The submitted Stage 5 spec asserts (a) and (c) without a reload, so a recurrence of either fails the suite. No committed spec asserts (b): a recurrence of (b) would pass unnoticed.
+- **Next 16.3.8.** Two complete nine-test suite executions and one provisioning-only trial on Next 16.3.8 showed no occurrence of this finding. A side-by-side comparison with 16.2.10 was started and not completed. Those two executions are D-054 Stage 5's acceptance evidence only; they are not evidence that the upgrade changes the finding, and nothing here is claimed fixed.
+- **Effect:** None on any accepted entry. Until a decision is recorded, the finding remains open.
+
+---
+
 ---
 
 Update this log when a decision's status changes; do not delete entries — supersede them.
