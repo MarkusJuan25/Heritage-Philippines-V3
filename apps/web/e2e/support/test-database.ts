@@ -205,6 +205,19 @@ const RPC_ALLOWED_OPERATIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   conversation: new Set(['findMany', 'deleteMany']),
   conversationParticipant: new Set(['findMany', 'deleteMany']),
   message: new Set(['findMany', 'deleteMany']),
+  // D-054 Stage 5: read + cleanup only, for the client-payments E2E spec's
+  // own verification and residue checks — never `create`/`update`/`upsert`.
+  // Every PaymentPlan, Installment, Payment, PaymentStatusHistory,
+  // PaymentAllocation, and Receipt it exercises is produced exclusively
+  // through the real staff UI and the real, unmodified payments service —
+  // never seeded or mutated through this bridge. Cleanup is scoped by the
+  // run's own recorded Booking ids.
+  paymentPlan: new Set(['findMany', 'deleteMany']),
+  installment: new Set(['findMany', 'deleteMany']),
+  payment: new Set(['findMany', 'deleteMany']),
+  paymentStatusHistory: new Set(['findMany', 'deleteMany']),
+  paymentAllocation: new Set(['findMany', 'deleteMany']),
+  receipt: new Set(['findMany', 'deleteMany']),
 };
 
 // --- D-047 §15 (Stage 6): strict scalar-only validators for the only two
@@ -421,6 +434,32 @@ export type E2EPrismaRpcClient = {
   message: {
     findMany: RpcMethod<Prisma.MessageFindManyArgs>;
     deleteMany: RpcMethod<Prisma.MessageDeleteManyArgs>;
+  };
+  // D-054 Stage 5: read + cleanup only — see RPC_ALLOWED_OPERATIONS's own
+  // identical comment above for the full rationale.
+  paymentPlan: {
+    findMany: RpcMethod<Prisma.PaymentPlanFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.PaymentPlanDeleteManyArgs>;
+  };
+  installment: {
+    findMany: RpcMethod<Prisma.InstallmentFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.InstallmentDeleteManyArgs>;
+  };
+  payment: {
+    findMany: RpcMethod<Prisma.PaymentFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.PaymentDeleteManyArgs>;
+  };
+  paymentStatusHistory: {
+    findMany: RpcMethod<Prisma.PaymentStatusHistoryFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.PaymentStatusHistoryDeleteManyArgs>;
+  };
+  paymentAllocation: {
+    findMany: RpcMethod<Prisma.PaymentAllocationFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.PaymentAllocationDeleteManyArgs>;
+  };
+  receipt: {
+    findMany: RpcMethod<Prisma.ReceiptFindManyArgs>;
+    deleteMany: RpcMethod<Prisma.ReceiptDeleteManyArgs>;
   };
   $disconnect: () => Promise<void>;
 };
