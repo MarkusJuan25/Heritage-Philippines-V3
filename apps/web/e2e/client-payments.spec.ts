@@ -334,6 +334,9 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     // — never logged or persisted.
     const rawToken = /#token=([A-Za-z0-9_-]{24})$/.exec(manualUrl)?.[1];
     if (!rawToken) throw new Error(`Could not extract the invitation token (${client.label}).`);
+    // Recorded now, not after activation, so a failure later in this
+    // function still lets cleanup remove this token's rate-limit rows.
+    recorded.rawTokens.push(rawToken);
     await page.getByRole('button', { name: 'Confirm Manual Sent' }).click();
     await expect(page.getByText('Manual send confirmed.')).toBeVisible(SLOW);
 
@@ -355,7 +358,6 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
       await context.close();
     }
 
-    recorded.rawTokens.push(rawToken);
     recorded.profileIds.push(
       narrowIdOnly(
         await prisma.clientProfile.findUniqueOrThrow({
@@ -515,6 +517,9 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     await proposePlan(bookingB, [['800.00', DUE_1]]);
 
     // 5. Invite and activate A, B, and C.
+    // The two fixed pauses below are carried over from the other specs'
+    // activation sequence. Each follows a completed activation and precedes
+    // a full page load, so neither can mask an in-place update.
     await inviteAndActivate(clientA, 3);
     await page.waitForTimeout(2000);
     await inviteAndActivate(clientB, 4);
@@ -708,6 +713,7 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     const responseA = await pageA.request.get('/client/payments');
     expect(responseA.status()).toBe(200);
     assertPrivateNoStoreCacheControl(responseA.headers()['cache-control'], 'client A payments');
+    expect(responseA.headers()['referrer-policy']).toBe('no-referrer');
     const htmlA = await responseA.text();
     expect(htmlA).toContain(refA);
     assertAbsent(
@@ -715,6 +721,11 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
       [refB, clientB.nameCanary, bookingB, clientB.clientId],
       'client A payments',
     );
+    // Positive control: every id list must be non-empty, or the leak check
+    // below would pass without checking anything.
+    for (const [recordLabel, ids] of internalIdsA) {
+      expect(ids.length, `${recordLabel} ids recorded for client A`).toBeGreaterThan(0);
+    }
     const leakedA = internalIdsA
       .filter(([, ids]) => ids.some((id) => htmlA.includes(id)))
       .map(([label]) => label);
@@ -727,8 +738,26 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     expect(await fact(pageB, refB, 'Total booking amount')).toBe(php('800.00'));
     expect(await fact(pageB, refB, 'Remaining balance')).toBe(php('800.00'));
     await expect(clientCard(pageB, refB).getByText(COPY.noPayments)).toBeVisible();
-    const htmlB = await (await pageB.request.get('/client/payments')).text();
+    const responseB = await pageB.request.get('/client/payments');
+    expect(responseB.status()).toBe(200);
+    const htmlB = await responseB.text();
+    // Positive control: this is B's own page, not an error or redirect body.
+    expect(htmlB).toContain(refB);
     assertAbsent(htmlB, [refA, receiptNumberA, clientA.nameCanary, bookingA], 'client B payments');
+
+    // The client surface is read-only server-side, not only in the UI
+    // (D-054 §7): a signed-in client is refused by a payments mutation
+    // route and by the staff payments page for their own Booking.
+    const clientMutation = await pageA.request.post('/api/payments', { data: {} });
+    expect(clientMutation.status()).toBe(403);
+    const clientOnStaffPage = await pageA.request.get(`/admin/payments/${bookingA}`);
+    const staffPageHtml = await clientOnStaffPage.text();
+    expect(staffPageHtml).toContain('Access denied');
+    assertAbsent(
+      staffPageHtml,
+      [refA, receiptNumberA, 'Record a payment received'],
+      'client A requesting the staff payments page',
+    );
 
     // 11. Empty state with a Support & Messages path.
     const pageC = await signIn(browser, 8, clientC.email, clientC.clientPassword);
@@ -756,7 +785,9 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     primaryError = error;
   } finally {
     // --- Spec-owned cleanup — unconditional, before the tcAccount
-    // fixture's cleanupTestChain, and scoped by this run's recorded ids. ---
+    // fixture's cleanupTestChain, and scoped by this run's recorded ids —
+    // except the shared SOURCE rate-limit bucket for the current window,
+    // which is removed best-effort, as the other specs do. ---
     try {
       const bookings = { in: recorded.bookingIds };
       if (recorded.bookingIds.length > 0) {
@@ -774,6 +805,33 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
       }
 
       // 3. PortalInvitation, ClientProfile, activated clients, rate limits.
+      // Re-discovered by Client id first (client-overview.spec.ts's own
+      // remedy): a failure inside inviteAndActivate, after the invitation or
+      // profile exists but before its id was recorded, must not leave a row
+      // that blocks the fixture's Client delete (both are onDelete: Restrict).
+      if (recorded.clientIds.length > 0) {
+        const byClient = { clientId: { in: recorded.clientIds } };
+        const invitationRows: unknown = await prisma.portalInvitation.findMany({
+          where: byClient,
+          select: { id: true },
+        });
+        for (const id of narrowIdRows(invitationRows, 'PortalInvitation by client')) {
+          if (!recorded.invitationIds.includes(id)) recorded.invitationIds.push(id);
+        }
+        const profileRows: unknown = await prisma.clientProfile.findMany({
+          where: byClient,
+          select: { id: true, userId: true },
+        });
+        for (const row of Array.isArray(profileRows) ? profileRows : []) {
+          if (!isRecord(row) || typeof row.id !== 'string' || typeof row.userId !== 'string') {
+            throw new Error('ClientProfile by client: malformed { id, userId } row.');
+          }
+          if (!recorded.profileIds.includes(row.id)) recorded.profileIds.push(row.id);
+          if (!recorded.activatedUserIds.includes(row.userId)) {
+            recorded.activatedUserIds.push(row.userId);
+          }
+        }
+      }
       if (recorded.invitationIds.length > 0) {
         await prisma.auditLog.deleteMany({ where: { entityId: { in: recorded.invitationIds } } });
         await prisma.portalInvitation.deleteMany({ where: { id: { in: recorded.invitationIds } } });
@@ -826,6 +884,43 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
         ] as const) {
           expect(narrowIdRows(await run(), `${label} residue`)).toEqual([]);
         }
+      }
+      if (recorded.clientIds.length > 0) {
+        const byClient = { clientId: { in: recorded.clientIds } };
+        expect(
+          narrowIdRows(
+            await prisma.portalInvitation.findMany({ where: byClient, select: { id: true } }),
+            'PortalInvitation residue',
+          ),
+        ).toEqual([]);
+        expect(
+          narrowIdRows(
+            await prisma.clientProfile.findMany({ where: byClient, select: { id: true } }),
+            'ClientProfile residue',
+          ),
+        ).toEqual([]);
+      }
+      if (recorded.invitationIds.length > 0) {
+        expect(
+          narrowIdRows(
+            await prisma.auditLog.findMany({
+              where: { entityId: { in: recorded.invitationIds } },
+              select: { id: true },
+            }),
+            'invitation AuditLog residue',
+          ),
+        ).toEqual([]);
+      }
+      if (recorded.rawTokens.length > 0) {
+        expect(
+          narrowIdRows(
+            await prisma.rateLimitBucket.findMany({
+              where: { dimension: 'TOKEN', bucketKey: { in: recorded.rawTokens.map(sha256Hex) } },
+              select: { id: true },
+            }),
+            'TOKEN RateLimitBucket residue',
+          ),
+        ).toEqual([]);
       }
       const disposableUsers = [...recorded.staffUserIds, ...recorded.activatedUserIds];
       if (disposableUsers.length > 0) {
