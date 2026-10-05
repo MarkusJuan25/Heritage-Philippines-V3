@@ -4,6 +4,7 @@ import type { Locator, Page } from '@playwright/test';
 import { generateRandomString } from 'better-auth/crypto';
 
 import { e2eIdentityHeaders } from './support/browser-identity';
+import { captureFailureEvidence } from './support/failure-evidence';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/test-database';
 
@@ -593,6 +594,14 @@ test.describe('portal activation — live evidence (D-037 Stage 5e)', () => {
       expect(profile.hasCredentialAccount).toBe(true);
     } catch (error) {
       primaryError = error;
+      // D-059 evidence, read only after the failure and before cleanup.
+      // No trace, screenshot, or video (D-037 Section 15): structure and
+      // timing only — see e2e/support/failure-evidence.ts.
+      await captureFailureEvidence(page, test.info(), [
+        tcAccount.password,
+        clientPassword,
+        ...usedTokens,
+      ]);
     } finally {
       if (clientId) {
         try {

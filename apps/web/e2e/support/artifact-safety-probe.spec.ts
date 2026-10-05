@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 
+import { captureFailureEvidence } from './failure-evidence';
+
 // D-034 Stage 5e (D-037 Section 15): the dedicated, tag-isolated
 // "expected-failure probe." This spec is DESIGNED to fail — its own
 // deliberate assertion is the proof the artifact-safety harness
@@ -70,17 +72,33 @@ test(`deliberately fails while a token-bearing activation URL is current, to pro
   // harness's own artifact scan independently re-verifies this holds —
   // see verify-artifact-safety.ts — and stops rather than silently
   // accepting the run if it does not.
-  await test.step('navigate to the canary-bearing activation URL', async () => {
-    await page.goto(`/activate#token=${canary}`);
-  });
-  await test.step('click Continue to submit the canary token', async () => {
-    await page.getByRole('button', { name: 'Continue' }).click();
-  });
-  await expect(page.getByText('This invitation link is no longer valid.')).toBeVisible();
+  //
+  // D-060: the steps and the deliberate failure sit in the same
+  // try/catch shape the two D-059 detecting specs use, and the catch
+  // calls the same failure-evidence capture while the canary-bearing
+  // URL is still current. The capture is given NO known secrets, so its
+  // secret guard cannot be what keeps the canary out of the JSON file:
+  // only its allowlist can. The harness then requires that file to
+  // exist, to describe this page, and — like every other artifact — to
+  // hold no canary. The deliberate failure is rethrown unchanged.
+  let primaryError: unknown;
+  try {
+    await test.step('navigate to the canary-bearing activation URL', async () => {
+      await page.goto(`/activate#token=${canary}`);
+    });
+    await test.step('click Continue to submit the canary token', async () => {
+      await page.getByRole('button', { name: 'Continue' }).click();
+    });
+    await expect(page.getByText('This invitation link is no longer valid.')).toBeVisible();
 
-  // The deliberate failure. A boolean assertion on a literal `false`,
-  // never an equality check against anything canary-derived — the canary
-  // is never referenced here or in the message below, only the fixed
-  // marker is.
-  expect(false, EXPECTED_FAILURE_MARKER).toBe(true);
+    // The deliberate failure. A boolean assertion on a literal `false`,
+    // never an equality check against anything canary-derived — the
+    // canary is never referenced here or in the message below, only the
+    // fixed marker is.
+    expect(false, EXPECTED_FAILURE_MARKER).toBe(true);
+  } catch (error) {
+    primaryError = error;
+    await captureFailureEvidence(page, test.info(), []);
+  }
+  if (primaryError) throw primaryError;
 });
