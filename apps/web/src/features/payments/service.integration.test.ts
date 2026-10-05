@@ -310,21 +310,36 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
    * `createBooking` chain), and a booking-level StaffAssignment for both
    * `tcActor` and `financeActor` (this feature's own booking-level
    * assignment model, repository.ts's `bookingAssignmentFilter`).
+   *
+   * `existingClientId` adds a further Booking to a Client an earlier call
+   * of this fixture created: that Client and its client-level
+   * StaffAssignment already exist and are already recorded for cleanup, so
+   * neither is created again. Everything else is identical.
    */
-  async function createAssignedBookingFixture(totalAmount = '500.00'): Promise<{
+  async function createAssignedBookingFixture(
+    totalAmount = '500.00',
+    existingClientId?: string,
+  ): Promise<{
     bookingId: string;
     clientId: string;
   }> {
-    const client = await createClientFixture();
-    await prisma!.staffAssignment.create({
-      data: {
-        id: randomUUID(),
-        assignedStaffId: tcActor.id,
-        assignedByUserId: adminActor.id,
-        role: 'TRAVEL_CONSULTANT',
-        clientId: client.id,
-      },
-    });
+    let client: { id: string };
+    if (existingClientId === undefined) {
+      client = await createClientFixture();
+      await prisma!.staffAssignment.create({
+        data: {
+          id: randomUUID(),
+          assignedStaffId: tcActor.id,
+          assignedByUserId: adminActor.id,
+          role: 'TRAVEL_CONSULTANT',
+          clientId: client.id,
+        },
+      });
+    } else {
+      // Only a Client this suite created (and will delete) may be reused.
+      expect(createdClientIds).toContain(existingClientId);
+      client = { id: existingClientId };
+    }
 
     const { proposal, version } = await createProposal(tcActor, {
       clientId: client.id,
@@ -1869,6 +1884,82 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     const otherSummaries = await getClientPaymentSummaries(otherUser, other.clientId);
     expect(otherSummaries.map((s) => s.bookingId)).toEqual([other.bookingId]);
     expect(otherSummaries[0]!.payments.map((p) => p.id)).toEqual([other.paymentId]);
+  });
+
+  it('shows one client only the Booking whose plan is approved while another of their Bookings is proposed-only, then both once the second plan is approved (D-054 §7)', async () => {
+    const approved = await createAssignedBookingFixture('500.00');
+    const proposedOnly = await createAssignedBookingFixture('800.00', approved.clientId);
+    expect(proposedOnly.clientId).toBe(approved.clientId);
+    expect(proposedOnly.bookingId).not.toBe(approved.bookingId);
+
+    const approvedPlan = await proposePaymentPlan(tcActor, {
+      bookingId: approved.bookingId,
+      installments: [
+        { sequenceNumber: 1, isDeposit: true, amount: '500.00', dueDate: '2026-10-01' },
+      ],
+    });
+    await approvePaymentPlan(financeActor, { paymentPlanId: approvedPlan.id });
+    const proposedPlan = await proposePaymentPlan(tcActor, {
+      bookingId: proposedOnly.bookingId,
+      installments: [
+        { sequenceNumber: 1, isDeposit: true, amount: '800.00', dueDate: '2026-11-01' },
+      ],
+    });
+    const proposedInstallmentIds = (
+      await prisma!.installment.findMany({
+        where: { paymentPlanId: proposedPlan.id },
+        select: { id: true },
+      })
+    ).map((installment) => installment.id);
+    // Positive controls: both plans exist under the one client, in the two
+    // states this test is about, or the checks below would prove nothing.
+    expect(proposedInstallmentIds).toHaveLength(1);
+    expect(
+      await prisma!.paymentPlan.findMany({
+        where: { clientId: approved.clientId },
+        select: { bookingId: true, status: true },
+        orderBy: { status: 'asc' },
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        { bookingId: approved.bookingId, status: 'APPROVED' },
+        { bookingId: proposedOnly.bookingId, status: 'PROPOSED' },
+      ]),
+    );
+
+    const clientUser = await createUserFixture('CLIENT');
+    await prisma!.clientProfile.create({
+      data: { id: randomUUID(), userId: clientUser.id, clientId: approved.clientId },
+    });
+
+    const before = await getClientPaymentSummaries(clientUser, approved.clientId);
+    expect(before.map((summary) => summary.bookingId)).toEqual([approved.bookingId]);
+    expect(before[0]!.totalAmount?.toFixed(2)).toBe('500.00');
+    const serializedBefore = JSON.stringify(before);
+    const proposedBooking = await prisma!.booking.findUniqueOrThrow({
+      where: { id: proposedOnly.bookingId },
+    });
+    for (const hidden of [
+      proposedOnly.bookingId,
+      proposedBooking.bookingReference,
+      proposedPlan.id,
+      ...proposedInstallmentIds,
+    ]) {
+      expect(serializedBefore).not.toContain(hidden);
+    }
+
+    await approvePaymentPlan(financeActor, { paymentPlanId: proposedPlan.id });
+
+    const after = await getClientPaymentSummaries(clientUser, approved.clientId);
+    expect(after.map((summary) => summary.bookingId).sort()).toEqual(
+      [approved.bookingId, proposedOnly.bookingId].sort(),
+    );
+    const nowVisible = after.find((summary) => summary.bookingId === proposedOnly.bookingId);
+    expect(nowVisible?.totalAmount?.toFixed(2)).toBe('800.00');
+    expect(nowVisible?.bookingReference).toBe(proposedBooking.bookingReference);
+    expect(nowVisible?.installments.map((installment) => installment.id)).toEqual(
+      proposedInstallmentIds,
+    );
   });
 
   it('denies a Finance/Accounting user whose only booking assignment is a stale Travel Consultant row or an ended Finance row (D-054 §16)', async () => {

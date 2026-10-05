@@ -781,6 +781,91 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     } finally {
       await anonymous.close();
     }
+
+    // 13. D-059 symptom (b): after a successful conversion, the Lead page
+    // must show the converted state in place. A fourth, convert-only Lead
+    // carries this check so the A/B/C provisioning above keeps its own
+    // timing (there, "Clients" is clicked straight after the conversion
+    // response). No Client login, Booking, or payment is made for it; its
+    // Lead and Client are recorded for the residue checks and removed by
+    // the fixture's cleanupTestChain like A, B, and C's.
+    const nameCanaryD = `E2E CP D ${randomUUID()}`;
+    await page.goto('/admin/leads/new');
+    await page.getByLabel('Full name').fill(nameCanaryD);
+    await page.getByLabel('Source').fill('E2E client-payments journey');
+    await page.getByLabel('Email').fill(`e2e-cp-d-${randomUUID()}@example.test`);
+    await page.getByRole('button', { name: 'Create Lead' }).click();
+    await expect(page.getByRole('status')).toContainText(`Lead ${nameCanaryD} was created.`, SLOW);
+    await page.getByRole('link', { name: 'View Lead' }).click();
+    await page.waitForURL((url) => /^\/admin\/leads\/[0-9a-fA-F-]{36}$/.test(url.pathname));
+    const leadIdD = extractTrailingId(page.url());
+    recorded.leadIds.push(leadIdD);
+    await expect(page.getByText('Assigned Consultant:')).toBeVisible(SLOW);
+
+    // The Lead's own status badge: the element directly after the page
+    // heading (admin/leads/[id]/page.tsx). The same label also appears in
+    // the status panel and the status history, so the badge is addressed
+    // by position, and its text is asserted exactly.
+    const statusBadgeD = page.locator('main h1 + span');
+    await expect(page.getByRole('main').getByRole('heading', { level: 1 })).toHaveText(nameCanaryD);
+    await expect(statusBadgeD, 'Lead status badge before any change (D)').toHaveText('New');
+
+    await page.getByLabel('Change status to').selectOption({ label: 'Qualified' });
+    await page.getByRole('button', { name: 'Change Status' }).click();
+    await expect(page.getByText('Status updated.')).toBeVisible(SLOW);
+    const convertHeadingD = page.getByRole('heading', { name: 'Convert to Client' });
+    await expectUpdatedInPlace(convertHeadingD, 'Convert to Client panel (D)');
+    // Precondition: the badge and the panel both show the pre-conversion
+    // state, so the checks after the conversion can only pass on a change.
+    await expect(statusBadgeD, 'Lead status badge before conversion (D)').toHaveText('Qualified');
+
+    await page.getByLabel('Create a new Client').check();
+    await page.getByRole('button', { name: 'Continue' }).click();
+    const [conversionResponseD] = await Promise.all([
+      page.waitForResponse(
+        (r) =>
+          r.request().method() === 'POST' &&
+          new URL(r.url()).pathname === `/api/leads/${leadIdD}/conversion`,
+        SLOW,
+      ),
+      page.getByRole('button', { name: 'Confirm' }).click(),
+    ]);
+    expect(conversionResponseD.ok()).toBe(true);
+    const conversionBodyD: unknown = await conversionResponseD.json();
+    recorded.clientIds.push(
+      narrowIdOnly(
+        isRecord(conversionBodyD) ? conversionBodyD.client : undefined,
+        'conversion response client (D)',
+      ).id,
+    );
+
+    // In place: no reload, no navigation, one wait of up to SLOW each.
+    await expect(statusBadgeD, 'Lead status badge after conversion (D)').toHaveText(
+      'Converted to Client',
+      SLOW,
+    );
+    await expect(convertHeadingD, 'Convert to Client panel after conversion (D)').toHaveCount(
+      0,
+      SLOW,
+    );
+    // The Change Status panel must follow the same refreshed render: the
+    // converted status, the locked no-transitions state (D-024 §10), and no
+    // leftover "refreshing" notice or selector from the Qualified state.
+    // Each of these texts exists only in StatusTransitionPanel.
+    const statusPanelD = page.getByRole('main');
+    await expect(
+      statusPanelD.locator('p', { hasText: 'Current status:' }).locator('strong'),
+      'Change Status panel current status after conversion (D)',
+    ).toHaveText('Converted to Client', SLOW);
+    await expect(
+      statusPanelD.getByText('No status changes are available for this lead.'),
+      'Change Status panel shows no transitions after conversion (D)',
+    ).toBeVisible(SLOW);
+    await expect(statusPanelD.getByText('Refreshing available status changes…')).toHaveCount(0);
+    await expect(statusPanelD.getByLabel('Change status to')).toHaveCount(0);
+    expect(new URL(page.url()).pathname, 'still on the Lead page (D)').toBe(
+      `/admin/leads/${leadIdD}`,
+    );
   } catch (error) {
     primaryError = error;
   } finally {
