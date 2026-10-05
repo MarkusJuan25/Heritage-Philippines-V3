@@ -246,6 +246,66 @@ describe('StatusTransitionPanel', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Status updated.');
   });
 
+  it('adopts a status changed by another component: a QUALIFIED → CONVERTED_TO_CLIENT prop change updates the displayed status, with no refreshing notice and no transitions (regression)', () => {
+    // The conversion panel, not this one, converts the Lead; page.tsx then
+    // re-renders this still-mounted panel with the converted status and the
+    // empty option list it computes for it. No PUT is ever made here.
+    const { rerender } = renderPanel();
+    expect(screen.getByText(/Current status:/)).toHaveTextContent('Qualified');
+    expect(screen.getByLabelText('Change status to')).toBeInTheDocument();
+
+    rerender(
+      <StatusTransitionPanel leadId="lead-1" currentStatus="CONVERTED_TO_CLIENT" options={[]} />,
+    );
+
+    expect(screen.getByText(/Current status:/)).toHaveTextContent('Converted to Client');
+    expect(screen.getByText(/Current status:/)).not.toHaveTextContent('Qualified');
+    expect(screen.queryByText('Refreshing available status changes…')).not.toBeInTheDocument();
+    expect(screen.getByText('No status changes are available for this lead.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Change status to')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Change Status' })).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(refreshMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps its own confirmed status when re-rendered with the unchanged old prop, then settles once the refreshed prop catches up (regression)', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { lead: { id: 'lead-1', status: 'NOT_PROCEEDING' } }),
+    );
+    const user = userEvent.setup();
+    const { rerender } = renderPanel();
+
+    await selectStatus(user, 'Not Proceeding');
+    await user.click(screen.getByRole('button', { name: 'Change Status' }));
+    await waitFor(() =>
+      expect(screen.getByText(/Current status:/)).toHaveTextContent('Not Proceeding'),
+    );
+
+    // A re-render that still carries the pre-transition prop (the refresh
+    // has not landed; e.g. a parent re-render) must not roll the confirmed
+    // status back to it.
+    rerender(<StatusTransitionPanel {...DEFAULT_PROPS} />);
+    expect(screen.getByText(/Current status:/)).toHaveTextContent('Not Proceeding');
+    expect(screen.getByText(/Current status:/)).not.toHaveTextContent('Qualified');
+    expect(screen.getByText('Refreshing available status changes…')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Change status to')).not.toBeInTheDocument();
+
+    // The refreshed prop catches up with the status this panel confirmed.
+    rerender(
+      <StatusTransitionPanel
+        leadId="lead-1"
+        currentStatus="NOT_PROCEEDING"
+        options={[{ status: 'ARCHIVED', reasonRequired: false }]}
+      />,
+    );
+    expect(screen.getByText(/Current status:/)).toHaveTextContent('Not Proceeding');
+    expect(screen.queryByText('Refreshing available status changes…')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Change status to')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Archived' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Not Proceeding' })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('does not optimistically change the displayed status before the server confirms it', async () => {
     let resolveFetch: (value: Response) => void = () => {};
     fetchMock.mockReturnValue(
