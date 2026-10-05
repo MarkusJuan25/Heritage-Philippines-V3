@@ -424,13 +424,47 @@ test.describe('portal activation — live evidence (D-037 Stage 5e)', () => {
       await expect(page.getByText('Status updated.')).toBeVisible();
 
       // 4. Convert the Lead to a new Client.
-      await expect(page.getByRole('heading', { name: 'Convert to Client' })).toBeVisible();
+      const convertHeading = page.getByRole('heading', { name: 'Convert to Client' });
+      await expect(convertHeading).toBeVisible();
+      const leadId = extractTrailingId(page.url());
+      // The Lead's own status badge: the element directly after the page
+      // heading (admin/leads/[id]/page.tsx). The same label also appears in
+      // the status panel and the status history, so the badge is addressed
+      // by position and its text asserted exactly.
+      const leadStatusBadge = page.locator('main h1 + span');
+      await expect(leadStatusBadge).toHaveText('Qualified');
       await page.getByLabel('Create a new Client').check();
       await page.getByRole('button', { name: 'Continue' }).click();
-      await page.getByRole('button', { name: 'Confirm' }).click();
-      await expect(
-        page.getByText(`Converted. A new client, "${leadFullName}", was created.`),
-      ).toBeVisible();
+      // The matching conversion response is this step's success check
+      // (D-043, D-046): the "Converted. …" paragraph belongs to
+      // ConvertToClientPanel, which the refreshed Lead page no longer
+      // renders once the Lead is converted (D-024 §10), so it can be gone
+      // before an assertion polls. The waiter is registered before the
+      // Confirm click.
+      const [conversionResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) =>
+            response.request().method() === 'POST' &&
+            new URL(response.url()).pathname === `/api/leads/${leadId}/conversion`,
+        ),
+        page.getByRole('button', { name: 'Confirm' }).click(),
+      ]);
+      expect(conversionResponse.ok()).toBe(true);
+      const conversionRecord = asRecord(await conversionResponse.json(), 'conversion response');
+      const conversionLead = asRecord(conversionRecord.lead, 'conversion lead');
+      const conversionClient = asRecord(conversionRecord.client, 'conversion client');
+      const convertedClientId = asString(conversionClient, 'id', 'conversion client');
+      expect(asString(conversionLead, 'id', 'conversion lead')).toBe(leadId);
+      expect(asString(conversionLead, 'status', 'conversion lead')).toBe('CONVERTED_TO_CLIENT');
+      expect(convertedClientId.length).toBeGreaterThan(0);
+      expect(asString(conversionLead, 'clientId', 'conversion lead')).toBe(convertedClientId);
+      expect(asString(conversionClient, 'fullName', 'conversion client')).toBe(leadFullName);
+      expect(conversionRecord.clientCreated).toBe(true);
+      // The Lead page must then show the converted state in place — no
+      // reload and no navigation, within the default expect timeout.
+      await expect(leadStatusBadge).toHaveText('Converted to Client');
+      await expect(convertHeading).toHaveCount(0);
+      expect(new URL(page.url()).pathname).toBe(`/admin/leads/${leadId}`);
 
       await page.getByRole('link', { name: 'Clients', exact: true }).click();
       await page.waitForURL((url) => url.pathname === '/admin/clients');
@@ -451,6 +485,8 @@ test.describe('portal activation — live evidence (D-037 Stage 5e)', () => {
       await page.locator('a:visible', { hasText: leadFullName }).click();
       await page.waitForURL((url) => /^\/admin\/clients\/[0-9a-fA-F-]{36}$/.test(url.pathname));
       clientId = extractTrailingId(page.url());
+      // The Client opened here is the one the conversion response named.
+      expect(clientId).toBe(convertedClientId);
       await expect(page.getByRole('heading', { name: leadFullName })).toBeVisible();
 
       // 5. Prepare, MANUAL_EMAIL send, and explicitly confirm the

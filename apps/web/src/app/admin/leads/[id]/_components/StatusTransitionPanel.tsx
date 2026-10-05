@@ -104,6 +104,19 @@ export function StatusTransitionPanel({
 }: StatusTransitionPanelProps) {
   const router = useRouter();
   const [confirmedStatus, setConfirmedStatus] = useState<LeadStatusKey>(currentStatus);
+  // The server can report a status this panel did not set itself — the
+  // conversion panel moves a Lead to CONVERTED_TO_CLIENT (D-024 §10). When
+  // the `currentStatus` prop *changes*, adopt it, so the displayed status
+  // and `awaitingRefresh` below follow the refreshed server render. Guarded
+  // on a change of the prop, never on a mere difference from
+  // `confirmedStatus`: after this panel's own successful PUT the prop is
+  // still the old status until router.refresh() lands, and that unchanged
+  // old prop must not roll the confirmed status back.
+  const [lastPropStatus, setLastPropStatus] = useState<LeadStatusKey>(currentStatus);
+  if (lastPropStatus !== currentStatus) {
+    setLastPropStatus(currentStatus);
+    setConfirmedStatus(currentStatus);
+  }
   const [selected, setSelected] = useState('');
   const [reason, setReason] = useState('');
   const [reasonError, setReasonError] = useState<string | null>(null);
