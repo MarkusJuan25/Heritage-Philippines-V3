@@ -44,6 +44,13 @@ const EXPECTED_FAILURE_MARKER = 'EXPECTED_ACTIVATION_ARTIFACT_PROBE_FAILURE';
 const PROBE_TAG = '@expected-failure-probe';
 const PROBE_SPEC_PATH = 'e2e/support/artifact-safety-probe.spec.ts';
 
+// D-060: mirrors failure-evidence.ts's own file name and success line
+// (duplicated, not imported — that module imports '@playwright/test'
+// types and is written for Playwright's own process).
+const EVIDENCE_FILE_NAME = 'page-state.json';
+const EVIDENCE_REFUSAL_FILE_NAME = 'page-state.refused.json';
+const EVIDENCE_SAVED_LINE = '[d059-evidence] page state saved';
+
 // Mirrors run-e2e.ts's own INHERITED_ENV_KEYS exactly — never spread the
 // full parent environment.
 const INHERITED_ENV_KEYS = [
@@ -346,6 +353,68 @@ async function scanDirectoryForCanary(dirPath: string, canary: string): Promise<
   return false;
 }
 
+async function findFiles(dirPath: string, fileName: string): Promise<string[]> {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) found.push(...(await findFiles(entryPath, fileName)));
+    else if (entry.isFile() && entry.name === fileName) found.push(entryPath);
+  }
+  return found;
+}
+
+/**
+ * D-060: proof that the failure-evidence capture genuinely ran against
+ * the canary-bearing page and wrote its JSON file — so the canary scan
+ * below is a scan of a real artifact, not of an empty directory. Exactly
+ * one evidence file, no refusal marker, a page state that was read, and
+ * that page state describing the token-bearing activation URL (its path,
+ * and the presence of a fragment — never the fragment itself).
+ */
+async function verifyEvidenceArtifact(
+  outputDir: string,
+  reportText: string | null,
+  stdout: string,
+): Promise<VerificationOutcome> {
+  const evidenceFiles = await findFiles(outputDir, EVIDENCE_FILE_NAME);
+  if (evidenceFiles.length !== 1) {
+    return {
+      ok: false,
+      reason: `expected exactly one failure-evidence file, found ${evidenceFiles.length}`,
+    };
+  }
+  if ((await findFiles(outputDir, EVIDENCE_REFUSAL_FILE_NAME)).length > 0) {
+    return { ok: false, reason: 'the failure-evidence capture refused to write' };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await fs.readFile(evidenceFiles[0] as string, 'utf8'));
+  } catch {
+    return { ok: false, reason: 'the failure-evidence file was unreadable or malformed' };
+  }
+  const pageState = isRecord(parsed) ? parsed.pageState : undefined;
+  const location = isRecord(pageState) ? pageState.location : undefined;
+  if (!isRecord(location)) {
+    return { ok: false, reason: 'the failure-evidence file holds no page state' };
+  }
+  if (location.path !== '/activate' || location.hasFragment !== true) {
+    return {
+      ok: false,
+      reason: 'the failure-evidence file does not describe the token-bearing activation page',
+    };
+  }
+  if (!(reportText ?? '').includes(EVIDENCE_SAVED_LINE) && !stdout.includes(EVIDENCE_SAVED_LINE)) {
+    return { ok: false, reason: 'the failure-evidence capture did not report a saved file' };
+  }
+  return { ok: true };
+}
+
 async function main(): Promise<void> {
   const databaseUrl = getValidatedTestDatabaseUrl();
   console.log(describeValidatedDatabaseSafely());
@@ -413,6 +482,9 @@ async function main(): Promise<void> {
     }
 
     outcome = verifyProbeOutcome(report, run.exitCode);
+    if (outcome.ok) {
+      outcome = await verifyEvidenceArtifact(probeOutputDir, rawReportText, run.stdout);
+    }
 
     // Canary scan — independent of, and performed regardless of, the
     // structural outcome above. A clean structural outcome is not itself
@@ -508,6 +580,7 @@ async function main(): Promise<void> {
 
   console.log(
     '[verify-artifact-safety] PASS: the probe ran exactly once, failed at its own deliberate assertion, ' +
+      'wrote its failure-evidence file for the token-bearing page, ' +
       'and no canary substring was found in any captured output or generated artifact.',
   );
   process.exitCode = 0;

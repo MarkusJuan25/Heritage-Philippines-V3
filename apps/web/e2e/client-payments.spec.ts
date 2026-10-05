@@ -4,6 +4,7 @@ import type { Browser, Page } from '@playwright/test';
 import { generateRandomString, hashPassword } from 'better-auth/crypto';
 
 import { e2eIdentityHeaders, newIdentifiedContext } from './support/browser-identity';
+import { captureFailureEvidence } from './support/failure-evidence';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/test-database';
 
@@ -225,11 +226,16 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
   test.setTimeout(1_200_000);
   const prisma = createE2EPrismaRpcClient();
   recorded.tcUserId = tcAccount.userId;
+  // Every password this test generates or is given, for the D-059
+  // evidence capture's secret guard only (D-060). In memory; never
+  // logged or written. Raw invitation tokens are in recorded.rawTokens.
+  const evidenceGuardPasswords: string[] = [tcAccount.password];
 
   async function provisionClient(label: 'A' | 'B' | 'C'): Promise<ProvisionedClient> {
     const nameCanary = `E2E CP ${label} ${randomUUID()}`;
     const email = `e2e-cp-${label.toLowerCase()}-${randomUUID()}@example.test`;
     const clientPassword = generateRandomString(24, 'a-z', 'A-Z', '0-9', '-_');
+    evidenceGuardPasswords.push(clientPassword);
 
     await page.goto('/admin/leads/new');
     await page.getByLabel('Full name').fill(nameCanary);
@@ -476,6 +482,7 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     // 1. Staff accounts for this run (the TC comes from the fixture).
     const admin = await createStaffAccount(prisma, 'ADMIN_MANAGER');
     const finance = await createStaffAccount(prisma, 'FINANCE_ACCOUNTING');
+    evidenceGuardPasswords.push(admin.password, finance.password);
 
     // 2. TC builds two client chains through the real admin UI; C has no Booking.
     await page.goto('/login');
@@ -868,6 +875,11 @@ test('D-054 Stage 5: staff record a payment path that the client sees only once 
     );
   } catch (error) {
     primaryError = error;
+    // D-059 evidence, read only after the failure and before cleanup.
+    await captureFailureEvidence(page, test.info(), [
+      ...evidenceGuardPasswords,
+      ...recorded.rawTokens,
+    ]);
   } finally {
     // --- Spec-owned cleanup — unconditional, before the tcAccount
     // fixture's cleanupTestChain, and scoped by this run's recorded ids —
