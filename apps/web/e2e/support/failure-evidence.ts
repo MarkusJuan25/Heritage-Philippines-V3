@@ -15,8 +15,8 @@ import type { Page, TestInfo } from '@playwright/test';
 //     UI labels, React comment markers, browser enum values), or
 //   - a fixed placeholder such as `[segment]` or `[text]`, or
 //   - an index this file assigned (`[uuid#1]`, `rsc#2`), or
-//   - a lowercase tag name of at most 12 characters, or a React streaming
-//     id such as `B:0`.
+//   - a standard HTML or SVG tag name from a fixed list, or the kind of a
+//     React streaming id (`B:*`, `S:*`, `P:*`) without its value.
 // Everything else is a number or a boolean. Page text, input and attribute
 // values, raw URL path segments, raw query values, the URL fragment, raw
 // history.state values, cookies, headers, and request or response bodies
@@ -177,8 +177,34 @@ const DYNAMIC_PARAM_NAMES: ReadonlySet<string> = new Set([
 const DYNAMIC_PARAM_TYPES: ReadonlySet<string> = new Set(['d', 'c', 'oc', 'ci', 'di', 'oci']);
 
 const UUID_SHAPE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const TAG_SHAPE = /^[a-z][a-z0-9]{0,11}$/;
-const REACT_ID_SHAPE = /^[A-Z]:[0-9a-f]{1,6}$/;
+/**
+ * Standard HTML and SVG element names. Purpose: the shape of the rendered
+ * tree. A custom or unknown element name is page-chosen text, however
+ * short, so it becomes `[tag]` (this includes Next's own
+ * `next-route-announcer`).
+ */
+const STANDARD_TAGS: ReadonlySet<string> = new Set(
+  (
+    'a abbr address article aside b blockquote body br button caption circle code col ' +
+    'colgroup dd defs details dialog div dl dt em fieldset figcaption figure footer form g ' +
+    'h1 h2 h3 h4 h5 h6 head header hr html i img input label legend li line link main meta ' +
+    'nav noscript ol optgroup option p path polygon polyline pre rect script section select ' +
+    'small span strong style summary svg table tbody td template textarea tfoot th thead ' +
+    'time title tr ul use'
+  ).split(' '),
+);
+
+/**
+ * React's streaming ids, exactly as react-dom's server writes them with no
+ * identifier prefix: `B:` (Suspense boundary), `S:` (segment) or `P:`
+ * (placeholder) followed by a lowercase hexadecimal counter. Only the
+ * kind is written (`B:*`); the counter is not.
+ */
+const REACT_ID_SHAPE = /^([BSP]):[0-9a-f]{1,8}$/;
+
+function safeTag(tag: unknown): string {
+  return oneOf(STANDARD_TAGS, tag, '[tag]');
+}
 
 // ---------------------------------------------------------------------------
 // Raw page read. Runs inside the page; reads only. Its result stays in this
@@ -419,11 +445,11 @@ function skeletonLine(node: RawNode): string {
   if (node.kind === 'comment') {
     return `${indent}<!--${oneOf(KNOWN_COMMENTS, node.data, '[comment]')}-->`;
   }
-  const tag = TAG_SHAPE.test(node.tag) ? node.tag : '[tag]';
-  // An id is kept only in React's streaming form (`B:0`, `S:1`); any other
-  // id is recorded as present, without its value.
-  const id = node.id === '' ? '' : REACT_ID_SHAPE.test(node.id) ? ` id=${node.id}` : ' id';
-  return `${indent}<${tag}${id}${node.hidden === true ? ' hidden' : ''}>`;
+  // An id's value is never written. A React streaming id is reduced to
+  // its kind (`id=B:*`); any other id is recorded as present (`id`).
+  const reactKind = typeof node.id === 'string' ? REACT_ID_SHAPE.exec(node.id)?.[1] : undefined;
+  const id = node.id === '' ? '' : reactKind ? ` id=${reactKind}:*` : ' id';
+  return `${indent}<${safeTag(node.tag)}${id}${node.hidden === true ? ' hidden' : ''}>`;
 }
 
 type RouteTree = { segment: string; routes: Record<string, RouteTree> } | '[too-deep]';
@@ -498,6 +524,26 @@ function safeNumbers(numbers: Record<string, unknown>): Record<string, number | 
   return out;
 }
 
+/** The helper's lists, exported so the isolated validation can check every written string against them. */
+export const ALLOWED_WORDS = {
+  routeWords: ROUTE_WORDS,
+  queryKeys: QUERY_KEYS,
+  labels: KNOWN_LABELS,
+  comments: KNOWN_COMMENTS,
+  tags: STANDARD_TAGS,
+  initiatorTypes: INITIATOR_TYPES,
+  navigationTypes: NAVIGATION_TYPES,
+  readyStates: READY_STATES,
+  visibilityStates: VISIBILITY_STATES,
+  errorClasses: ERROR_CLASSES,
+  dynamicParamNames: DYNAMIC_PARAM_NAMES,
+  dynamicParamTypes: DYNAMIC_PARAM_TYPES,
+} as const;
+
+const LISTED_WORDS: ReadonlySet<string> = new Set(
+  Object.values(ALLOWED_WORDS).flatMap((words) => Array.from(words)),
+);
+
 /** Builds the only object that may be written. Exported for the isolated validation. */
 export function buildArtifact(raw: RawPageState) {
   const indexers: Indexers = { uuid: indexer('uuid'), rsc: indexer('rsc') };
@@ -528,7 +574,7 @@ export function buildArtifact(raw: RawPageState) {
       skeleton: raw.mainNodes.map(skeletonLine),
     },
     bodyChildren: raw.bodyChildren.slice(0, 40).map((child) => ({
-      tag: TAG_SHAPE.test(child.tag) ? child.tag : '[tag]',
+      tag: safeTag(child.tag),
       hasId: child.id !== '',
       hidden: child.hidden === true,
       childElementCount: finiteNumber(child.childElementCount),
@@ -601,10 +647,9 @@ export function mustRefuse(artifact: unknown, knownSecrets: readonly string[]): 
   const serialized = JSON.stringify(artifact);
   if (/token=/i.test(serialized)) return true;
   // No string value may hold 16 or more consecutive characters of the token
-  // and password alphabet. Apart from the listed route words, nothing the
-  // allowlist produces is that long.
+  // and password alphabet, unless that run is exactly a listed word.
   const hasLongRun = (value: string): boolean =>
-    value.split(/[/()]/).some((part) => !ROUTE_WORDS.has(part) && /[A-Za-z0-9_-]{16,}/.test(part));
+    (value.match(/[A-Za-z0-9_-]{16,}/g) ?? []).some((run) => !LISTED_WORDS.has(run));
   const values = stringValues(artifact);
   if (values.some(hasLongRun)) return true;
   // Checked both as written (JSON escapes a backslash) and as the plain

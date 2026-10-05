@@ -5,6 +5,7 @@ import { expect, test, type Page, type TestInfo } from '@playwright/test';
 
 import {
   buildArtifact,
+  ALLOWED_WORDS,
   captureFailureEvidence,
   mustRefuse,
   secretForms,
@@ -71,6 +72,10 @@ function pageHtml(): string {
     <p role="status">Status updated.</p>
     <p role="status">${TOKEN}</p>
     <x-${TOKEN}>custom element named after the token</x-${TOKEN}>
+    <zq7>short unknown element</zq7>
+    <div id="B:0"></div><div id="S:1f" hidden></div><template id="P:2"></template>
+    <div id="X:1"></div><div id="B:zz"></div><div id="B:0 ${TOKEN}"></div>
+    <div id="b:0"></div><div id="B:123456789"></div>
     <label>One-time invitation link
       <input value="${ORIGIN}/activate#token=${TOKEN}">
     </label>
@@ -79,6 +84,7 @@ function pageHtml(): string {
     ${everyForm}
   </section>
 </main>
+<zq8>short unknown element outside main</zq8>
 </body></html>`;
 }
 
@@ -192,6 +198,106 @@ async function captureWithOutput(
     console.log = original;
   }
   return { lines, threw };
+}
+
+// ---------------------------------------------------------------------------
+// Conformance: every string that is written, and every object key, must be
+// one the allowlist documents (D-060 Section 2). A string under a key this
+// check does not know fails, so a new field cannot be added unnoticed.
+// ---------------------------------------------------------------------------
+
+const FIXED_KEYS = new Set(
+  (
+    'note testProcess captureStartedAtEpochMs captureReadFinishedAtEpochMs pageClosed ' +
+    'pagesInContext pageState pageStateError clocks pageClockMs pageTimeOriginEpochMs ' +
+    'pageEpochMs location path query keys rsc hasFragment readyState visibilityState main ' +
+    'present nodeCount truncated commentCounts skeleton bodyChildren tag hasId hidden ' +
+    'childElementCount labels leadStatusBadge mainHeadings statusRegions label length ' +
+    'resourceTiming count mayBeIncomplete entries sameOrigin initiatorType startTime ' +
+    'responseStart responseEnd duration transferSize encodedBodySize decodedBodySize ' +
+    'responseStatus navigationTiming type domContentLoadedEventEnd loadEventEnd ' +
+    'historyState appRouterEntry renderedSearchLength routeTree segment routes'
+  ).split(' '),
+);
+
+const has = (set: ReadonlySet<string>, value: string): boolean => set.has(value);
+const alternation = (set: ReadonlySet<string>): string =>
+  Array.from(set, (word) => word.replace(/[$?!/&[\]]/g, '\\$&')).join('|');
+
+const SKELETON_LINE = new RegExp(
+  `^ {0,40}(?:#text\\(\\d+\\)|<!--(?:${alternation(ALLOWED_WORDS.comments)}|\\[comment\\])-->|` +
+    `<(?:${alternation(ALLOWED_WORDS.tags)}|\\[tag\\])(?: id=[BSP]:\\*| id)?(?: hidden)?>)$`,
+);
+const PATH_SEGMENT = /^(?:\[uuid#\d+\]|\[segment\])$/;
+const ROUTE_SEGMENT = new RegExp(
+  `^(?:__PAGE__|__PAGE__\\?\\[search\\]|__DEFAULT__|\\[segment\\]|\\[uuid#\\d+\\]|` +
+    `\\((?:${alternation(ALLOWED_WORDS.routeWords)}|\\[segment\\]|\\[uuid#\\d+\\])?\\)|` +
+    `\\[(?:${alternation(ALLOWED_WORDS.dynamicParamNames)}|\\[name\\])=(?:uuid#\\d+|\\[value\\]):` +
+    `(?:${alternation(ALLOWED_WORDS.dynamicParamTypes)}|\\?)\\])$`,
+);
+
+function stringIsAllowed(key: string, value: string): boolean {
+  switch (key) {
+    case 'note':
+      return /^Read once, after the test had already failed\./.test(value) && value.length < 200;
+    case 'path':
+      return value
+        .split('/')
+        .every(
+          (segment) =>
+            segment === '' || has(ALLOWED_WORDS.routeWords, segment) || PATH_SEGMENT.test(segment),
+        );
+    case 'keys':
+      return has(ALLOWED_WORDS.queryKeys, value) || value === '[key]' || value === '[unparsed]';
+    case 'rsc':
+      return /^rsc#\d+$/.test(value);
+    case 'readyState':
+      return has(ALLOWED_WORDS.readyStates, value) || value === '[other]';
+    case 'visibilityState':
+      return has(ALLOWED_WORDS.visibilityStates, value) || value === '[other]';
+    case 'skeleton':
+      return SKELETON_LINE.test(value);
+    case 'tag':
+      return has(ALLOWED_WORDS.tags, value) || value === '[tag]';
+    case 'label':
+      return has(ALLOWED_WORDS.labels, value) || value === '[text]';
+    case 'initiatorType':
+      return has(ALLOWED_WORDS.initiatorTypes, value) || value === '[other]';
+    case 'type':
+      return has(ALLOWED_WORDS.navigationTypes, value) || value === '[other]';
+    case 'segment':
+      return value === '' || has(ALLOWED_WORDS.routeWords, value) || ROUTE_SEGMENT.test(value);
+    case 'pageStateError':
+      return has(ALLOWED_WORDS.errorClasses, value) || value === 'other';
+    default:
+      return false;
+  }
+}
+
+/** Returns the number of strings and keys that are outside the documented allowlist. */
+function countViolations(value: unknown, key = '', parentKey = ''): number {
+  if (typeof value === 'string') return stringIsAllowed(key, value) ? 0 : 1;
+  if (Array.isArray(value)) {
+    return value.reduce<number>((sum, entry) => sum + countViolations(entry, key, parentKey), 0);
+  }
+  if (typeof value === 'object' && value !== null) {
+    let violations = 0;
+    for (const [childKey, child] of Object.entries(value)) {
+      const keyAllowed =
+        key === 'commentCounts'
+          ? has(ALLOWED_WORDS.comments, childKey) || childKey === '[comment]'
+          : key === 'routes'
+            ? childKey === 'children' || /^\[slot#\d+\]$/.test(childKey)
+            : FIXED_KEYS.has(childKey);
+      violations += keyAllowed ? 0 : 1;
+      // Under a counted or slot key, the child is checked as the container's kind.
+      const nextKey =
+        key === 'commentCounts' ? 'commentCounts#' : key === 'routes' ? 'routeTree' : childKey;
+      violations += countViolations(child, nextKey, key);
+    }
+    return violations;
+  }
+  return 0;
 }
 
 const FIXED_LINES = new Set([
@@ -316,6 +422,7 @@ test('buildArtifact is safe for raw fields a browser would not normally produce'
   };
   const artifact = buildArtifact(hostile);
   expectNoSecret(JSON.stringify(artifact));
+  expect(countViolations({ pageState: artifact })).toBe(0);
   expect(mustRefuse(artifact, SECRETS)).toBe(false);
 });
 
@@ -467,5 +574,61 @@ test('in the spec pattern, the original error survives every capture failure and
     expect(primaryError).toBe(original);
     expect(cleanupRan).toBe(true);
     expectFixedLinesOnly(lines);
+  }
+});
+
+test('every written string and key conforms to the documented allowlist', async ({
+  page,
+}, testInfo) => {
+  await openPageWithSecretsEverywhere(page);
+  await captureWithOutput(() => captureFailureEvidence(page, testInfo, []));
+  const saved = JSON.parse((await readFile(savedPath(testInfo))) ?? 'null') as unknown;
+  expect(saved !== null).toBe(true);
+  expect(countViolations(saved)).toBe(0);
+
+  // The check itself must be able to fail: one out-of-list string or key is one violation.
+  expect(countViolations({ pageState: { readyState: 'complete' } })).toBe(0);
+  expect(countViolations({ pageState: { readyState: TOKEN } })).toBe(1);
+  expect(countViolations({ pageState: { main: { skeleton: ['<zq7>'] } } })).toBe(1);
+  expect(countViolations({ pageState: { main: { skeleton: ['<div id=B:0>'] } } })).toBe(1);
+  expect(countViolations({ pageState: { location: { path: '/admin/zq7' } } })).toBe(1);
+  expect(countViolations({ pageState: { [TOKEN]: 1 } })).toBe(1);
+  expect(countViolations({ unknownField: 'x' })).toBe(2);
+});
+
+test('a short unknown element name is not exported, and a streaming id keeps only its kind', async ({
+  page,
+}, testInfo) => {
+  await openPageWithSecretsEverywhere(page);
+  await captureWithOutput(() => captureFailureEvidence(page, testInfo, []));
+  const saved = (await readFile(savedPath(testInfo))) ?? '';
+  const parsed = JSON.parse(saved) as { pageState: ReturnType<typeof buildArtifact> };
+  const lines = parsed.pageState.main.skeleton.map((line) => line.trim());
+
+  // `zq7` is a valid, short, non-standard element name the page chose.
+  expect(saved.includes('zq7')).toBe(false);
+  expect(lines.filter((line) => line === '<[tag]>').length).toBeGreaterThanOrEqual(2);
+  // B:0, S:1f and P:2 keep their kind only; the counter is not written.
+  expect(lines).toContain('<div id=B:*>');
+  expect(lines).toContain('<div id=S:* hidden>');
+  expect(lines).toContain('<template id=P:*>');
+  expect(/id=[BSP]:[0-9a-f]/.test(saved)).toBe(false);
+  // Anything else that merely resembles one is recorded as present, with no value.
+  expect(lines.filter((line) => line === '<div id>').length).toBe(5);
+  expect(parsed.pageState.bodyChildren.map((child) => child.tag)).toEqual(
+    ['div', 'main', 'zq8'].map((tag) => (tag === 'zq8' ? '[tag]' : tag)),
+  );
+});
+
+test('no listed word trips the guard, so the allowlist can never make the capture refuse', () => {
+  for (const [list, words] of Object.entries(ALLOWED_WORDS)) {
+    for (const word of words) {
+      // Route words are only ever written as path segments.
+      const written = list === 'routeWords' ? `/${word}/` : word;
+      expect(mustRefuse({ value: written }, [])).toBe(false);
+    }
+  }
+  for (const placeholder of ['[segment]', '[text]', '[tag]', '[key]', '[comment]', '[uuid#12]']) {
+    expect(mustRefuse({ value: placeholder }, [])).toBe(false);
   }
 });
