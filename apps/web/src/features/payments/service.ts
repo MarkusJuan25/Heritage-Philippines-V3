@@ -1531,7 +1531,7 @@ export type StaffBookingPaymentSummary = StaffBookingPaymentBalances & {
  * neither ever recomputes anything independently (D-054 §7's "never
  * recomputed independently in the client portal").
  */
-function buildBookingPaymentSummary(
+export function buildBookingPaymentSummary(
   bookingId: string,
   data: BookingPaymentSummaryData,
 ): StaffBookingPaymentBalances {

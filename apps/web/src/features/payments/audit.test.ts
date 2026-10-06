@@ -4,6 +4,7 @@ import { Prisma } from '@/generated/prisma/client';
 
 import {
   sanitizeAllocationSnapshot,
+  sanitizeFinanceExportSnapshot,
   sanitizePaymentPlanSnapshot,
   sanitizePaymentPlanWithdrawalAfterSnapshot,
   sanitizePaymentPlanWithdrawalBeforeSnapshot,
@@ -185,5 +186,46 @@ describe('sanitizeReceiptSnapshot', () => {
       amount: '100.00',
     });
     expect(snapshot).toEqual({ paymentId: 'payment-1', receiptNumber: 'r-1', amount: '100.00' });
+  });
+});
+
+describe('sanitizeFinanceExportSnapshot', () => {
+  const base = {
+    dataset: 'payments',
+    formatVersion: 'v1',
+    scope: 'ASSIGNED_BOOKINGS' as const,
+    actorRole: 'FINANCE_ACCOUNTING',
+    rowCount: 3,
+    bookingCount: 1,
+    asOf: '2026-10-06T09:00:00.000+08:00',
+  };
+
+  it('carries only the listed metadata, and a filter only when it was given', () => {
+    expect(sanitizeFinanceExportSnapshot(base)).toEqual(base);
+    expect(
+      sanitizeFinanceExportSnapshot({
+        ...base,
+        from: '2026-01-01',
+        to: '2026-01-31',
+        bookingReference: 'HPB-0123456789ABCDEF0123',
+        status: 'CONFIRMED',
+      }),
+    ).toEqual({
+      ...base,
+      from: '2026-01-01',
+      to: '2026-01-31',
+      bookingReference: 'HPB-0123456789ABCDEF0123',
+      status: 'CONFIRMED',
+    });
+  });
+
+  it('drops anything else on the source record, including rows and names', () => {
+    const snapshot = sanitizeFinanceExportSnapshot({
+      ...base,
+      rows: [['Juan Dela Cruz', '150.00']],
+      clientFullName: 'Juan Dela Cruz',
+    } as Parameters<typeof sanitizeFinanceExportSnapshot>[0]);
+    expect(snapshot).toEqual(base);
+    expect(JSON.stringify(snapshot)).not.toContain('Juan');
   });
 });

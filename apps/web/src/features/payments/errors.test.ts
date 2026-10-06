@@ -20,6 +20,7 @@ describe('PaymentError', () => {
     ['RECEIPT_NOT_PERMITTED', 409],
     ['IDEMPOTENCY_KEY_CONFLICT', 409],
     ['BOOKING_CURRENCY_NOT_SET', 409],
+    ['EXPORT_ROW_LIMIT_EXCEEDED', 422],
   ] as const)('maps %s to status %d', (code, status) => {
     const error = new PaymentError(code, 'message');
     expect(error.status).toBe(status);

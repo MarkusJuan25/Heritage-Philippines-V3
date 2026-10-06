@@ -16,9 +16,10 @@ export type PaymentErrorCode =
   | 'IDEMPOTENCY_KEY_CONFLICT'
   | 'BOOKING_CURRENCY_NOT_SET'
   | 'BOOKING_FINANCIALS_LOCKED'
-  | 'BOOKING_STATUS_NOT_PERMITTED';
+  | 'BOOKING_STATUS_NOT_PERMITTED'
+  | 'EXPORT_ROW_LIMIT_EXCEEDED';
 
-const STATUS_BY_CODE: Record<PaymentErrorCode, 403 | 404 | 409> = {
+const STATUS_BY_CODE: Record<PaymentErrorCode, 403 | 404 | 409 | 422> = {
   ROLE_NOT_PERMITTED: 403,
   BOOKING_NOT_FOUND: 404,
   BOOKING_FORBIDDEN: 403,
@@ -37,6 +38,7 @@ const STATUS_BY_CODE: Record<PaymentErrorCode, 403 | 404 | 409> = {
   BOOKING_CURRENCY_NOT_SET: 409,
   BOOKING_FINANCIALS_LOCKED: 409,
   BOOKING_STATUS_NOT_PERMITTED: 409,
+  EXPORT_ROW_LIMIT_EXCEEDED: 422,
 };
 
 /**
@@ -109,9 +111,13 @@ const STATUS_BY_CODE: Record<PaymentErrorCode, 403 | 404 | 409> = {
  * reject the others' keys, and refundPayment also rejects a key already held
  * by a status change, because a refund that completes a Payment writes its
  * own key there too.
+ * `EXPORT_ROW_LIMIT_EXCEEDED` refuses a finance export that would hold more
+ * rows than D-061 §5's limit. It is known only after the rows are counted,
+ * so it is not a validation error; the request is well-formed and must be
+ * narrowed (422). Nothing is truncated and no audit entry is written.
  */
 export class PaymentError extends Error {
-  readonly status: 403 | 404 | 409;
+  readonly status: 403 | 404 | 409 | 422;
   readonly code: PaymentErrorCode;
 
   constructor(code: PaymentErrorCode, message: string) {
