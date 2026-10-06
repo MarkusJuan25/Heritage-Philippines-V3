@@ -2906,6 +2906,37 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 
 ---
 
+## D-062 — Clarifications to D-061 Before Stage 2 (Basic Finance Exports)
+
+- **Status:** Accepted
+- **Date proposed:** October 6, 2026
+- **Date accepted:** October 6, 2026
+- **Context:** A read-only review made before D-061 Stage 2 found one contradiction between D-061's stage list and its transaction rule, and five places where the accepted wording does not determine what must be built. D-061 is Accepted and is not edited; this entry records the clarifications as a separate decision, as this log's closing rule requires. Where a clause below differs from D-061's wording, this entry governs. Checked for clause 3 against PostgreSQL 18, the version of the local database server: the documentation states that a Repeatable Read query "sees a snapshot as of the start of the first non-transaction-control statement in the transaction" and that `clock_timestamp()` "returns the actual current time, and therefore its value changes even within a single SQL statement"; the server source takes the transaction snapshot before the executor starts (`PortalStart` calls `GetTransactionSnapshot()` before `ExecutorStart`), and refuses `SET TRANSACTION ISOLATION LEVEL` once a snapshot exists, so the two transaction-control statements that open the transaction establish none.
+- **Decision:**
+
+  **1. Stages.** In D-061 §10, Stage 2 also includes the single repeatable-read transaction of D-061 §8: the actor recheck, the `asOf` reading, the row-limit check, and the audit insert. Stage 3 is the `POST` route, the admin form, and the statement of cross-site request protection; it adds no audit logic.
+
+  **2. Meaning of the audit event.** A `FINANCE_EXPORT_GENERATED` entry records that the rows it describes were read for export by the actor and that the read was committed. It is not evidence that a file was encoded, sent, or received. All conversion of values to text is done before the entry is inserted, so a conversion failure writes no entry. A failure while the already-converted rows are assembled into a file, after the commit, leaves the entry in place and produces no file.
+
+  **3. `asOf`.** `asOf` is the database server's `clock_timestamp()`, read by the transaction's first statement for a row that statement has already read, and taken to millisecond precision by ceiling: a reading that is not a whole millisecond becomes the next whole millisecond, and a reading that is already a whole millisecond is unchanged. On the assumption that the database server's clock does not step backwards, it is an upper bound, on that clock, for the changes in the file: no change in the file became visible later than `asOf`. It is not the instant of the snapshot, and no bound is stated on the interval between the snapshot and the reading. It does not promise that every change committed before `asOf` is in the file. It is not comparable with a time taken from any other clock, including the times recorded on the exported rows. The words "just after the snapshot" in D-061 §4 are withdrawn.
+
+  **4. Precision.** Every timestamp cell, including `asOf`, has exactly three fractional digits: `YYYY-MM-DDTHH:MM:SS.sss+08:00`. The filename's `<generatedAt>` remains whole seconds, obtained by dropping the fraction, and is a label only.
+
+  **5. `recordedAt`.** `recordedAt` is `Payment.createdAt`: the time the payment was entered into the system. It is not the time money was received.
+
+  **6. Date range.** "At most 366 days" counts both endpoints: a range from a day to that same day is one day.
+
+  **7. Stored data that breaks an invariant (additional clarification, accepted October 6, 2026).** D-061 §3 says every column outside its blank list "always has a value", and D-061 §4 says no exported amount is negative because derived values are "floored at zero or proven non-negative by D-019's rules". Both describe data the payments service keeps sound; neither says what an export does if stored data is not. This clause decides it: **the entire export is refused.** No blank is substituted, no value is clamped, no affected row is left out, and no stored data is changed. The refusal applies to exactly these cases, for any row the export would write:
+  - **A required currency is missing:** `currencyCode` is absent in `payments`, `refunds`, `allocations`, or `installments`. A Booking with a Payment or a PaymentPlan has a currency (D-019; D-054 §17 Rule 4); the payments service enforces that, and the database column is nullable. `bookings` cannot meet this case, because it reads only Bookings whose financials are set.
+  - **A derived value that D-019's formulas do not floor is below zero:** `derivedUnappliedCredit` (`bookings`); `derivedNetAllocated` and `derivedUnallocated` (`payments`); `derivedNetActive` (`allocations`); `derivedNetActiveAllocation` (`installments`). D-019 requires the service to guarantee, by verifying at write time, that unapplied Booking credit and every net active allocation never become negative, and that a Payment's active allocations never exceed its net contribution. No database constraint enforces these.
+
+  Nothing else is checked. Stored amounts are held above zero by the database's `*_amount_positive` constraints and are not rechecked. The derived values D-019 floors at zero — `derivedNetContribution`, `derivedNetConfirmedPaid`, `derivedRemainingBalance`, `derivedOverpayment`, `derivedOutstandingAmount`, and `derivedNextDueOutstandingAmount` — cannot be negative and are not checked; a defect that only such a floor would hide is therefore not detected by an export. The check runs inside the export's transaction before the audit entry is inserted, so a refusal rolls the transaction back: there is no file and no `FINANCE_EXPORT_GENERATED` entry. It is an integrity failure, not a request error and not a domain refusal: under D-055's rule for integrity backstops it propagates as an unknown error to the generic response. Its message names the column concerned and nothing from the data — no booking reference, client name, record identifier, or amount. Consequence, accepted with this clause: while such a record exists, every export whose scope and filters reach it is refused, including an unfiltered Admin / Manager export; an export that does not reach it is unaffected.
+
+- **Constraint:** This entry changes no earlier entry, including D-061, and not the Task Board or the blueprint. It decides nothing that D-061 §9 leaves open, and it does not authorize use with real client data.
+- **Effect:** Accepted October 6, 2026. D-061 Stage 2 is implemented against D-061 as clarified here. Stages 3 through 5 still require their own authorization.
+
+---
+
 ---
 
 Update this log when a decision's status changes; do not delete entries — supersede them.
