@@ -9,6 +9,7 @@ import { listPaymentBookingsSchema } from '@/features/payments/schemas';
 import { listPaymentBookingsForActor } from '@/features/payments/service';
 
 import { Pagination } from '../_components/Pagination';
+import { FinanceExportForm } from './_components/FinanceExportForm';
 import { PLAN_FILTER_LABELS } from './_components/labels';
 import { PaymentBookingList } from './_components/PaymentBookingList';
 import styles from './payments.module.css';
@@ -21,6 +22,8 @@ const ALLOWED_ROLES: readonly AppRole[] = [
   'TRAVEL_CONSULTANT',
   'FINANCE_ACCOUNTING',
 ];
+
+const EXPORT_ROLES: readonly AppRole[] = ['ADMIN_MANAGER', 'FINANCE_ACCOUNTING'];
 
 type PageSearchParams = Promise<{ [key: string]: string | string[] | undefined }>;
 
@@ -90,6 +93,10 @@ export default async function AdminPaymentsPage({
   }
 
   const filtered = Boolean(query.search || query.planState);
+  // Shown to the two roles that may export (D-061 §6). Showing it grants
+  // nothing: the route checks the session role and the service rechecks
+  // the stored role.
+  const canExport = authorize(user.role, EXPORT_ROLES).authorized;
 
   return (
     <div>
@@ -142,6 +149,13 @@ export default async function AdminPaymentsPage({
           <Pagination page={page} pageSize={pageSize} total={total} buildHref={buildHref} />
         </>
       )}
+
+      {canExport ? (
+        <section className={styles.section} aria-labelledby="finance-export-heading">
+          <h2 id="finance-export-heading">Export finance records</h2>
+          <FinanceExportForm />
+        </section>
+      ) : null}
     </div>
   );
 }

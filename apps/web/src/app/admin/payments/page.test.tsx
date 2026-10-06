@@ -179,4 +179,37 @@ describe('AdminPaymentsPage', () => {
       AdminPaymentsPage({ searchParams: searchParams({ page: '9', pageSize: '1' }) }),
     ).rejects.toThrow('REDIRECT:/admin/payments?page=2&pageSize=1');
   });
+
+  it.each(['ADMIN_MANAGER', 'FINANCE_ACCOUNTING'])(
+    'shows the finance export form to %s, with or without Bookings',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...FINANCE, role });
+      render(await AdminPaymentsPage({ searchParams: searchParams() }));
+
+      expect(screen.getByRole('heading', { name: 'Export finance records' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Records to export')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Download CSV' })).toBeInTheDocument();
+    },
+  );
+
+  it('does not show the finance export form to a Travel Consultant', async () => {
+    getCurrentUserMock.mockResolvedValue({ ...FINANCE, role: 'TRAVEL_CONSULTANT' });
+    listPaymentBookingsForActorMock.mockResolvedValue({ items: [header(1)], total: 1 });
+    render(await AdminPaymentsPage({ searchParams: searchParams() }));
+
+    expect(screen.getByRole('link', { name: 'HPB-REF1' })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Export finance records' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Download CSV' })).not.toBeInTheDocument();
+  });
+
+  it.each(['VISA_DOCUMENTATION', 'SYSTEM_ADMINISTRATOR'])(
+    'does not show the finance export form on the access-denied page for %s',
+    async (role) => {
+      getCurrentUserMock.mockResolvedValue({ ...FINANCE, role });
+      render(await AdminPaymentsPage({ searchParams: searchParams() }));
+      expect(screen.queryByRole('button', { name: 'Download CSV' })).not.toBeInTheDocument();
+    },
+  );
 });
