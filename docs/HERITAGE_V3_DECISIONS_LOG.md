@@ -2937,6 +2937,39 @@ Entries D-001 through D-009 were recorded on July 9, 2026 from the Phase 0 stake
 
 ---
 
+## D-063 — Cross-Site Request Policy and User Guidance for `POST /api/payments/exports` (D-061 Stage 3)
+
+- **Status:** Accepted
+- **Date proposed:** October 6, 2026
+- **Date accepted:** October 6, 2026
+- **Context:** D-061 §5 chose `POST` for the export request and said that `POST` "does not by itself stop a request sent from another site; the route needs the application's protection against cross-site requests, which this entry does not specify and Stage 3 must state." D-062 clause 1 placed that statement in Stage 3. Verified on `main` (`2140b17`) before this entry: no route in `apps/web/src` checked a request's origin, and the application has no cross-site request check of its own outside Better Auth's own `/api/auth` handlers. Verified in the installed Better Auth 1.6.23 source (`dist/cookies/index.mjs`): the session cookie is created with `sameSite: "lax"` and `httpOnly: true`, and with `secure` when the configured base URL is `https`; `apps/web/src/lib/auth/auth.ts` sets no `advanced` cookie option, so those defaults apply. This entry changes none of that.
+- **Decision:**
+
+  **1. Scope.** This policy applies to `POST /api/payments/exports` only. It changes no other route and no global authentication or cookie setting.
+
+  **2. Content type.** The request must be sent as `application/json`, alone or with `charset=utf-8`. Any other media type, charset, or parameter, and a missing `Content-Type`, is refused with `415`.
+
+  **3. Origin.** The request's `Origin` header must name the application's own origin exactly: the same scheme, the same hostname, and the same effective port, where an explicit default port (`:443` for `https`, `:80` for `http`) equals an omitted one. A missing `Origin`, the literal `null`, a malformed value, and any other origin are refused with a generic `403` — the same body the role guard returns, so the refusal does not say which check failed. A malformed value is refused as it stands; it is never repaired. In particular a value carrying a path (including a lone trailing slash), credentials, a query, a fragment, surrounding space, uppercase letters, a port with a leading zero, or more than one origin is refused, even if stripping the extra part would leave the trusted origin.
+
+  **4. Source of trust.** The trusted origin is taken from the server's existing `BETTER_AUTH_URL`, the required, start-up-validated base URL the application is served from. No new variable is introduced. The request's `Host`, `X-Forwarded-*`, and `Referer` headers are never consulted, and there is no `Referer` fallback when `Origin` is absent.
+
+  **5. No cross-origin sharing.** The endpoint sends no `Access-Control-*` header and so grants no preflight. A browser on another origin can neither send the required `application/json` request without a preflight nor read a response.
+
+  **6. Order.** Authentication and the session-role check run first (`401`, `403`), then the origin check (`403`), then the content-type check (`415`), then JSON parsing (`400`). Each refuses before the export service is called, so none of them opens a transaction or writes an audit entry. The service then validates the request and rechecks the actor's stored role as D-061 §6 and D-062 require.
+
+  **7. What `SameSite=Lax` does and does not cover.** With `Lax`, a browser does not attach the session cookie to a `POST` made from another site, which already stops the ordinary cross-site case. It does attach it to a `POST` from a different origin on the same site — for example another subdomain of the same registrable domain. The origin check in clause 3 is what refuses that case; it does not depend on the cookie setting, and the cookie setting is not changed.
+
+  **8. Error mapping.** `FinanceExportRequestError` and a body that is not JSON map to the existing `400` `VALIDATION_ERROR` envelope. A `PaymentError` keeps its own status: `403` `ROLE_NOT_PERMITTED`, `422` `EXPORT_ROW_LIMIT_EXCEEDED`. Every other error — including an integrity refusal under D-062 clause 7 — reaches the role guard's generic `500` and is not described to the client.
+
+  **9. Guidance shown to the user.** For `422` the form asks the user to narrow the filters that dataset permits. For `403` it says "This export request was not permitted. If this keeps happening, contact your administrator." — one wording for every `403`, because the response does not say whether a role or the request's origin was refused, and the form does not guess. For `500`, and for any response it does not recognise, it says the export could not be generated and to contact the administrator if it persists, and it shows nothing about the cause. The form keeps what the user entered after every error.
+
+- **Consequence:** A user who opens the application at an origin other than the configured one — for example `http://127.0.0.1:3000` while `BETTER_AUTH_URL` is `http://localhost:3000` — is refused by this endpoint. That is the intended behaviour of an exact match, not a defect; the remedy is to use the configured origin or to configure the origin actually served.
+- **Constraint:** This entry changes no earlier entry. It does not authorize use with real client data (D-061 §9), and it decides nothing about any other endpoint.
+- **Deferred:** Browser verification of the download (D-061 Stage 4) and the handling of downloaded files as test artifacts.
+- **Effect:** Accepted October 6, 2026. D-061 Stage 3 is implemented against this entry.
+
+---
+
 ---
 
 Update this log when a decision's status changes; do not delete entries — supersede them.
