@@ -149,6 +149,7 @@ Authentication implementation and library selection are separate, not-yet-starte
 - Custom cryptography, password hashing, or session-token schemes are not implemented from scratch — ADR-001 requires a vetted, actively maintained library, selected after reviewing its official documentation, before this boundary is implemented.
 - Illustrative naming (not final): something like `AUTH_SESSION_SECRET`. The exact variable name(s) are finalized when the auth library is selected and documented in `apps/web/.env.example` and this guide at that time, per `.claude/rules/validation-deployment.md`'s "Environment Variables" rule.
 - Staging and production session secrets are independent; rotating one never invalidates the other's sessions.
+- **`BETTER_AUTH_URL` is also the trusted origin for `POST /api/payments/exports`** (D-063). That endpoint accepts a request only when its `Origin` header matches this variable's scheme, hostname, and effective port exactly, and it trusts no `Host`, `X-Forwarded-*`, or `Referer` header. In every environment the variable must therefore be the origin users actually open the application at; a mismatch (for example `127.0.0.1` against `localhost`, or `http` against `https`) makes that endpoint refuse every request with `403`. No additional variable is involved.
 
 ## 10. Transactional-Email Boundaries
 
