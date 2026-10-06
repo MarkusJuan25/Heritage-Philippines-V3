@@ -69,15 +69,15 @@ describe('encodeCsv', () => {
         ],
       ),
     );
-    expect(text).toBe('﻿"a","b"\r\n"1",""\r\n"x","y"\r\n');
+    expect(text).toBe('\uFEFF"a","b"\r\n"1",""\r\n"x","y"\r\n');
   });
 
   it('writes only the header row when there are no rows', () => {
-    expect(decode(encodeCsv(['a', 'b'], []))).toBe('﻿"a","b"\r\n');
+    expect(decode(encodeCsv(['a', 'b'], []))).toBe('\uFEFF"a","b"\r\n');
   });
 
   it('doubles embedded double quotes', () => {
-    expect(decode(encodeCsv(['a'], [['say "hi"']]))).toBe('﻿"a"\r\n"say ""hi"""\r\n');
+    expect(decode(encodeCsv(['a'], [['say "hi"']]))).toBe('\uFEFF"a"\r\n"say ""hi"""\r\n');
   });
 
   it.each([

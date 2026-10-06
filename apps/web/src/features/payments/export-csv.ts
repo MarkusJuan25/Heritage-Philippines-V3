@@ -5,7 +5,9 @@ import type { Prisma } from '@/generated/prisma/client';
 // dependency is used — the format is a few lines
 // (.claude/rules/architecture.md).
 
-const UTF8_BYTE_ORDER_MARK = '﻿';
+// Written as an escape on purpose: the character itself is invisible in
+// source and an editor can remove it without anyone noticing.
+const UTF8_BYTE_ORDER_MARK = '\uFEFF';
 const ROW_ENDING = '\r\n';
 const PHILIPPINE_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
 

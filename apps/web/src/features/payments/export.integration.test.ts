@@ -1574,8 +1574,11 @@ describe.skipIf(!hasTestDatabaseUrl)('finance export integration (real database)
       const original = pg.Client.prototype.query;
       const overlapping: string[] = [];
       let statements = 0;
+      let statementsWithBothFields = 0;
       const patched = function (this: QueryableClient, ...args: unknown[]) {
         statements += 1;
+        if (Array.isArray(this._queryQueue) && '_activeQuery' in this)
+          statementsWithBothFields += 1;
         const busy = (this._queryQueue?.length ?? 0) > 0 || Boolean(this._activeQuery);
         if (busy) {
           const first = args[0] as string | { text?: string } | undefined;
@@ -1609,8 +1612,11 @@ describe.skipIf(!hasTestDatabaseUrl)('finance export integration (real database)
       } finally {
         pg.Client.prototype.query = original;
       }
-      // The interception saw the export's statements, so an empty list means none overlapped.
+      // The interception saw the export's statements, and on every one of
+      // them the two private pg fields the detector reads were present — so
+      // an empty list means none overlapped, not that the detector is blind.
       expect(statements).toBeGreaterThan(50);
+      expect(statementsWithBothFields).toBe(statements);
       expect(overlapping).toEqual([]);
     });
   });
