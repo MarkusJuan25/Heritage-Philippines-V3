@@ -13,6 +13,7 @@ export const PAYMENT_AUDIT_ACTIONS = {
   PAYMENT_ALLOCATION_CREATED: 'PAYMENT_ALLOCATION_CREATED',
   PAYMENT_ALLOCATION_REVERSED: 'PAYMENT_ALLOCATION_REVERSED',
   RECEIPT_ISSUED: 'RECEIPT_ISSUED',
+  FINANCE_EXPORT_GENERATED: 'FINANCE_EXPORT_GENERATED',
 } as const;
 
 // AuditLog.entityType per audited entity — each audit entry's `entityId`
@@ -24,6 +25,9 @@ export const PAYMENT_PLAN_AUDIT_ENTITY_TYPE = 'PaymentPlan';
 export const PAYMENT_AUDIT_ENTITY_TYPE = 'Payment';
 export const PAYMENT_ALLOCATION_AUDIT_ENTITY_TYPE = 'PaymentAllocation';
 export const RECEIPT_AUDIT_ENTITY_TYPE = 'Receipt';
+// D-061 §8: a finance export has no table of its own; `entityId` is an
+// identifier generated for that one export.
+export const FINANCE_EXPORT_AUDIT_ENTITY_TYPE = 'FinanceExport';
 
 export type AuditPaymentPlanSnapshot = {
   id: string;
@@ -231,5 +235,53 @@ export function sanitizeReceiptSnapshot(record: {
     paymentId: record.paymentId,
     receiptNumber: record.receiptNumber,
     amount: record.amount,
+  };
+}
+
+export type AuditFinanceExportSnapshot = {
+  dataset: string;
+  formatVersion: string;
+  from?: string;
+  to?: string;
+  bookingReference?: string;
+  status?: string;
+  scope: 'ALL_BOOKINGS' | 'ASSIGNED_BOOKINGS';
+  actorRole: string;
+  rowCount: number;
+  bookingCount: number;
+  asOf: string;
+};
+
+/**
+ * The afterState of a `FINANCE_EXPORT_GENERATED` entry (D-061 §8): what was
+ * asked for and how much was read, never an exported row, amount, or client
+ * name. A filter appears only when it was given. Per D-062 clause 2 the
+ * entry records a committed read for export, not a delivered file.
+ */
+export function sanitizeFinanceExportSnapshot(record: {
+  dataset: string;
+  formatVersion: string;
+  from?: string;
+  to?: string;
+  bookingReference?: string;
+  status?: string;
+  scope: 'ALL_BOOKINGS' | 'ASSIGNED_BOOKINGS';
+  actorRole: string;
+  rowCount: number;
+  bookingCount: number;
+  asOf: string;
+}): AuditFinanceExportSnapshot {
+  return {
+    dataset: record.dataset,
+    formatVersion: record.formatVersion,
+    ...(record.from !== undefined ? { from: record.from } : {}),
+    ...(record.to !== undefined ? { to: record.to } : {}),
+    ...(record.bookingReference !== undefined ? { bookingReference: record.bookingReference } : {}),
+    ...(record.status !== undefined ? { status: record.status } : {}),
+    scope: record.scope,
+    actorRole: record.actorRole,
+    rowCount: record.rowCount,
+    bookingCount: record.bookingCount,
+    asOf: record.asOf,
   };
 }

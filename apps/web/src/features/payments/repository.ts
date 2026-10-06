@@ -63,7 +63,7 @@ export type PaymentActor = {
  * Explicitly exhaustive over `PaymentActor`'s three roles, matching
  * `clientAssignmentFilter`'s own exhaustiveness-guard pattern.
  */
-function bookingAssignmentFilter(actor: PaymentActor): Prisma.BookingWhereInput | undefined {
+export function bookingAssignmentFilter(actor: PaymentActor): Prisma.BookingWhereInput | undefined {
   switch (actor.role) {
     case 'ADMIN_MANAGER':
       return undefined;
