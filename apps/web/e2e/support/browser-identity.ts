@@ -47,6 +47,7 @@ const SPEC_ADDRESS_BASE = {
   'client-support': 50,
   'lead-to-booking-flow': 60,
   'client-payments': 70,
+  'finance-export': 80,
 } as const;
 
 export type E2EIdentitySpec = keyof typeof SPEC_ADDRESS_BASE;
