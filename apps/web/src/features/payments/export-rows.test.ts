@@ -371,14 +371,19 @@ describe('shapePaymentRow', () => {
       refunds: [{ amount: money('70.00') }, { amount: money('50.00') }],
     });
 
-    it.each(['CONFIRMED', 'REFUNDED', 'REVERSED', 'PENDING'] as const)(
-      'refuses a %s payment whose refunds add up to more than its amount',
-      (status) => {
-        expect(() => shapePaymentRow(excess(status), AS_OF)).toThrow(
-          INTEGRITY('payments.derivedRefundedTotal'),
-        );
-      },
-    );
+    it.each([
+      'PENDING',
+      'CONFIRMED',
+      'REJECTED',
+      'CANCELLED',
+      'FAILED',
+      'REFUNDED',
+      'REVERSED',
+    ] as const)('refuses a %s payment whose refunds add up to more than its amount', (status) => {
+      expect(() => shapePaymentRow(excess(status), AS_OF)).toThrow(
+        INTEGRITY('payments.derivedRefundedTotal'),
+      );
+    });
 
     it('refuses by one cent', () => {
       expect(() =>
