@@ -4,6 +4,7 @@ import type { Browser, BrowserContext, Page } from '@playwright/test';
 import { generateRandomString, hashPassword } from 'better-auth/crypto';
 
 import { e2eIdentityHeaders, newIdentifiedContext } from './support/browser-identity';
+import { closeContextsAndVerify } from './support/context-closure';
 import { expect, test } from './support/fixtures';
 import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/test-database';
 
@@ -13,10 +14,13 @@ import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/tes
 // Chromium against the isolated E2E server, and the file the browser
 // actually downloads is read and checked.
 //
-// D-064 (downloaded-file artifact policy) governs every line here:
+// D-064 (downloaded-file artifact policy), as amended by D-065, governs
+// every line here:
 //   - The download is read from Playwright's own temporary file, in memory.
 //     It is never copied, never saved, and deleted as soon as it has been
-//     read; every browser context is closed at the end.
+//     read, before any check is made on it; every browser context of the
+//     worker's browser is asked to close at the end, and that they closed
+//     is verified (D-065 §6).
 //   - Only byte length, SHA-256, the header row (when it is exactly the
 //     expected one), row count, and named pass/fail results are printed.
 //   - No CSV row, client name, booking reference, amount, or response body
@@ -24,9 +28,10 @@ import { createE2EPrismaRpcClient, type E2EPrismaRpcClient } from './support/tes
 //     checked as named true/false results, and every browser, setup, and
 //     database step of the test body runs inside `guarded`, which replaces
 //     any error with its fixed step name. Closing contexts and the cleanup
-//     and residue steps run outside it: a close error is discarded, and a
-//     cleanup or residue failure reports an error class name and record
-//     ids only (D-033 §9).
+//     and residue steps run outside it: the text of a close error is
+//     discarded, and whether closing succeeded is reported by a fixed name
+//     (D-065 §6); a cleanup or residue failure reports an error class name
+//     and record ids only (D-033 §9).
 //   - Trace, screenshot, and video are off.
 //   - No locator matcher (`expect(locator)…`) is used anywhere in this
 //     file, and none may be added: when one fails, Playwright attaches its
@@ -66,6 +71,11 @@ test.use({ navigationTimeout: 60_000 });
 // from a page.
 let previousNoCopyPrompt: string | undefined;
 let everyTestPassed = true;
+
+// D-065 §6(c): the fixed names under which a closure that could not be
+// established is reported. Neither carries anything from a page or an error.
+const CLOSURE_CHECK = "Cleanup: every browser context of this worker's browser is closed";
+const CLOSURE_FAILURE = 'Stage 4 teardown failed: browser contexts could not be confirmed closed.';
 
 /** Every browser context this file opens, so `afterEach` can close them. */
 const openContexts: BrowserContext[] = [];
@@ -129,18 +139,14 @@ async function removeRunData(prisma: E2EPrismaRpcClient): Promise<void> {
 }
 
 /**
- * Closes every page first, then its context, for every context of the
- * browser — this file's own and any an earlier spec file in the same
- * worker left open. A close error is discarded.
+ * Asks every page first, then its context, to close, for every context of
+ * the browser — this file's own and any an earlier spec file in the same
+ * worker left open — and reports whether they are all closed afterwards
+ * (D-065 §4, §6). The text of a close error is discarded; the outcome is
+ * not. It never throws, so the database cleanup after it always runs.
  */
-async function closeEveryContext(browser: Browser, fixtureContext: BrowserContext): Promise<void> {
-  const contexts = new Set([...openContexts, fixtureContext, ...browser.contexts()]);
-  for (const context of contexts) {
-    for (const openPage of context.pages()) {
-      await openPage.close().catch(() => undefined);
-    }
-    await context.close().catch(() => undefined);
-  }
+function closeEveryContext(browser: Browser, fixtureContext: BrowserContext): Promise<boolean> {
+  return closeContextsAndVerify(browser, [...openContexts, fixtureContext]);
 }
 
 test.beforeAll(() => {
@@ -152,25 +158,32 @@ test.beforeAll(() => {
 // before the fixtures are torn down.
 test.afterEach(async ({ page, browser }, testInfo) => {
   if (testInfo.status !== testInfo.expectedStatus) everyTestPassed = false;
-  await closeEveryContext(browser, page.context());
+  // D-065 §6: a closure that cannot be established fails the run, keeps
+  // the variable set, and does not stop the database cleanup below.
+  const contextsClosed = await closeEveryContext(browser, page.context());
+  if (!contextsClosed) everyTestPassed = false;
+  const failures: string[] = contextsClosed ? [] : [CLOSURE_FAILURE];
   // Only reached with work to do when the test body did not get as far as
   // its own cleanup (a time-out) or that cleanup failed. It must run
   // before the fixture's, which cannot delete a Booking that still has
   // payments.
-  if (recorded.databaseCleaned) return;
-  const prisma = createE2EPrismaRpcClient();
-  try {
-    await removeRunData(prisma);
-    recorded.databaseCleaned = true;
-    console.log('[stage4] CLEANUP completed by afterEach.');
-  } catch (error) {
-    const kind = error instanceof Error ? error.constructor.name : typeof error;
-    throw new Error(
-      `Stage 4 cleanup failed in afterEach (${kind}). Manual removal may be needed for: ${recordedIds()}.`,
-    );
-  } finally {
-    await prisma.$disconnect();
+  if (!recorded.databaseCleaned) {
+    const prisma = createE2EPrismaRpcClient();
+    try {
+      await removeRunData(prisma);
+      recorded.databaseCleaned = true;
+      console.log('[stage4] CLEANUP completed by afterEach.');
+    } catch (error) {
+      const kind = error instanceof Error ? error.constructor.name : typeof error;
+      failures.push(
+        `Stage 4 cleanup failed in afterEach (${kind}). Manual removal may be needed for: ${recordedIds()}.`,
+      );
+    } finally {
+      await prisma.$disconnect();
+    }
   }
+  // Added to the test's own error, never in place of it (D-065 §6(d)).
+  if (failures.length > 0) throw new Error(failures.join(' '));
 });
 
 // After the fixture's own teardown: nothing this run created may remain.
@@ -975,8 +988,10 @@ test('D-061 Stage 4: the finance export downloads in a real browser for each per
   } finally {
     // Closing every context — the fixture's own included — removes
     // Playwright's temporary downloads and leaves no open page (D-064).
-    // `afterEach` closes them again, for the case where this is not reached.
-    await closeEveryContext(browser, page.context());
+    // That they closed is a named check (D-065 §6), and the database
+    // cleanup below runs whatever its outcome. `afterEach` closes and
+    // checks again, for the case where this is not reached.
+    check(CLOSURE_CHECK, await closeEveryContext(browser, page.context()));
     try {
       await removeRunData(prisma);
       // The fixture removes the Travel Consultant and the lead, client,
