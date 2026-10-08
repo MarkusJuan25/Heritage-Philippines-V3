@@ -21,8 +21,8 @@ import type { buildBookingPaymentSummary } from './service';
 // never from a second implementation. Every conversion of a value to text
 // happens here, inside the export transaction and before the audit entry
 // is inserted, so a conversion failure writes no entry (D-062 clause 2).
-// The integrity checks of D-062 clause 7 happen here too, for the same
-// reason: a refusal rolls the transaction back.
+// The integrity checks of D-062 clause 7, as amended by D-067, happen here
+// too, for the same reason: a refusal rolls the transaction back.
 
 /** The exact header row of each dataset, in order (D-061 §3). */
 export const FINANCE_EXPORT_COLUMNS = {
@@ -147,6 +147,36 @@ function formatBoolean(value: boolean): string {
   return value ? 'true' : 'false';
 }
 
+/**
+ * D-067: stored refunds for one payment that add up to more than its
+ * amount refuse the whole export, like every other case of D-062 clause 7.
+ * D-019 has the service guarantee that refund totals never exceed the
+ * payment amount; no database constraint does. The comparison is made on
+ * the stored values, whatever the payment's status, and before the shared
+ * net-contribution calculation is called — that calculation returns zero
+ * for such a payment, which would hide it. Refunds that equal the amount
+ * are a fully refunded payment and are not a violation.
+ */
+function requireRefundsWithinAmount(
+  column: string,
+  payment: { amount: Prisma.Decimal; refundedTotal: Prisma.Decimal },
+): void {
+  if (payment.refundedTotal.greaterThan(payment.amount)) throw integrityFailure(column);
+}
+
+/**
+ * D-067 for `bookings`: every payment of a Booking counts toward that
+ * row's `derivedNetConfirmedPaid` and the values built from it, so each is
+ * checked before the Booking's summary is calculated.
+ */
+export function requireBookingRefundsWithinAmounts(
+  payments: readonly { amount: Prisma.Decimal; refundedTotal: Prisma.Decimal }[],
+): void {
+  for (const payment of payments) {
+    requireRefundsWithinAmount('bookings.derivedNetConfirmedPaid', payment);
+  }
+}
+
 export function shapeBookingRow(
   input: {
     summary: ReturnType<typeof buildBookingPaymentSummary>;
@@ -192,6 +222,10 @@ export function shapePaymentRow(payment: PaymentExportRecord, asOf: string): str
     return change ? formatManilaTimestamp(change.createdAt) : BLANK;
   };
   const refundedTotal = sumAmounts(payment.refunds);
+  requireRefundsWithinAmount('payments.derivedRefundedTotal', {
+    amount: payment.amount,
+    refundedTotal,
+  });
   const netContribution = computeNetContribution({
     status: payment.status,
     amount: payment.amount,

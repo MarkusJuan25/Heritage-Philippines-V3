@@ -10,6 +10,7 @@ import type {
 } from './export-repository';
 import {
   FINANCE_EXPORT_COLUMNS,
+  requireBookingRefundsWithinAmounts,
   shapeAllocationRow,
   shapeBookingRow,
   shapeInstallmentRow,
@@ -362,6 +363,91 @@ describe('shapePaymentRow', () => {
     ).toThrow(INTEGRITY('payments.currencyCode'));
   });
 
+  describe('stored refunds against the payment amount (D-067)', () => {
+    const excess = (status: PaymentExportRecord['status']): PaymentExportRecord => ({
+      ...base,
+      amount: money('100.00'),
+      status,
+      refunds: [{ amount: money('70.00') }, { amount: money('50.00') }],
+    });
+
+    it.each([
+      'PENDING',
+      'CONFIRMED',
+      'REJECTED',
+      'CANCELLED',
+      'FAILED',
+      'REFUNDED',
+      'REVERSED',
+    ] as const)('refuses a %s payment whose refunds add up to more than its amount', (status) => {
+      expect(() => shapePaymentRow(excess(status), AS_OF)).toThrow(
+        INTEGRITY('payments.derivedRefundedTotal'),
+      );
+    });
+
+    it('refuses by one cent', () => {
+      expect(() =>
+        shapePaymentRow(
+          {
+            ...base,
+            amount: money('100.00'),
+            status: 'CONFIRMED',
+            refunds: [{ amount: money('100.01') }],
+          },
+          AS_OF,
+        ),
+      ).toThrow(INTEGRITY('payments.derivedRefundedTotal'));
+    });
+
+    it('serves refunds that equal the amount exactly: a fully refunded payment', () => {
+      const row = asRecord(
+        'payments',
+        shapePaymentRow(
+          {
+            ...base,
+            amount: money('100.00'),
+            status: 'REFUNDED',
+            refunds: [{ amount: money('70.00') }, { amount: money('30.00') }],
+          },
+          AS_OF,
+        ),
+      );
+      expect(row.amount).toBe('100.00');
+      expect(row.derivedRefundedTotal).toBe('100.00');
+      expect(row.derivedNetContribution).toBe('0.00');
+    });
+
+    it('serves a partly refunded payment, and the within-row identity holds', () => {
+      const row = asRecord(
+        'payments',
+        shapePaymentRow(
+          {
+            ...base,
+            amount: money('100.00'),
+            status: 'CONFIRMED',
+            refunds: [{ amount: money('30.00') }],
+          },
+          AS_OF,
+        ),
+      );
+      expect(row.derivedRefundedTotal).toBe('30.00');
+      expect(row.derivedNetContribution).toBe('70.00');
+    });
+
+    it('keeps the payment, its amounts, and its client out of the refusal', () => {
+      let message = '';
+      try {
+        shapePaymentRow(excess('CONFIRMED'), AS_OF);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toBe(INTEGRITY('payments.derivedRefundedTotal'));
+      for (const secret of [REFERENCE, 'Juan', 'payment-1', '100.00', '120.00', '70.00']) {
+        expect(message).not.toContain(secret);
+      }
+    });
+  });
+
   it('refuses a payment whose active allocations exceed its net contribution', () => {
     expect(() =>
       shapePaymentRow(
@@ -421,6 +507,23 @@ describe('shapePaymentRow', () => {
     for (const secret of [REFERENCE, 'Juan', 'payment-1', '200.00']) {
       expect(message).not.toContain(secret);
     }
+  });
+});
+
+describe('requireBookingRefundsWithinAmounts (D-067)', () => {
+  const sound = { amount: money('100.00'), refundedTotal: money('40.00') };
+  const full = { amount: money('100.00'), refundedTotal: money('100.00') };
+  const excess = { amount: money('100.00'), refundedTotal: money('120.00') };
+
+  it('accepts a Booking with no payment, sound payments, and a fully refunded payment', () => {
+    expect(() => requireBookingRefundsWithinAmounts([])).not.toThrow();
+    expect(() => requireBookingRefundsWithinAmounts([sound, full])).not.toThrow();
+  });
+
+  it('refuses the Booking when any one of its payments has refunds above its amount', () => {
+    expect(() => requireBookingRefundsWithinAmounts([sound, excess, full])).toThrow(
+      INTEGRITY('bookings.derivedNetConfirmedPaid'),
+    );
   });
 });
 
