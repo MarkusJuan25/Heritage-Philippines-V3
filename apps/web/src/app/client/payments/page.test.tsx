@@ -181,6 +181,16 @@ describe('ClientPaymentsPage — access and ownership', () => {
     getClientPaymentSummariesMock.mockRejectedValue(new Error('database down'));
     await expect(ClientPaymentsPage()).rejects.toThrow('database down');
   });
+
+  it('sends a stored-refund integrity failure to the error boundary: the whole page, no card (D-068)', async () => {
+    // What `getClientPaymentSummaries` rejects with when any one of the
+    // client's approved-plan Bookings is affected; it returns no list.
+    const integrity = new Error(
+      "Payment summary refused: stored refunds exceed a payment's amount.",
+    );
+    getClientPaymentSummariesMock.mockRejectedValue(integrity);
+    await expect(ClientPaymentsPage()).rejects.toBe(integrity);
+  });
 });
 
 describe('ClientPaymentsPage — states', () => {

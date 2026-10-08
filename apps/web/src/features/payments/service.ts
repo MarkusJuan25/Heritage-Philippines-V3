@@ -1259,6 +1259,32 @@ export async function issueReceipt(
   }
 }
 
+// --- Stored refunds exceeding a payment's amount (D-068) ---
+
+/**
+ * D-068: stored refunds for one payment that add up to more than its
+ * amount are corrupt stored data — D-019 has the service guarantee that
+ * refund totals never exceed the payment amount, and no database
+ * constraint does. `computeNetContribution` returns zero for such a
+ * payment, which would hide it, so the comparison is made on the stored
+ * values before that calculation is called, whatever the payment's status.
+ * Refunds that equal the amount are a fully refunded payment and are not
+ * a violation; the formulas for valid data are unchanged.
+ *
+ * A plain `Error`, deliberately not a `PaymentError`: like every other
+ * integrity backstop in this codebase (D-055) it propagates as an unknown
+ * error to the generic response. The message names the refused operation
+ * and nothing from the data — no reference, name, identifier, or amount.
+ */
+function requireStoredRefundsWithinAmount(
+  operation: 'Payment summary' | 'Allocation',
+  payment: { amount: Prisma.Decimal; refundedTotal: Prisma.Decimal },
+): void {
+  if (payment.refundedTotal.greaterThan(payment.amount)) {
+    throw new Error(`${operation} refused: stored refunds exceed a payment's amount.`);
+  }
+}
+
 // --- Allocation and allocation reversal (D-054 §4; D-019) ---
 
 /**
@@ -1311,6 +1337,9 @@ export async function createAllocation(
       }
 
       const refundedTotal = await repository.sumRefundsForPayment(tx, payment.id);
+      // D-068: an integrity failure, not `ALLOCATION_NOT_PERMITTED` — it
+      // leaves this transaction as an unknown error, writing nothing.
+      requireStoredRefundsWithinAmount('Allocation', { amount: payment.amount, refundedTotal });
       const netContribution = computeNetContribution({
         status: payment.status,
         amount: payment.amount,
@@ -1530,11 +1559,22 @@ export type StaffBookingPaymentSummary = StaffBookingPaymentBalances & {
  * for both the staff-facing summary and the client-facing summary below, so
  * neither ever recomputes anything independently (D-054 §7's "never
  * recomputed independently in the client portal").
+ *
+ * D-068: every payment of the Booking is first checked for stored refunds
+ * exceeding its amount, so no caller is given a summary computed from such
+ * data. `getClientPaymentSummaries` therefore fails whole when any one of
+ * the client's approved-plan Bookings is affected. The finance export makes
+ * its own D-067 check before calling this, so its column-named refusal is
+ * the one an export reports.
  */
 export function buildBookingPaymentSummary(
   bookingId: string,
   data: BookingPaymentSummaryData,
 ): StaffBookingPaymentBalances {
+  for (const payment of data.payments) {
+    requireStoredRefundsWithinAmount('Payment summary', payment);
+  }
+
   const netConfirmedAmountPaid = computeNetConfirmedAmountPaid(
     data.payments.map((payment) => ({
       status: payment.status,

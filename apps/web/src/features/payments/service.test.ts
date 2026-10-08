@@ -59,6 +59,7 @@ import type { AuthenticatedUser } from '@/lib/auth/guards';
 import { PaymentError } from './errors';
 import {
   approvePaymentPlan,
+  buildBookingPaymentSummary,
   confirmPayment,
   createAllocation,
   getBookingPaymentSummaryForStaff,
@@ -1669,6 +1670,131 @@ describe('createAllocation', () => {
     await expectPaymentError(createAllocation(FINANCE, input), 'ALLOCATION_NOT_PERMITTED');
   });
 
+  describe('stored refunds exceeding the payment amount (D-068)', () => {
+    const ALLOCATION_INTEGRITY = "Allocation refused: stored refunds exceed a payment's amount.";
+
+    function approvedInstallment() {
+      repositoryMocks.findInstallmentForAllocation.mockResolvedValue({
+        id: 'inst-1',
+        bookingId: 'booking-1',
+        amount: d('100.00'),
+        planStatus: 'APPROVED',
+      });
+    }
+
+    it.each([
+      'PENDING',
+      'CONFIRMED',
+      'REJECTED',
+      'CANCELLED',
+      'FAILED',
+      'REFUNDED',
+      'REVERSED',
+    ] as const)(
+      'refuses a %s payment as an unknown integrity error, writing nothing',
+      async (status) => {
+        repositoryMocks.findPaymentForActor.mockResolvedValue({
+          id: 'payment-1',
+          bookingId: 'booking-1',
+          status,
+          amount: d('100.00'),
+        });
+        approvedInstallment();
+        repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('120.00'));
+
+        const promise = createAllocation(FINANCE, input);
+        await expect(promise).rejects.toThrow(ALLOCATION_INTEGRITY);
+        await expect(promise).rejects.not.toBeInstanceOf(PaymentError);
+        // Checked on the total already read in this transaction, before
+        // the net-contribution arithmetic and the reads that follow it.
+        expect(repositoryMocks.sumRefundsForPayment).toHaveBeenCalledWith(TX_CLIENT, 'payment-1');
+        expect(repositoryMocks.sumNetActiveAllocationsForPayment).not.toHaveBeenCalled();
+        expect(repositoryMocks.sumNetActiveAllocationsForInstallment).not.toHaveBeenCalled();
+        expect(repositoryMocks.createAllocation).not.toHaveBeenCalled();
+        expect(repositoryMocks.insertAuditLog).not.toHaveBeenCalled();
+        // Not a write conflict: never retried.
+        expect(transactionMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('refuses by one cent, and the message carries nothing from the data', async () => {
+      repositoryMocks.findPaymentForActor.mockResolvedValue({
+        id: 'payment-1',
+        bookingId: 'booking-1',
+        status: 'CONFIRMED',
+        amount: d('100.00'),
+      });
+      approvedInstallment();
+      repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('100.01'));
+
+      const error = await createAllocation(FINANCE, input).then(
+        () => null,
+        (caught: unknown) => caught as Error,
+      );
+      expect(error?.message).toBe(ALLOCATION_INTEGRITY);
+      for (const secret of ['payment-1', 'booking-1', 'inst-1', '100.00', '100.01', '50.00']) {
+        expect(error?.message).not.toContain(secret);
+      }
+    });
+
+    it('treats refunds exactly equal to the amount as valid data: the existing 409 applies', async () => {
+      repositoryMocks.findPaymentForActor.mockResolvedValue({
+        id: 'payment-1',
+        bookingId: 'booking-1',
+        status: 'REFUNDED',
+        amount: d('100.00'),
+      });
+      approvedInstallment();
+      repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('100.00'));
+
+      await expectPaymentError(createAllocation(FINANCE, input), 'ALLOCATION_NOT_PERMITTED');
+      expect(repositoryMocks.sumNetActiveAllocationsForPayment).toHaveBeenCalled();
+    });
+
+    it('keeps the earlier refusals first: an unassigned actor learns nothing', async () => {
+      repositoryMocks.findPaymentForActor.mockResolvedValue(null);
+      repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('120.00'));
+
+      await expectPaymentError(createAllocation(FINANCE, input), 'PAYMENT_FORBIDDEN');
+      expect(repositoryMocks.sumRefundsForPayment).not.toHaveBeenCalled();
+    });
+
+    it('keeps the earlier refusals first: an unapproved plan is still ALLOCATION_NOT_PERMITTED', async () => {
+      repositoryMocks.findPaymentForActor.mockResolvedValue({
+        id: 'payment-1',
+        bookingId: 'booking-1',
+        status: 'CONFIRMED',
+        amount: d('100.00'),
+      });
+      repositoryMocks.findInstallmentForAllocation.mockResolvedValue({
+        id: 'inst-1',
+        bookingId: 'booking-1',
+        amount: d('100.00'),
+        planStatus: 'PROPOSED',
+      });
+      repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('120.00'));
+
+      await expectPaymentError(createAllocation(FINANCE, input), 'ALLOCATION_NOT_PERMITTED');
+      expect(repositoryMocks.sumRefundsForPayment).not.toHaveBeenCalled();
+    });
+
+    it('answers a replayed key with its earlier allocation, without reading refunds', async () => {
+      const existing = {
+        id: 'alloc-1',
+        paymentId: 'payment-1',
+        installmentId: 'inst-1',
+        amount: d('50.00'),
+      };
+      repositoryMocks.findAllocationByIdempotencyKey.mockResolvedValue(existing);
+      repositoryMocks.findPaymentForActor.mockResolvedValue({ id: 'payment-1' });
+      repositoryMocks.sumRefundsForPayment.mockResolvedValue(d('120.00'));
+
+      await expect(createAllocation(FINANCE, input)).resolves.toEqual(existing);
+      expect(repositoryMocks.sumRefundsForPayment).not.toHaveBeenCalled();
+      expect(repositoryMocks.createAllocation).not.toHaveBeenCalled();
+    });
+  });
+
   it('is idempotent by key', async () => {
     const existing = {
       id: 'alloc-1',
@@ -1998,6 +2124,133 @@ describe('getClientPaymentSummaries', () => {
     expect(summary?.nextPaymentDue).toBeNull();
     expect(summary?.nextPaymentDueAmount).toBeNull();
     expect(summary?.remainingBalance?.toFixed(2)).toBe('0.00');
+  });
+});
+
+describe('payment summaries refuse stored refunds exceeding a payment amount (D-068)', () => {
+  const SUMMARY_INTEGRITY = "Payment summary refused: stored refunds exceed a payment's amount.";
+  const STATUSES = [
+    'PENDING',
+    'CONFIRMED',
+    'REJECTED',
+    'CANCELLED',
+    'FAILED',
+    'REFUNDED',
+    'REVERSED',
+  ] as const;
+
+  /** `summaryDataFor`'s Booking with its one payment in `status`. */
+  function dataWith(status: (typeof STATUSES)[number], refunded: string) {
+    const data = summaryDataFor({ paymentAmount: '100.00', refunded });
+    return {
+      ...data,
+      booking: { ...data.booking, status: 'CONFIRMED' as const },
+      payments: [{ ...data.payments[0]!, status }],
+    };
+  }
+
+  it.each(STATUSES)(
+    'the staff summary refuses a %s payment refunded above its amount',
+    async (status) => {
+      repositoryMocks.findBookingFinancialsForActor.mockResolvedValue({ id: 'booking-1' });
+      repositoryMocks.findBookingPaymentSummaryData.mockResolvedValue(dataWith(status, '120.00'));
+
+      const promise = getBookingPaymentSummaryForStaff(FINANCE, 'booking-1');
+      await expect(promise).rejects.toThrow(SUMMARY_INTEGRITY);
+      await expect(promise).rejects.not.toBeInstanceOf(PaymentError);
+    },
+  );
+
+  it.each(STATUSES)('buildBookingPaymentSummary itself refuses a %s payment', (status) => {
+    expect(() => buildBookingPaymentSummary('booking-1', dataWith(status, '120.00'))).toThrow(
+      SUMMARY_INTEGRITY,
+    );
+  });
+
+  it('refuses by one cent, and the message carries nothing from the data', () => {
+    let message = '';
+    try {
+      buildBookingPaymentSummary('booking-1', dataWith('CONFIRMED', '100.01'));
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(SUMMARY_INTEGRITY);
+    for (const secret of [
+      'booking-1',
+      'HPB-CLIENT1',
+      'payment-1',
+      'client-1',
+      '100.00',
+      '100.01',
+    ]) {
+      expect(message).not.toContain(secret);
+    }
+  });
+
+  it('refuses when any one of several payments is affected', () => {
+    const data = dataWith('CONFIRMED', '0.00');
+    const broken = { ...data.payments[0]!, id: 'payment-2', refundedTotal: d('100.01') };
+    expect(() =>
+      buildBookingPaymentSummary('booking-1', { ...data, payments: [data.payments[0]!, broken] }),
+    ).toThrow(SUMMARY_INTEGRITY);
+  });
+
+  it.each(STATUSES)(
+    'serves a %s payment refunded for exactly its amount, with the unchanged formulas',
+    (status) => {
+      const summary = buildBookingPaymentSummary('booking-1', dataWith(status, '100.00'));
+      expect(summary.confirmedAmountPaid.toFixed(2)).toBe('0.00');
+      expect(summary.remainingBalance?.toFixed(2)).toBe('500.00');
+    },
+  );
+
+  it('serves partly refunded and unrefunded payments unchanged', () => {
+    const partly = buildBookingPaymentSummary('booking-1', dataWith('CONFIRMED', '30.00'));
+    expect(partly.confirmedAmountPaid.toFixed(2)).toBe('70.00');
+    expect(partly.remainingBalance?.toFixed(2)).toBe('430.00');
+    const none = buildBookingPaymentSummary('booking-1', dataWith('CONFIRMED', '0.00'));
+    expect(none.confirmedAmountPaid.toFixed(2)).toBe('100.00');
+    expect(none.remainingBalance?.toFixed(2)).toBe('400.00');
+  });
+
+  it('keeps staff authorization first: an unassigned actor gets BOOKING_FORBIDDEN and no data read', async () => {
+    repositoryMocks.findBookingFinancialsForActor.mockResolvedValue(null);
+    repositoryMocks.findBookingPaymentSummaryData.mockResolvedValue(
+      dataWith('CONFIRMED', '120.00'),
+    );
+
+    await expectPaymentError(
+      getBookingPaymentSummaryForStaff(TRAVEL_CONSULTANT, 'booking-1'),
+      'BOOKING_FORBIDDEN',
+    );
+    expect(repositoryMocks.findBookingPaymentSummaryData).not.toHaveBeenCalled();
+  });
+
+  it('keeps client ownership first: a client refused access gets BOOKING_FORBIDDEN and no data read', async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: false, status: 403 });
+    repositoryMocks.findApprovedBookingIdsForClient.mockResolvedValue(['booking-1']);
+    repositoryMocks.findBookingPaymentSummaryData.mockResolvedValue(
+      dataWith('CONFIRMED', '120.00'),
+    );
+
+    await expectPaymentError(
+      getClientPaymentSummaries(CLIENT_USER, 'client-1'),
+      'BOOKING_FORBIDDEN',
+    );
+    expect(repositoryMocks.findApprovedBookingIdsForClient).not.toHaveBeenCalled();
+    expect(repositoryMocks.findBookingPaymentSummaryData).not.toHaveBeenCalled();
+  });
+
+  it("fails the client's whole list when one approved-plan Booking is affected: no partial list", async () => {
+    authorizationMocks.canAccessClient.mockResolvedValue({ allowed: true });
+    repositoryMocks.findApprovedBookingIdsForClient.mockResolvedValue(['booking-1', 'booking-2']);
+    repositoryMocks.findBookingPaymentSummaryData
+      .mockResolvedValueOnce(dataWith('CONFIRMED', '0.00'))
+      .mockResolvedValueOnce(dataWith('CONFIRMED', '120.00'));
+
+    const promise = getClientPaymentSummaries(CLIENT_USER, 'client-1');
+    await expect(promise).rejects.toThrow(SUMMARY_INTEGRITY);
+    await expect(promise).rejects.not.toBeInstanceOf(PaymentError);
   });
 });
 
