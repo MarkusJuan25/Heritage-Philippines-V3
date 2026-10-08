@@ -1886,6 +1886,218 @@ describe.skipIf(!hasTestDatabaseUrl)('payments service integration (real databas
     expect(otherSummaries[0]!.payments.map((p) => p.id)).toEqual([other.paymentId]);
   });
 
+  it('refuses summaries and new allocations while a payment has stored refunds exceeding its amount, and serves them again once it does not (D-068)', async () => {
+    const SUMMARY_INTEGRITY = "Payment summary refused: stored refunds exceed a payment's amount.";
+    const ALLOCATION_INTEGRITY = "Allocation refused: stored refunds exceed a payment's amount.";
+
+    // One client with two approved-plan Bookings: `affected` has a
+    // confirmed 100.00 payment, `healthy` has no payment. A second client
+    // with their own Booking, to show the failure does not cross clients.
+    const affected = await createPaidBookingFixture('100.00');
+    const healthy = await createAssignedBookingFixture('800.00', affected.clientId);
+    const healthyPlan = await proposePaymentPlan(tcActor, {
+      bookingId: healthy.bookingId,
+      installments: [
+        { sequenceNumber: 1, isDeposit: true, amount: '800.00', dueDate: '2026-11-01' },
+      ],
+    });
+    await approvePaymentPlan(financeActor, { paymentPlanId: healthyPlan.id });
+    const other = await createPaidBookingFixture('80.00');
+    const clientUser = await createUserFixture('CLIENT');
+    const otherUser = await createUserFixture('CLIENT');
+    await prisma!.clientProfile.create({
+      data: { id: randomUUID(), userId: clientUser.id, clientId: affected.clientId },
+    });
+    await prisma!.clientProfile.create({
+      data: { id: randomUUID(), userId: otherUser.id, clientId: other.clientId },
+    });
+    const installment = await prisma!.installment.findFirstOrThrow({
+      where: { paymentPlan: { bookingId: affected.bookingId } },
+    });
+    const allocationAudits = () =>
+      prisma!.auditLog.count({
+        where: { actorId: financeActor.id, action: 'PAYMENT_ALLOCATION_CREATED' },
+      });
+    const allocationCount = () =>
+      prisma!.paymentAllocation.count({ where: { paymentId: affected.paymentId } });
+
+    // Valid data first: an allocation of 20.00, then a 70.00 refund from
+    // the payment's unallocated credit. Net contribution 30.00.
+    const firstKey = randomUUID();
+    const first = await createAllocation(financeActor, {
+      paymentId: affected.paymentId,
+      installmentId: installment.id,
+      amount: '20.00',
+      idempotencyKey: firstKey,
+    });
+    await refundPayment(financeActor, {
+      paymentId: affected.paymentId,
+      amount: '70.00',
+      reason: 'Fixture refund',
+      idempotencyKey: randomUUID(),
+    });
+    const validStaff = await getBookingPaymentSummaryForStaff(financeActor, affected.bookingId);
+    expect(validStaff.confirmedAmountPaid.toFixed(2)).toBe('30.00');
+    expect(validStaff.remainingBalance?.toFixed(2)).toBe('470.00');
+    expect(
+      (await getClientPaymentSummaries(clientUser, affected.clientId))
+        .map((summary) => summary.bookingId)
+        .sort(),
+    ).toEqual([affected.bookingId, healthy.bookingId].sort());
+
+    // Read before the direct write, so that nothing awaited stands between
+    // that write and the `try` whose `finally` removes it.
+    const auditsBefore = await allocationAudits();
+
+    // A further 50.00 written directly: positive, so the amount constraint
+    // accepts it. Refunds are now 120.00 against a 100.00 payment.
+    const brokenId = randomUUID();
+    await prisma!.paymentRefund.create({
+      data: {
+        id: brokenId,
+        paymentId: affected.paymentId,
+        amount: '50.00',
+        reason: 'Direct write for the integrity test',
+        performedByStaffUserId: financeActor.id,
+        idempotencyKey: randomUUID(),
+      },
+    });
+    try {
+      const affectedBooking = await prisma!.booking.findUniqueOrThrow({
+        where: { id: affected.bookingId },
+      });
+      const secrets = [
+        affected.bookingId,
+        affected.paymentId,
+        affected.clientId,
+        affectedBooking.bookingReference,
+        '100.00',
+        '120.00',
+        '70.00',
+        '50.00',
+      ];
+      const expectIntegrity = async (promise: Promise<unknown>, message: string) => {
+        const error = await promise.then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toBeInstanceOf(PaymentError);
+        expect((error as Error).message).toBe(message);
+        for (const secret of secrets) expect((error as Error).message).not.toContain(secret);
+      };
+
+      // Staff: only this Booking's summary is refused, for each role that
+      // may read it; the client's other Booking and the list still read.
+      await expectIntegrity(
+        getBookingPaymentSummaryForStaff(adminActor, affected.bookingId),
+        SUMMARY_INTEGRITY,
+      );
+      await expectIntegrity(
+        getBookingPaymentSummaryForStaff(tcActor, affected.bookingId),
+        SUMMARY_INTEGRITY,
+      );
+      await expectIntegrity(
+        getBookingPaymentSummaryForStaff(financeActor, affected.bookingId),
+        SUMMARY_INTEGRITY,
+      );
+      await expect(
+        getBookingPaymentSummaryForStaff(financeActor, healthy.bookingId),
+      ).resolves.toMatchObject({ bookingId: healthy.bookingId });
+      const listed = await listPaymentBookingsForActor(financeActor, {
+        search: affectedBooking.bookingReference,
+        page: 1,
+        pageSize: 20,
+      });
+      expect(listed.items.map((item) => item.id)).toEqual([affected.bookingId]);
+
+      // Authorization is decided first: an unassigned actor still gets the
+      // ordinary refusal and learns nothing about the stored data.
+      await expect(
+        getBookingPaymentSummaryForStaff(unassignedTcActor, affected.bookingId),
+      ).rejects.toMatchObject({ code: 'BOOKING_FORBIDDEN' });
+      await expect(getClientPaymentSummaries(otherUser, affected.clientId)).rejects.toMatchObject({
+        code: 'BOOKING_FORBIDDEN',
+      });
+
+      // Client: the whole list is refused — the healthy Booking is not
+      // returned on its own. Another client is unaffected.
+      await expectIntegrity(
+        getClientPaymentSummaries(clientUser, affected.clientId),
+        SUMMARY_INTEGRITY,
+      );
+      expect(
+        (await getClientPaymentSummaries(otherUser, other.clientId)).map((s) => s.bookingId),
+      ).toEqual([other.bookingId]);
+
+      // A new allocation is refused as an integrity failure, with no
+      // allocation and no audit entry written.
+      await expectIntegrity(
+        createAllocation(financeActor, {
+          paymentId: affected.paymentId,
+          installmentId: installment.id,
+          amount: '5.00',
+          idempotencyKey: randomUUID(),
+        }),
+        ALLOCATION_INTEGRITY,
+      );
+      expect(await allocationCount()).toBe(1);
+      expect(await allocationAudits()).toBe(auditsBefore);
+      // An unassigned actor's request is still the ordinary refusal.
+      const unassignedFinance = await createUserFixture('FINANCE_ACCOUNTING');
+      await expect(
+        createAllocation(unassignedFinance, {
+          paymentId: affected.paymentId,
+          installmentId: installment.id,
+          amount: '5.00',
+          idempotencyKey: randomUUID(),
+        }),
+      ).rejects.toMatchObject({ code: 'PAYMENT_FORBIDDEN' });
+
+      // A replay of the earlier allocation's key is answered as before.
+      await expect(
+        createAllocation(financeActor, {
+          paymentId: affected.paymentId,
+          installmentId: installment.id,
+          amount: '20.00',
+          idempotencyKey: firstKey,
+        }),
+      ).resolves.toMatchObject({ id: first.id });
+      expect(await allocationCount()).toBe(1);
+      expect(await allocationAudits()).toBe(auditsBefore);
+
+      // Nothing stored is changed by a refusal.
+      expect(await prisma!.paymentRefund.count({ where: { paymentId: affected.paymentId } })).toBe(
+        2,
+      );
+      expect(
+        (await prisma!.payment.findUniqueOrThrow({ where: { id: affected.paymentId } })).status,
+      ).toBe('CONFIRMED');
+    } finally {
+      await prisma!.paymentRefund.delete({ where: { id: brokenId } });
+    }
+
+    // With the direct write removed, the same reads and a new allocation
+    // within the 30.00 net contribution are served.
+    const staffAfter = await getBookingPaymentSummaryForStaff(financeActor, affected.bookingId);
+    expect(staffAfter.confirmedAmountPaid.toFixed(2)).toBe('30.00');
+    expect(
+      (await getClientPaymentSummaries(clientUser, affected.clientId))
+        .map((summary) => summary.bookingId)
+        .sort(),
+    ).toEqual([affected.bookingId, healthy.bookingId].sort());
+    await expect(
+      createAllocation(financeActor, {
+        paymentId: affected.paymentId,
+        installmentId: installment.id,
+        amount: '10.00',
+        idempotencyKey: randomUUID(),
+      }),
+    ).resolves.toMatchObject({ paymentId: affected.paymentId });
+    expect(await allocationCount()).toBe(2);
+    expect(await allocationAudits()).toBe(auditsBefore + 1);
+  });
+
   it('shows one client only the Booking whose plan is approved while another of their Bookings is proposed-only, then both once the second plan is approved (D-054 §7)', async () => {
     const approved = await createAssignedBookingFixture('500.00');
     const proposedOnly = await createAssignedBookingFixture('800.00', approved.clientId);
