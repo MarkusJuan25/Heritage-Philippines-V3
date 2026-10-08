@@ -15,6 +15,7 @@ import * as exportRepository from './export-repository';
 import type { FinanceExportActor } from './export-repository';
 import {
   FINANCE_EXPORT_COLUMNS,
+  requireBookingRefundsWithinAmounts,
   shapeAllocationRow,
   shapeBookingRow,
   shapeInstallmentRow,
@@ -82,16 +83,19 @@ async function readAndShapeRows(
   switch (request.dataset) {
     case 'bookings': {
       const records = await exportRepository.findBookingExportRecords(tx, actor, request);
-      return records.map((record) =>
-        shapeBookingRow(
+      return records.map((record) => {
+        // D-067: checked before the summary is calculated, which would
+        // otherwise count such a payment as contributing zero.
+        requireBookingRefundsWithinAmounts(record.data.payments);
+        return shapeBookingRow(
           {
             summary: buildBookingPaymentSummary(record.data.booking.id, record.data),
             planStatus: record.data.plan?.status ?? null,
             clientFullName: record.clientFullName,
           },
           asOf,
-        ),
-      );
+        );
+      });
     }
     case 'payments': {
       const records = await exportRepository.findPaymentExportRecords(tx, actor, request);
@@ -130,7 +134,7 @@ async function readAndShapeRows(
  *    not the session's, decides the scope; (c) the rows are counted and an
  *    over-limit request is refused; (d) the rows are read and converted to
  *    text, and an export that meets stored data breaking an invariant of
- *    D-062 clause 7 is refused whole; (e) the audit entry is inserted with
+ *    D-062 clause 7 or D-067 is refused whole; (e) the audit entry is inserted with
  *    the counts just read.
  * 3. Commit.
  * 4. Only then are the already-converted rows assembled into the file.

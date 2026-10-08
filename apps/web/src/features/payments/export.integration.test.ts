@@ -1999,6 +1999,102 @@ describe.skipIf(!hasTestDatabaseUrl)('finance export integration (real database)
       expect(served.map((row) => row.derivedNetActive)).toEqual(['50.00']);
     });
 
+    it('refuses a payment whose stored refunds exceed its amount, and its Booking (D-067)', async () => {
+      const { finance, fixture, paymentId } = await isolatedFixture(
+        'Integrity Excess Refund Client',
+      );
+      const request = (dataset: string) => ({ dataset, bookingReference: fixture.reference });
+      const secrets = [
+        fixture.reference,
+        'Integrity Excess Refund Client',
+        paymentId,
+        '100.00',
+        '120.00',
+        '70.00',
+        '50.00',
+      ];
+      // 70.00 refunded through the service, which accepts it.
+      await refundPayment(finance, {
+        paymentId,
+        amount: '70.00',
+        reason: 'Fixture refund',
+        idempotencyKey: randomUUID(),
+      });
+
+      // A further 50.00 written directly: positive, so the amount constraint
+      // accepts it; `refundPayment` refuses it. Refunds are now 120.00
+      // against a 100.00 payment.
+      const brokenId = randomUUID();
+      await prisma!.paymentRefund.create({
+        data: {
+          id: brokenId,
+          paymentId,
+          amount: '50.00',
+          reason: 'Direct write for the integrity test',
+          performedByStaffUserId: finance.id,
+          idempotencyKey: randomUUID(),
+        },
+      });
+      try {
+        // No successful export, and so no audit entry, for either dataset
+        // that uses the payment's contribution.
+        await expectRefused(finance, request('payments'), 'payments.derivedRefundedTotal', secrets);
+        await expectRefused(
+          finance,
+          request('bookings'),
+          'bookings.derivedNetConfirmedPaid',
+          secrets,
+        );
+        // Nothing stored is changed by a refusal.
+        expect(await prisma!.paymentRefund.count({ where: { paymentId } })).toBe(2);
+        expect((await prisma!.payment.findUniqueOrThrow({ where: { id: paymentId } })).status).toBe(
+          'CONFIRMED',
+        );
+      } finally {
+        await prisma!.paymentRefund.delete({ where: { id: brokenId } });
+      }
+
+      // With the direct write removed the same requests are served, and the
+      // within-row identity holds on the row.
+      const payments = parseExport(await runExport(finance, request('payments'))).rows;
+      expect(payments).toHaveLength(1);
+      expect(payments[0]!.amount).toBe('100.00');
+      expect(payments[0]!.derivedRefundedTotal).toBe('70.00');
+      expect(payments[0]!.derivedNetContribution).toBe('30.00');
+      const bookings = parseExport(await runExport(finance, request('bookings'))).rows;
+      expect(bookings.map((row) => row.derivedNetConfirmedPaid)).toEqual(['30.00']);
+      expect(await exportEntries(finance.id)).toHaveLength(2);
+    });
+
+    it('serves a payment refunded for exactly its amount (D-067)', async () => {
+      const { finance, fixture, paymentId } = await isolatedFixture('Integrity Full Refund Client');
+      const request = (dataset: string) => ({ dataset, bookingReference: fixture.reference });
+      await refundPayment(finance, {
+        paymentId,
+        amount: '60.00',
+        reason: 'Fixture refund',
+        idempotencyKey: randomUUID(),
+      });
+      await refundPayment(finance, {
+        paymentId,
+        amount: '40.00',
+        reason: 'Fixture refund',
+        idempotencyKey: randomUUID(),
+      });
+
+      const payments = parseExport(await runExport(finance, request('payments'))).rows;
+      expect(payments).toHaveLength(1);
+      expect(payments[0]!.status).toBe('REFUNDED');
+      expect(payments[0]!.amount).toBe('100.00');
+      expect(payments[0]!.derivedRefundedTotal).toBe('100.00');
+      expect(payments[0]!.derivedNetContribution).toBe('0.00');
+      const bookings = parseExport(await runExport(finance, request('bookings'))).rows;
+      expect(bookings.map((row) => row.derivedNetConfirmedPaid)).toEqual(['0.00']);
+      expect(parseExport(await runExport(finance, request('refunds'))).rows).toHaveLength(2);
+      // Three served exports, three entries.
+      expect(await exportEntries(finance.id)).toHaveLength(3);
+    });
+
     it('refuses the whole export, not only the affected row', async () => {
       const { finance, fixture, installmentId, paymentId } = await isolatedFixture(
         'Integrity Whole Export Client',
